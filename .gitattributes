@@ -1,0 +1,4 @@
+# 윈도우 배치 파일은 저장소에도 CRLF 그대로 둔다 (ZIP으로 받아도 바로 실행되게)
+*.bat -text
+*.py text eol=lf
+*.md text eol=lf

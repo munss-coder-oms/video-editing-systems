@@ -1,0 +1,8 @@
+[project]
+name = "video-editing-systems"
+version = "0.1.0"
+description = "영상 편집 자동화: 음량 자동 정리 + 다빈치 리졸브(무료판) 내보내기"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

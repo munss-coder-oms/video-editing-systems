@@ -1,0 +1,14 @@
+# Miniconda 환경 정의. setup_windows.bat이 이 파일로 환경을 만든다.
+#   conda env update -n video-editing -f environment.yml --prune
+name: video-editing
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - ffmpeg          # 음량 분석·처리 (앱이 PATH에서 찾음)
+  - numpy           # 테스트용
+  - pytest          # 자동 테스트
+  - pip
+  - pip:
+      - PySide6>=6.6,<7
