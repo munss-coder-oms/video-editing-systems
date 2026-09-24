@@ -88,6 +88,16 @@ def main(argv: list[str] | None = None) -> int:
             native_message("영상 편집 자동화", "--smoke-test 다음에 영상 경로가 필요합니다.")
             return 2
         smoke_video = argv[1]
+        # 자동 검사에서는 알림 창을 띄우면 멈추므로 오류를 출력만 하고, 한글이 깨지지 않게 한다.
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, ValueError):
+                pass
+        sys.excepthook = lambda *exc: (
+            startup_log("오류\n" + "".join(traceback.format_exception(*exc))),
+            traceback.print_exception(*exc),
+        )
 
     try:
         app = QApplication(sys.argv[:1])
@@ -125,8 +135,8 @@ def _run_smoke_test(app, window, video: str, QTimer) -> int:
 
     def poll():
         if window.thread is None and window.result is not None:
-            print("SMOKE OK")
-            print(window.report.toPlainText())
+            print("SMOKE OK", flush=True)
+            print(window.report.toPlainText(), flush=True)
             outcome["code"] = 0
             app.quit()
         elif window.thread is None and window.stage.text() == "실패했습니다.":
@@ -137,7 +147,7 @@ def _run_smoke_test(app, window, video: str, QTimer) -> int:
     timer = QTimer()
     timer.timeout.connect(poll)
     timer.start(300)
-    QTimer.singleShot(300_000, app.quit)
+    QTimer.singleShot(300_000, lambda: (print("SMOKE FAIL: 5분 안에 끝나지 않음"), app.quit()))
     app.exec()
     return outcome["code"]
 
