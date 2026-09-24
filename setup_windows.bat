@@ -21,6 +21,10 @@ if not defined CONDA_BAT (
 )
 echo Using conda: %CONDA_BAT%
 
+rem Earlier versions installed PySide6 with pip, which clashes with conda-forge DLLs.
+rem Remove it first (does nothing on a fresh install).
+call "%CONDA_BAT%" run -n %ENV_NAME% python -m pip uninstall -y PySide6 PySide6_Essentials PySide6_Addons shiboken6 >nul 2>&1
+
 echo.
 echo [1/3] Creating / updating the "%ENV_NAME%" environment. The first time takes a few minutes...
 call "%CONDA_BAT%" env update -n %ENV_NAME% -f environment.yml --prune
