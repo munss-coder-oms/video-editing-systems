@@ -30,14 +30,14 @@ def check_python() -> str:
     return f"{sys.version.split()[0]} ({sys.executable})"
 
 
-def check_pyside() -> str:
+def _pyside_inproc() -> str:
     import PySide6
     from PySide6.QtWidgets import QApplication  # noqa: F401  (DLL까지 실제로 불러오는지 확인)
 
     return f"PySide6 {PySide6.__version__}"
 
 
-def check_qt_window() -> str:
+def _qt_window_inproc() -> str:
     from PySide6.QtWidgets import QApplication, QLabel
 
     app = QApplication.instance() or QApplication([])
@@ -46,6 +46,34 @@ def check_qt_window() -> str:
     app.processEvents()
     label.close()
     return f"창 만들기 성공 (플랫폼: {app.platformName()})"
+
+
+def _in_subprocess(func_name: str) -> Callable[[], str]:
+    """화면 라이브러리 점검은 따로 띄운 파이썬에서 한다.
+
+    DLL 충돌은 파이썬 오류가 아니라 프로세스가 통째로 죽는 경우가 있어서,
+    같은 프로세스에서 하면 결과 파일조차 못 남긴다.
+    """
+
+    def run() -> str:
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+        proc = subprocess.run(
+            [sys.executable, "-c", f"from app.diagnose import {func_name} as f; print(f())"],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, encoding="utf-8",
+            errors="replace", timeout=120, env=env, cwd=str(Path(__file__).resolve().parent.parent),
+        )
+        out = proc.stdout.strip().splitlines()
+        if proc.returncode == 0 and out:
+            return out[-1]
+        err = (proc.stderr or "").strip().splitlines()
+        detail = err[-1] if err else "출력 없음"
+        raise RuntimeError(f"종료 코드 {proc.returncode}: {detail}")
+
+    return run
+
+
+check_pyside = _in_subprocess("_pyside_inproc")
+check_qt_window = _in_subprocess("_qt_window_inproc")
 
 
 def check_tool(name: str) -> Callable[[], str]:
@@ -83,18 +111,26 @@ def check_engine() -> str:
         return f"시험 영상 처리 성공: {after.integrated:.1f} LUFS, 최대치 {after.true_peak:.1f} dBTP"
 
 
-def run_all() -> List[Result]:
-    return [
-        _check("파이썬", check_python),
-        _check("화면 라이브러리(PySide6)", check_pyside),
-        _check("창 띄우기", check_qt_window),
-        _check("FFmpeg", check_tool("ffmpeg")),
-        _check("FFprobe", check_tool("ffprobe")),
-        _check("음량 엔진", check_engine),
-    ]
+CHECKS: List[Tuple[str, Callable[[], str]]] = [
+    ("파이썬", check_python),
+    ("화면 라이브러리(PySide6)", check_pyside),
+    ("창 띄우기", check_qt_window),
+    ("FFmpeg", check_tool("ffmpeg")),
+    ("FFprobe", check_tool("ffprobe")),
+    ("음량 엔진", check_engine),
+]
 
 
-def format_results(results: List[Result]) -> str:
+def run_all(on_result: Callable[[List[Result]], None] | None = None) -> List[Result]:
+    results: List[Result] = []
+    for name, fn in CHECKS:
+        results.append(_check(name, fn))
+        if on_result:
+            on_result(results)
+    return results
+
+
+def format_results(results: List[Result], finished: bool = True) -> str:
     lines = [
         "영상 편집 자동화 - 설치 점검 결과",
         f"윈도우: {platform.platform()}",
@@ -104,7 +140,10 @@ def format_results(results: List[Result]) -> str:
     for name, ok, detail in results:
         lines.append(f"[{'정상' if ok else '문제'}] {name}: {detail}")
     lines.append("")
-    if all(ok for _, ok, _ in results):
+    if not finished:
+        lines.append("[문제] 점검이 끝나기 전에 멈췄습니다. 위 목록 다음 항목에서 문제가 난 것입니다.")
+        lines.append("이 파일 내용을 그대로 보내 주세요.")
+    elif all(ok for _, ok, _ in results):
         lines.append("모두 정상입니다. run_app.bat 또는 바탕화면 아이콘으로 앱을 실행하세요.")
     else:
         lines.append("[문제]로 표시된 줄이 있습니다. 이 파일 내용을 그대로 보내 주세요.")
@@ -117,9 +156,11 @@ def _extra_lines() -> List[str]:
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".local" / "share")
     for name in ("app.log", "launch.log"):
         log = Path(base) / "video-editing-systems" / name
-        if log.is_file():
+        try:
             tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
-            lines += ["", f"---- {name} 마지막 부분 ----", *tail]
+        except OSError:  # 파일이 없거나 다른 프로그램이 잡고 있음
+            continue
+        lines += ["", f"---- {name} 마지막 부분 ----", *tail]
     return lines
 
 
@@ -130,12 +171,23 @@ def main(argv: List[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8")
         except (AttributeError, ValueError):
             pass
-    results = run_all()
-    text = format_results(results) + "\n" + "\n".join(_extra_lines())
-    print(text)
-    if argv:
-        # 메모장이 인코딩을 헷갈리지 않게 BOM을 붙인 UTF-8로 저장한다.
-        Path(argv[0]).write_text(text, encoding="utf-8-sig")
+    out = Path(argv[0]) if argv else None
+    extra = "\n".join(_extra_lines())
+
+    def save(results: List[Result], finished: bool) -> str:
+        text = format_results(results, finished) + "\n" + extra
+        if out:
+            # 항목마다 바로 저장해서, 점검 도중 멈춰도 어디까지 됐는지 남는다.
+            # 메모장이 인코딩을 헷갈리지 않게 BOM을 붙인 UTF-8로 저장한다.
+            try:
+                out.write_text(text, encoding="utf-8-sig")
+            except OSError as exc:
+                print(f"결과 파일을 저장하지 못했습니다: {exc}", file=sys.stderr)
+        return text
+
+    save([], finished=False)
+    results = run_all(on_result=lambda r: save(r, finished=False))
+    print(save(results, finished=True))
     return 0 if all(ok for _, ok, _ in results) else 1
 
 

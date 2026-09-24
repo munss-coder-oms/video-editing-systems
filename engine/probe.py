@@ -145,6 +145,12 @@ def _find_timecode(data: dict, streams: list, video: Optional[dict]) -> str:
     return ""
 
 
+def _is_ntsc(rate: Fraction, nominal: int) -> bool:
+    """29.97처럼 정수 속도의 1000/1001배인지 (2997/100처럼 기록된 값도 포함)."""
+    r = float(rate)
+    return abs(r - nominal * 1000 / 1001) < abs(r - nominal)
+
+
 def timecode_seconds(timecode: str, native_rate: Fraction) -> Fraction:
     """카메라 타임코드("hh:mm:ss:ff", 드롭 프레임은 ';')를 초(분수)로 바꾼다."""
     m = _TC_RE.match(timecode.strip()) if timecode else None
@@ -155,14 +161,56 @@ def timecode_seconds(timecode: str, native_rate: Fraction) -> Fraction:
     nominal = round(float(native_rate))
     if nominal <= 0:
         return Fraction(0)
+    ntsc = _is_ntsc(native_rate, nominal)
     frames = ((h * 60 + mi) * 60 + s) * nominal + f
-    drop = sep == ";" and native_rate.denominator == 1001 and nominal in (30, 60)
-    if drop:
+    if sep == ";" and ntsc and nominal % 30 == 0:
+        # 드롭 프레임: 10분 단위가 아닌 매 분마다 (30fps 기준 2, 60fps 4, 120fps 8) 프레임 번호를 건너뛴다.
         total_minutes = 60 * h + mi
-        frames -= (2 if nominal == 30 else 4) * (total_minutes - total_minutes // 10)
-    if native_rate.denominator == 1001:
+        frames -= (nominal // 30 * 2) * (total_minutes - total_minutes // 10)
+    if ntsc:
         return Fraction(frames * 1001, nominal * 1000)
     return Fraction(frames, nominal)
+
+
+def _clean_rate(rate: Fraction) -> Fraction:
+    """2997/100 같은 근사값을 정확한 30000/1001이나 정수로 바로잡는다."""
+    if rate <= 0:
+        return rate
+    nominal = round(float(rate))
+    if nominal <= 0:
+        return rate.limit_denominator(1001)
+    for exact in (Fraction(nominal), Fraction(nominal * 1000, 1001)):
+        if abs(float(rate) / float(exact) - 1) < 2e-4:
+            return exact
+    return rate.limit_denominator(1001)
+
+
+def _first_audio_pts(path: Path) -> Optional[float]:
+    """처음 디코딩되는 오디오 프레임의 시각.
+
+    스트림 start_time에는 디코더가 버리는 앞부분(Opus pre-skip 등)이 들어 있을 수 있어,
+    실제로 소리가 나오는 첫 프레임 시각을 쓴다.
+    """
+    try:
+        result = ffmpeg.run(
+            [
+                "-v", "error", "-select_streams", "a:0", "-show_frames",
+                "-read_intervals", "%+#10", "-show_entries", "frame=pts_time",
+                "-of", "csv=p=0", str(path),
+            ],
+            tool="ffprobe",
+        )
+    except ffmpeg.FFmpegError:
+        return None
+    for line in result.stdout.splitlines():
+        line = line.strip().rstrip(",")
+        try:
+            v = float(line)
+        except ValueError:
+            continue
+        if math.isfinite(v):
+            return v
+    return None
 
 
 def probe(path: str | Path) -> MediaInfo:
@@ -207,7 +255,7 @@ def probe(path: str | Path) -> MediaInfo:
         else:  # 가변 프레임: 평균값 사용
             native = avg if avg > 0 else nominal
         if native > 0:
-            native = native.limit_denominator(1001)
+            native = _clean_rate(native)
             info.native_frame_rate = f"{native.numerator}/{native.denominator}"
         timeline = snap_frame_rate(native)
         info.frame_rate = f"{timeline.numerator}/{timeline.denominator}"
@@ -227,5 +275,6 @@ def probe(path: str | Path) -> MediaInfo:
         info.audio_channels = int(audio.get("channels") or 0)
         info.audio_sample_rate = int(audio.get("sample_rate") or 0)
         info.audio_codec = audio.get("codec_name", "")
-        info.audio_start = _float(audio.get("start_time"))
+        first = _first_audio_pts(path) if video else None
+        info.audio_start = first if first is not None else _float(audio.get("start_time"))
     return info

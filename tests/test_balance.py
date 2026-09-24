@@ -138,3 +138,16 @@ def test_late_audio_is_aligned_to_video(late_audio_video, click_audio, tmp_path)
     expected = _tone_onset(load_mono(click_audio)) + (info.audio_start - info.video_start)
     onset = _tone_onset(load_mono(result.balance.output_wav))
     assert abs(onset - expected) < 0.003
+
+
+def test_section_gain_uses_video_time(late_audio_video, click_audio, tmp_path):
+    """오디오가 늦게 시작하는 영상에서도 구간 음량은 영상 시각 기준으로 적용된다.
+
+    짧은 신호는 원본 오디오 5.0초, 영상 기준 약 5.4초에 있다. 5.3~5.6초를 낮추면
+    영상 시각으로 계산할 때만 신호가 그 구간 안에 든다.
+    """
+    media = probe(late_audio_video)
+    result = balance(media, [Gain(start=5.3, end=5.6, db=-20.0)], tmp_path / "out.wav")
+    d = media.audio_start - media.video_start
+    changed = segment_rms(result.output_wav, 5.0 + d, 0.05) - segment_rms(click_audio, 5.0, 0.05)
+    assert changed == pytest.approx(-20.0, abs=1.0)

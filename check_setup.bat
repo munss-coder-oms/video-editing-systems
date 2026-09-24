@@ -13,6 +13,8 @@ set "RESULT=%~dp0setup_check_result.txt"
 
 echo Checking the installation. This takes about 30 seconds...
 echo.
+rem Remove the previous result so an old file is never mistaken for this run.
+if exist "%RESULT%" del /f /q "%RESULT%" >nul 2>&1
 
 call :find_conda
 if not defined CONDA_BAT (
@@ -31,8 +33,26 @@ if /i not "%CONDA_DEFAULT_ENV%"=="%ENV_NAME%" (
 )
 
 rem diagnose writes the whole result file itself (UTF-8), including the tail of app.log.
-python -m app.diagnose "%RESULT%"
+rem Use the environment's own python.exe so a different python on PATH cannot be picked.
+set "PY=python"
+if exist "%CONDA_PREFIX%\python.exe" set "PY=%CONDA_PREFIX%\python.exe"
+"%PY%" -m app.diagnose "%RESULT%"
 set "RC=%errorlevel%"
+if exist "%RESULT%" goto :show
+
+rem The check program itself could not start (or crashed at once): write what we know.
+rem Top-level lines only, so paths with ")" such as "Program Files (x86)" cannot break the script.
+set "RC=1"
+> "%RESULT%" echo [PROBLEM] The check program stopped before writing a result. Please send this file.
+>> "%RESULT%" echo conda: %CONDA_BAT%
+>> "%RESULT%" echo environment: %CONDA_PREFIX%
+>> "%RESULT%" echo python: %PY%
+>> "%RESULT%" echo.
+>> "%RESULT%" echo ---- where python ----
+where python >> "%RESULT%" 2>&1
+>> "%RESULT%" echo.
+>> "%RESULT%" echo ---- launch.log ----
+powershell -NoProfile -Command "Get-Content -Tail 30 -LiteralPath (Join-Path $env:LOCALAPPDATA 'video-editing-systems\launch.log') -ErrorAction SilentlyContinue" >> "%RESULT%" 2>&1
 
 :show
 echo.

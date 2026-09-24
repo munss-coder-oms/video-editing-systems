@@ -6,7 +6,7 @@ from fractions import Fraction
 import pytest
 
 from engine.fcpxml import FrameClock, build_fcpxml, file_uri, timeline_size
-from engine.probe import MediaInfo, snap_frame_rate, timecode_seconds
+from engine.probe import MediaInfo, _clean_rate, snap_frame_rate, timecode_seconds
 
 
 def _media(**kw) -> MediaInfo:
@@ -127,11 +127,46 @@ def test_timecode_seconds(tc, rate, expected):
     assert timecode_seconds(tc, rate) == expected
 
 
-def test_shorter_wav_limits_timeline():
+def test_shorter_wav_limits_only_audio_clip():
+    """WAV가 영상보다 짧아도 영상은 끝까지 두고, 붙인 오디오 클립만 WAV 길이로 자른다."""
     media = _media(duration=10.0, video_duration=10.0)
     root = ET.fromstring(build_fcpxml(media, "a.wav", wav_duration=8.0).split("\n", 2)[2])
     seq = root.find("library/event/project/sequence")
-    assert _seconds(seq.get("duration")) <= Fraction(8)
+    clip = seq.find("spine/asset-clip")
+    connected = clip.find("asset-clip")
+    assert _seconds(seq.get("duration")) == _seconds(clip.get("duration"))
+    assert _seconds(clip.get("duration")) > Fraction(9)
+    assert _seconds(connected.get("duration")) <= Fraction(8)
+
+
+@pytest.mark.parametrize(
+    "tc, rate, expected",
+    [
+        # 파일에 29.97이 2997/100처럼 근사값으로 적혀 있어도 NTSC로 계산해야 한다.
+        ("01:00:00:00", Fraction(2997, 100), Fraction(108000 * 1001, 30000)),
+        # 119.88fps 드롭 프레임은 분마다 8프레임을 건너뛴다.
+        ("00:01:00;08", Fraction(120000, 1001), Fraction(7200 * 1001, 120000)),
+        # 59.94fps 드롭 프레임은 분마다 4프레임.
+        ("00:01:00;04", Fraction(60000, 1001), Fraction(3600 * 1001, 60000)),
+    ],
+)
+def test_timecode_seconds_ntsc_variants(tc, rate, expected):
+    assert timecode_seconds(tc, rate) == expected
+
+
+@pytest.mark.parametrize(
+    "rate, expected",
+    [
+        (Fraction(2997, 100), Fraction(30000, 1001)),
+        (Fraction(5994, 100), Fraction(60000, 1001)),
+        (Fraction(2997003, 100000), Fraction(30000, 1001)),
+        (Fraction(25), Fraction(25)),
+        (Fraction(2500001, 100000), Fraction(25)),
+        (Fraction(0), Fraction(0)),
+    ],
+)
+def test_clean_rate(rate, expected):
+    assert _clean_rate(rate) == expected
 
 
 @pytest.mark.parametrize(

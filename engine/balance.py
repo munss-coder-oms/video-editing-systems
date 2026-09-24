@@ -61,7 +61,8 @@ def sync_filter(media: MediaInfo) -> str:
     d = media.audio_start - media.video_start
     if d > 0.0005:
         samples = round(d * (media.audio_sample_rate or OUTPUT_SAMPLE_RATE))
-        return f"adelay=delays={samples}S:all=1"
+        # 시각(t)을 0부터 다시 세야 구간 음량(gain) 같은 시간 기준 명령이 영상 시각과 맞는다.
+        return f"asetpts=PTS-STARTPTS,adelay=delays={samples}S:all=1"
     if d < -0.0005:
         return f"asetpts=PTS-STARTPTS,atrim=start={-d:.6f},asetpts=PTS-STARTPTS"
     return ""
@@ -122,7 +123,11 @@ def balance(
     gain_db = 0.0
     if normalize:
         mid = analyze(
-            src, audio_filter=chain or None, duration=dur, progress=step(1), is_cancelled=is_cancelled
+            src,
+            audio_filter=",".join(p for p in (align, chain) if p) or None,
+            duration=dur,
+            progress=step(1),
+            is_cancelled=is_cancelled,
         )
         if mid.integrated > SILENCE:
             gain_db = max(-30.0, min(40.0, normalize.target_lufs - mid.integrated))

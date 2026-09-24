@@ -87,12 +87,12 @@ def build_fcpxml(
         raise ValueError("영상 트랙이 없는 파일은 타임라인을 만들 수 없습니다.")
     clock = FrameClock(media.fps)
     video_frames = clock.frames(media.video_duration or media.duration)
-    total = video_frames
-    if wav_duration:
-        total = min(total, clock.frames(wav_duration))
-    if total <= 0:
+    if video_frames <= 0:
         raise ValueError("영상 길이를 알 수 없습니다.")
-    dur = clock.time(total)
+    # 타임라인과 영상 클립은 영상 전체 길이. 정리된 오디오 클립만 WAV 길이를 넘지 않게 한다.
+    dur = clock.time(video_frames)
+    audio_frames = min(video_frames, clock.frames(wav_duration)) if wav_duration else video_frames
+    audio_dur = clock.time(audio_frames)
     channels = audio_channels or media.audio_channels or 2
     name = project_name or PurePath(media.path).stem
     wav_name = PurePath(str(audio_wav)).stem
@@ -188,7 +188,7 @@ def build_fcpxml(
         lane="-1",
         offset=_rational(tc_start),
         start="0s",
-        duration=dur,
+        duration=audio_dur,
         audioRole="dialogue",
     )
 
