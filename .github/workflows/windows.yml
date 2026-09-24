@@ -1,0 +1,66 @@
+# 실제 윈도우에서 사용자와 같은 순서(설치 → 점검 → 실행 → 영상 처리)로 확인한다.
+name: windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      NOPAUSE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup_windows.bat (사용자가 처음 한 번 실행하는 설치)
+        shell: cmd
+        run: call setup_windows.bat
+
+      - name: 자동 테스트
+        shell: cmd
+        run: call "%CONDA%\condabin\conda.bat" run -n video-editing --no-capture-output python -m pytest -q
+
+      - name: check_setup.bat (설치 점검)
+        shell: cmd
+        run: |
+          call check_setup.bat
+          set RC=%errorlevel%
+          type setup_check_result.txt
+          exit /b %RC%
+
+      - name: run_app.bat (바탕화면 아이콘과 같은 실행)
+        shell: cmd
+        run: |
+          call run_app.bat
+          set RC=%errorlevel%
+          taskkill /f /im pythonw.exe >nul 2>&1
+          exit /b %RC%
+
+      - name: 창에서 영상 처리까지 (공백 있는 경로)
+        shell: cmd
+        run: |
+          call "%CONDA%\condabin\conda.bat" activate video-editing
+          mkdir "%RUNNER_TEMP%\test folder"
+          ffmpeg -v error -y -f lavfi -i testsrc2=s=1280x720:r=30000/1001:d=20 -f lavfi -i anoisesrc=c=pink:a=0.05:d=20:r=48000 -map 0:v -map 1:a -c:v mpeg4 -q:v 5 -c:a aac "%RUNNER_TEMP%\test folder\first video.mp4" || exit /b 1
+          python -m app --smoke-test "%RUNNER_TEMP%\test folder\first video.mp4" || exit /b 1
+          dir "%RUNNER_TEMP%\test folder\first video_resolve"
+          type "%RUNNER_TEMP%\test folder\first video_resolve\first video_timeline.fcpxml"
+
+      - name: 기록 파일 모으기
+        if: always()
+        shell: cmd
+        run: |
+          mkdir logs
+          copy "%LOCALAPPDATA%\video-editing-systems\*.log" logs\ >nul 2>&1
+          copy setup_check_result.txt logs\ >nul 2>&1
+          exit /b 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-logs
+          path: logs

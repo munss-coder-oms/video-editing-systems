@@ -55,7 +55,7 @@ def uneven_video(media_dir) -> Path:
         "-f", "lavfi", "-i", SPEECH,
         "-filter_complex", f"[1:a]{SHAPE},aformat=channel_layouts=stereo[a]",
         "-map", "0:v", "-map", "[a]",
-        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:v", "mpeg4", "-q:v", "5",
         "-c:a", "aac", "-b:a", "192k", str(path),
     )
     return path

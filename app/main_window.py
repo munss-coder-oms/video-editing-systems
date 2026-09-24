@@ -87,7 +87,7 @@ class DropArea(QFrame):
         self.setMinimumHeight(110)
         self.setObjectName("dropArea")
         layout = QVBoxLayout(self)
-        self.label = QLabel("여기에 영상을 끌어다 놓거나 [영상 열기]를 누르세요")
+        self.label = QLabel("① 편집할 영상 파일을 여기에 끌어다 놓으세요\n(또는 아래 [영상 열기] 버튼)")
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setWordWrap(True)
         layout.addWidget(self.label)
@@ -104,8 +104,10 @@ class DropArea(QFrame):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, interactive: bool = True):
         super().__init__()
+        # interactive=False(자동 검사)이면 알림 창을 띄우지 않는다.
+        self.interactive = interactive
         self.setWindowTitle(f"영상 편집 자동화 v{__version__} - 음량 정리 + 다빈치 리졸브 내보내기")
         self.resize(760, 680)
         self.settings = QSettings("munss-coder-oms", "video-editing-systems")
@@ -119,6 +121,13 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
+
+        intro = QLabel(
+            "이 프로그램은 영상의 음량을 정리한 파일을 만듭니다. 다빈치 리졸브와 직접 연결되지는 않고, "
+            "여기서 만든 파일을 리졸브에서 [파일 → 가져오기 → 타임라인]으로 불러옵니다."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
 
         # 1. 영상 열기
         self.drop = DropArea()
@@ -143,7 +152,7 @@ class MainWindow(QMainWindow):
             "튀는 소리를 얼마나 누르고, 작은 목소리를 얼마나 끌어올릴지 정합니다.\n"
             "목소리가 답답하게 들리면 '약하게', 들쭉날쭉하면 '강하게'."
         )
-        form.addRow("정리 강도", self.strength)
+        form.addRow("② 정리 강도", self.strength)
 
         self.target = QDoubleSpinBox()
         self.target.setRange(-30.0, -5.0)
@@ -166,7 +175,7 @@ class MainWindow(QMainWindow):
 
         # 3. 실행
         run_row = QHBoxLayout()
-        self.run_btn = QPushButton("음량 정리하고 리졸브용으로 내보내기")
+        self.run_btn = QPushButton("③ 음량 정리하고 리졸브용으로 내보내기")
         self.run_btn.setMinimumHeight(40)
         self.run_btn.setEnabled(False)
         self.run_btn.clicked.connect(self.start)
@@ -194,7 +203,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self.report, 1)
 
         done_row = QHBoxLayout()
-        self.open_out_btn = QPushButton("결과 폴더 열기")
+        self.open_out_btn = QPushButton("④ 결과 폴더 열기")
         self.open_out_btn.setEnabled(False)
         self.open_out_btn.clicked.connect(self.open_output)
         self.guide_btn = QPushButton("리졸브에서 불러오는 방법")
@@ -213,7 +222,9 @@ class MainWindow(QMainWindow):
             find_tool("ffmpeg")
             find_tool("ffprobe")
         except FFmpegError as exc:
-            QMessageBox.warning(self, "FFmpeg 없음", str(exc))
+            self.stage.setText(f"FFmpeg 없음: {exc}")
+            if self.interactive:
+                QMessageBox.warning(self, "FFmpeg 없음", str(exc))
 
     def choose_video(self) -> None:
         start = self.settings.value("last_dir", str(Path.home()))
@@ -228,10 +239,14 @@ class MainWindow(QMainWindow):
         try:
             media = probe(path)
         except (FFmpegError, FileNotFoundError) as exc:
-            QMessageBox.warning(self, "영상을 열 수 없음", str(exc))
+            self.stage.setText(f"영상을 열 수 없음: {exc}")
+            if self.interactive:
+                QMessageBox.warning(self, "영상을 열 수 없음", str(exc))
             return
         if not media.has_audio:
-            QMessageBox.warning(self, "오디오 없음", "이 파일에는 오디오 트랙이 없습니다.")
+            self.stage.setText("이 파일에는 오디오 트랙이 없습니다.")
+            if self.interactive:
+                QMessageBox.warning(self, "오디오 없음", "이 파일에는 오디오 트랙이 없습니다.")
             return
         self.media = media
         self.result = None
@@ -310,7 +325,8 @@ class MainWindow(QMainWindow):
     def on_failed(self, message: str) -> None:
         self.stage.setText("실패했습니다.")
         self.report.setPlainText(f"오류가 났습니다.\n\n{message}")
-        QMessageBox.critical(self, "처리 실패", message[-1500:])
+        if self.interactive:
+            QMessageBox.critical(self, "처리 실패", message[-1500:])
 
     @Slot()
     def on_cancelled(self) -> None:

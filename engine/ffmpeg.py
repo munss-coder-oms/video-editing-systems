@@ -79,6 +79,8 @@ def run(
 
     proc = subprocess.Popen(
         cmd,
+        # pythonw(콘솔 없는 실행)에서는 표준 입력이 없어 그대로 두면 실행이 실패할 수 있다.
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         creationflags=_CREATE_NO_WINDOW,
