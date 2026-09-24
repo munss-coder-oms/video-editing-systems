@@ -52,7 +52,8 @@ class LoudnessReport:
     # 말소리 구간의 보통 음량 (무음을 뺀 3초 음량의 중앙값). 튀는 소리에 덜 휘둘린다.
     typical: float = SILENCE
     # 말을 쉬는 순간의 바닥 소음 (0.4초 음량의 하위 10%). 작은 소리 올리기가 이보다 충분히 큰 소리만 키운다.
-    noise_floor: float = SILENCE
+    # 아주 조용한 방은 -70보다 작을 수 있어 SILENCE로 자르지 않는다. 잴 수 없으면 None.
+    noise_floor: Optional[float] = None
     spikes: List[Region] = field(default_factory=list)
     quiet: List[Region] = field(default_factory=list)
 
@@ -101,11 +102,15 @@ def typical_level(short: list[tuple[float, float]], integrated: float) -> float:
     return values[len(values) // 2]
 
 
-def noise_floor(momentary: list[tuple[float, float]]) -> float:
+# ebur128은 소리가 전혀 없는 구간(디지털 무음)을 -120.7로 적는다. 이것은 방 소음이 아니므로 뺀다.
+_DIGITAL_SILENCE = -120.0
+
+
+def noise_floor(momentary: list[tuple[float, float]]) -> Optional[float]:
     """0.4초 음량 중 하위 10% 값. 말 사이사이 쉬는 순간의 방 소음·배경음 크기에 가깝다."""
-    values = sorted(v for _, v in momentary if v > SILENCE)
+    values = sorted(v for _, v in momentary if v > _DIGITAL_SILENCE)
     if not values:
-        return SILENCE
+        return None
     return values[len(values) // 10]
 
 
@@ -153,7 +158,8 @@ def analyze(
     chain = f"{audio_filter}," if audio_filter else ""
     chain += "ebur128=peak=true:framelog=info"
     if source:
-        args = ["-i", str(path), "-filter_complex", f"{source};[src]{chain}[out]", "-map", "[out]"]
+        # -copyts: source 그래프는 파일에 적힌 시각을 그대로 받아 영상 첫 프레임에 맞춘다 (balance.INPUT_OPTIONS)
+        args = ["-copyts", "-i", str(path), "-filter_complex", f"{source};[src]{chain}[out]", "-map", "[out]"]
     else:
         args = ["-i", str(path), "-map", "0:a:0", "-vn", "-sn", "-dn", "-af", chain]
     result = ffmpeg.run(

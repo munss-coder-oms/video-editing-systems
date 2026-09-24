@@ -32,9 +32,12 @@ def ffmpeg(*args: str) -> None:
 
 # 말소리 대신 쓰는 신호: 3Hz로 크기가 출렁이는 핑크 노이즈.
 # 10~20초는 15dB 작게(작은 목소리), 25~26.5초와 32~33초는 14dB 크게(튀는 소리).
+# 실제 말처럼 4초마다 1초씩 쉬고, 쉬는 동안에는 말소리보다 약 35dB 작은 방 소음만 남는다.
 SPEECH = "anoisesrc=c=pink:a=0.1:d=40:r=48000"
+ROOM = "anoisesrc=c=pink:a=0.0018:d=40:r=48000:seed=11"
 SHAPE = (
-    "volume='if(between(t,10,20),0.18,1)*if(between(t,25,26.5)+between(t,32,33),5,1)'"
+    "volume='if(between(t,10,20),0.18,1)*if(between(t,25,26.5)+between(t,32,33),5,1)"
+    "*if(lt(mod(t,4),3),1,0)'"
     ":eval=frame,apulsator=hz=3:amount=0.6"
 )
 
@@ -53,7 +56,9 @@ def uneven_video(media_dir) -> Path:
     ffmpeg(
         "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30000/1001:d=40",
         "-f", "lavfi", "-i", SPEECH,
-        "-filter_complex", f"[1:a]{SHAPE},aformat=channel_layouts=stereo[a]",
+        "-f", "lavfi", "-i", ROOM,
+        "-filter_complex",
+        f"[1:a]{SHAPE}[s];[s][2:a]amix=inputs=2:normalize=0,aformat=channel_layouts=stereo[a]",
         "-map", "0:v", "-map", "[a]",
         "-c:v", "mpeg4", "-q:v", "5",
         "-c:a", "aac", "-b:a", "192k", str(path),
@@ -149,8 +154,75 @@ def joined_video(media_dir, click_audio) -> Path:
     return path
 
 
-# 말하다 쉬다 하는 소리: 3.5초마다 0.5초 쉬고, 쉬는 동안에는 말소리보다 30dB 작은 방 소음이 남는다.
-PAUSES = "volume='if(lt(mod(t,3.5),3.0),1,0)':eval=frame"
+@pytest.fixture(scope="session")
+def late_audio_m2ts(media_dir, click_audio) -> Path:
+    """캠코더(AVCHD) 같은 .m2ts: 오디오가 영상보다 0.08초 늦게 시작한다. 5초 신호가 영상 5.08초에 들린다."""
+    if not _have_ffmpeg():
+        pytest.skip("FFmpeg가 설치되어 있지 않음")
+    path = media_dir / "camcorder.m2ts"
+    ffmpeg(
+        "-f", "lavfi", "-i", "testsrc2=s=320x240:r=30000/1001:d=12",
+        "-itsoffset", "0.08", "-i", str(click_audio),
+        "-map", "0:v", "-map", "1:a", "-c:v", "mpeg2video", "-c:a", "pcm_bluray",
+        "-mpegts_m2ts_mode", "1", str(path),
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
+def spatial_audio_video(media_dir) -> Path:
+    """아이폰 공간 음향처럼 FFmpeg가 풀 수 없는 오디오 트랙(apac)이 두 번째로 들어 있는 영상.
+
+    PCM 트랙 두 개로 만든 뒤 두 번째 트랙의 형식 표시를 'apac'으로 바꿔 흉내 낸다.
+    """
+    if not _have_ffmpeg():
+        pytest.skip("FFmpeg가 설치되어 있지 않음")
+    src = media_dir / "two_pcm.mov"
+    ffmpeg(
+        "-f", "lavfi", "-i", "testsrc2=s=320x240:r=30:d=6",
+        "-f", "lavfi", "-i", "anoisesrc=c=pink:a=0.1:d=6:r=48000",
+        "-map", "0:v", "-map", "1:a", "-map", "1:a",
+        "-c:v", "mpeg4", "-c:a", "pcm_s16le", str(src),
+    )
+    data = bytearray(src.read_bytes())
+    # 세 번째 stsd(영상, 오디오1, 오디오2 순서) 안의 PCM 표시 'sowt'를 'apac'으로 바꾼다.
+    pos = -1
+    for _ in range(3):
+        pos = data.find(b"stsd", pos + 1)
+    tag = data.find(b"sowt", pos)
+    assert pos > 0 and tag > 0
+    data[tag:tag + 4] = b"apac"
+    path = media_dir / "spatial_audio.mov"
+    path.write_bytes(bytes(data))
+    return path
+
+
+@pytest.fixture(scope="session")
+def cut_mkv(media_dir) -> Path:
+    """앞부분을 스트림 복사로 잘라낸 MKV (영상이 다음 키프레임부터 늦게 시작함)."""
+    if not _have_ffmpeg():
+        pytest.skip("FFmpeg가 설치되어 있지 않음")
+    src = media_dir / "gop.mkv"
+    ffmpeg(
+        "-f", "lavfi", "-i", "testsrc2=s=320x240:r=30:d=20",
+        "-f", "lavfi", "-i", "anoisesrc=c=pink:a=0.1:d=20:r=48000",
+        "-c:v", "mpeg4", "-g", "30", "-c:a", "pcm_s16le", str(src),
+    )
+    path = media_dir / "cut.mkv"
+    ffmpeg("-i", str(src), "-ss", "5.5", "-c", "copy", str(path))
+    return path
+
+
+def _pause_audio(path: Path, room: float) -> Path:
+    ffmpeg(
+        "-f", "lavfi", "-i", "anoisesrc=c=pink:a=0.1:d=32:r=48000",
+        "-f", "lavfi", "-i", f"anoisesrc=c=pink:a={room}:d=32:r=48000:seed=3",
+        "-filter_complex",
+        "[0:a]volume='if(between(t,10,22)*not(between(t,16,16.5)),0,1)':eval=frame,"
+        "apulsator=hz=3:amount=0.6[s];[s][1:a]amix=inputs=2:normalize=0,aformat=channel_layouts=mono[a]",
+        "-map", "[a]", "-c:a", "pcm_s16le", str(path),
+    )
+    return path
 
 
 @pytest.fixture(scope="session")
@@ -158,16 +230,15 @@ def noisy_pause_audio(media_dir) -> Path:
     """0~10초 말, 10~22초 쉼(16초에 0.5초짜리 한마디), 22~32초 말. 방 소음은 말소리보다 약 28dB 작다."""
     if not _have_ffmpeg():
         pytest.skip("FFmpeg가 설치되어 있지 않음")
-    path = media_dir / "noisy_pause.wav"
-    ffmpeg(
-        "-f", "lavfi", "-i", "anoisesrc=c=pink:a=0.1:d=32:r=48000",
-        "-f", "lavfi", "-i", "anoisesrc=c=pink:a=0.0028:d=32:r=48000:seed=3",
-        "-filter_complex",
-        "[0:a]volume='if(between(t,10,22)*not(between(t,16,16.5)),0,1)':eval=frame,"
-        "apulsator=hz=3:amount=0.6[s];[s][1:a]amix=inputs=2:normalize=0,aformat=channel_layouts=mono[a]",
-        "-map", "[a]", "-c:a", "pcm_s16le", str(path),
-    )
-    return path
+    return _pause_audio(media_dir / "noisy_pause.wav", 0.0028)
+
+
+@pytest.fixture(scope="session")
+def loud_room_audio(media_dir) -> Path:
+    """noisy_pause_audio와 같지만 방 소음(에어컨, 선풍기)이 말소리보다 약 13dB만 작다."""
+    if not _have_ffmpeg():
+        pytest.skip("FFmpeg가 설치되어 있지 않음")
+    return _pause_audio(media_dir / "loud_room.wav", 0.0157)
 
 
 @pytest.fixture(scope="session")

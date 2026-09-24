@@ -294,9 +294,12 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "영상을 열 수 없음", str(exc))
             return
         if not media.has_audio:
-            self.stage.setText("이 파일에는 오디오 트랙이 없습니다.")
+            msg = "이 파일에는 오디오 트랙이 없습니다."
+            if media.audio_tracks:
+                msg = "이 파일의 오디오는 읽을 수 없는 형식입니다 (예: 아이폰 공간 음향만 있는 경우)."
+            self.stage.setText(msg)
             if self.interactive:
-                QMessageBox.warning(self, "오디오 없음", "이 파일에는 오디오 트랙이 없습니다.")
+                QMessageBox.warning(self, "오디오 없음", msg)
             return
         if media.duration <= 0:
             msg = (
@@ -323,10 +326,12 @@ class MainWindow(QMainWindow):
 
     def fill_tracks(self, media: MediaInfo) -> None:
         self.tracks.clear()
-        several = len(media.audio_tracks) > 1
+        # FFmpeg가 풀 수 없는 트랙(아이폰 공간 음향 등)은 목록에 넣지 않는다.
+        usable = [t for t in media.audio_tracks if t.decodable]
+        several = len(usable) > 1
         if several:
-            self.tracks.addItem(f"모든 트랙 섞기 ({len(media.audio_tracks)}개, 추천)", None)
-            for track in media.audio_tracks:
+            self.tracks.addItem(f"모든 트랙 섞기 ({len(usable)}개, 추천)", None)
+            for track in usable:
                 self.tracks.addItem(f"{track.label()}만 쓰기", [track.index])
         self.tracks_label.setVisible(several)
         self.tracks.setVisible(several)

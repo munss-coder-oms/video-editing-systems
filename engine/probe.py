@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import re
@@ -40,6 +41,9 @@ class AudioTrack:
     codec: str = ""
     title: str = ""  # OBS 등이 붙인 트랙 이름 (없으면 빈 값)
     language: str = ""
+    start: float = 0.0  # 트랙 시작 시각 (초, 파일에 적힌 값 그대로)
+    # FFmpeg가 풀 수 있는 형식인지. 아이폰 공간 음향(APAC) 트랙처럼 못 푸는 트랙은 섞지 않는다.
+    decodable: bool = True
 
     def label(self) -> str:
         name = f"{self.index + 1}번 트랙"
@@ -193,6 +197,43 @@ def timecode_seconds(timecode: str, native_rate: Fraction) -> Fraction:
     return Fraction(frames, nominal)
 
 
+@functools.lru_cache(maxsize=1)
+def _audio_decoders() -> frozenset:
+    """이 FFmpeg가 풀 수 있는 오디오 코덱 이름들. 목록을 못 읽으면 빈 집합."""
+    try:
+        out = ffmpeg.run(["-hide_banner", "-codecs"]).stdout
+    except ffmpeg.FFmpegError:
+        return frozenset()
+    names = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and len(parts[0]) == 6 and parts[0][0] == "D" and parts[0][2] == "A":
+            names.add(parts[1])
+    return frozenset(names)
+
+
+def _decodable(codec: str) -> bool:
+    if not codec or codec in ("none", "unknown"):
+        return False
+    decoders = _audio_decoders()
+    return not decoders or codec in decoders
+
+
+def _video_tag_length(data: dict, video: dict) -> float:
+    """MKV/WebM의 DURATION 태그로 영상 길이를 구한다.
+
+    FFmpeg가 쓴 파일(OBS, HandBrake, LosslessCut 포함)은 이 태그에 '끝나는 시각'을 적으므로,
+    영상이 0초보다 늦게 시작하면 시작 시각만큼 빼야 실제 길이가 된다.
+    """
+    tag = _parse_duration_tag((video.get("tags") or {}).get("DURATION"))
+    if not tag:
+        return 0.0
+    encoder = ((data.get("format") or {}).get("tags") or {}).get("ENCODER") or ""
+    if encoder.startswith("Lavf"):
+        return max(0.0, tag - _float(video.get("start_time")))
+    return tag
+
+
 def _clean_rate(rate: Fraction) -> Fraction:
     """2997/100 같은 근사값을 정확한 30000/1001이나 정수로 바로잡는다."""
     if rate <= 0:
@@ -235,6 +276,7 @@ def probe(path: str | Path) -> MediaInfo:
                 break
 
     info = MediaInfo(path=str(path), duration=duration, has_video=video is not None)
+    info.format_start = _float(data.get("format", {}).get("start_time"))
     if video:
         info.width = int(video.get("width") or 0)
         info.height = int(video.get("height") or 0)
@@ -256,34 +298,36 @@ def probe(path: str | Path) -> MediaInfo:
         if not info.native_frame_rate:
             info.native_frame_rate = info.frame_rate
 
-        info.video_duration = (
-            _float(video.get("duration"))
-            or _parse_duration_tag((video.get("tags") or {}).get("DURATION"))
-            or duration
-        )
-        info.video_start = _float(video.get("start_time"))
+        info.video_duration = _float(video.get("duration")) or _video_tag_length(data, video) or duration
+        # 시작 시각이 적혀 있지 않으면 파일 전체 시작 시각을 쓴다.
+        raw_start = video.get("start_time")
+        info.video_start = _float(raw_start) if raw_start not in (None, "N/A") else info.format_start
         info.video_codec = video.get("codec_name", "")
         info.timecode = _find_timecode(data, streams, video)
-    info.format_start = _float(data.get("format", {}).get("start_time"))
     audios = [s for s in streams if s.get("codec_type") == "audio"]
     for i, a in enumerate(audios):
         tags = a.get("tags") or {}
+        codec = a.get("codec_name") or ""
         info.audio_tracks.append(
             AudioTrack(
                 index=i,
                 channels=int(a.get("channels") or 0),
                 sample_rate=int(a.get("sample_rate") or 0),
-                codec=a.get("codec_name", ""),
+                codec=codec,
                 title=_track_title(tags),
                 language=(tags.get("language") or "").strip(),
+                start=_float(a.get("start_time")),
+                decodable=_decodable(codec),
             )
         )
-    if audio:
+    # 대표 오디오 정보는 풀 수 있는 첫 트랙에서 가져온다.
+    first = next((audios[t.index] for t in info.audio_tracks if t.decodable), None)
+    if first:
         info.has_audio = True
-        info.audio_channels = int(audio.get("channels") or 0)
-        info.audio_sample_rate = int(audio.get("sample_rate") or 0)
-        info.audio_codec = audio.get("codec_name", "")
-        info.audio_start = _float(audio.get("start_time"))
+        info.audio_channels = int(first.get("channels") or 0)
+        info.audio_sample_rate = int(first.get("sample_rate") or 0)
+        info.audio_codec = first.get("codec_name", "")
+        info.audio_start = _float(first.get("start_time"))
     return info
 
 

@@ -202,14 +202,19 @@ def test_wav_matches_timeline_length(fixture, request, tmp_path):
     assert int(info["channels"]) == 2 and int(info["sample_rate"]) == 48000
 
 
+@pytest.mark.parametrize("room", ["noisy_pause_audio", "loud_room_audio"])
 @pytest.mark.parametrize("strength", ["medium", "strong"])
-def test_room_noise_in_long_pause_not_boosted(noisy_pause_audio, tmp_path, strength):
-    """말을 오래 쉬는 동안의 방 소음이 말소리에 비해 3dB 넘게 커지지 않는다 (점검 E2)."""
-    result = process_video(noisy_pause_audio, output_dir=tmp_path, strength=strength)
+def test_room_noise_in_long_pause_not_boosted(request, room, tmp_path, strength):
+    """말을 오래 쉬는 동안의 방 소음이 말소리에 비해 3dB 넘게 커지지 않는다 (점검 E2).
+    에어컨처럼 방 소음이 말소리와 가까운 녹음도 작은 소리 올리기가 소음을 키우지 않는다.
+    다만 '강하게'는 큰 말소리를 눌러 말소리와 소음의 차이가 조금 줄어들므로 4dB까지 본다."""
+    source = request.getfixturevalue(room)
+    result = process_video(source, output_dir=tmp_path, strength=strength)
     wav = result.balance.output_wav
-    before = segment_rms(noisy_pause_audio, 12, 3) - segment_rms(noisy_pause_audio, 2, 7)
+    before = segment_rms(source, 12, 3) - segment_rms(source, 2, 7)
     after = segment_rms(wav, 12, 3) - segment_rms(wav, 2, 7)
-    assert after - before < 3.0
+    limit = 4.0 if (strength, room) == ("strong", "loud_room_audio") else 3.0
+    assert after - before < limit
 
 
 @pytest.mark.parametrize("strength", ["weak", "medium", "strong"])
@@ -274,3 +279,22 @@ def test_progress_never_goes_backwards(uneven_video, tmp_path):
     process_video(uneven_video, output_dir=tmp_path, on_stage=lambda _s, v: values.append(v))
     assert values == sorted(values)
     assert values[-1] == pytest.approx(1.0)
+
+
+def test_camcorder_m2ts_keeps_sync(late_audio_m2ts, click_audio, tmp_path):
+    """캠코더 .m2ts처럼 오디오가 늦게 시작하는 MPEG-TS도 영상 첫 프레임에 맞춘다."""
+    result = process_video(late_audio_m2ts, output_dir=tmp_path)
+    info = result.media
+    expected = _tone_onset(load_mono(click_audio)) + (info.audio_start - info.video_start)
+    onset = _tone_onset(load_mono(result.balance.output_wav))
+    assert info.audio_start - info.video_start == pytest.approx(0.08, abs=0.02)
+    assert abs(onset - expected) < 0.003
+
+
+def test_unreadable_spatial_audio_track_is_skipped(spatial_audio_video, tmp_path):
+    """FFmpeg가 풀 수 없는 트랙(아이폰 공간 음향)은 빼고 처리한다. 예전처럼 실패하지 않는다."""
+    result = process_video(spatial_audio_video, output_dir=tmp_path)
+    assert result.balance.audio_tracks == [0]
+    assert any("읽을 수 없는" in w for w in result.warnings)
+    with pytest.raises(ValueError):
+        process_video(spatial_audio_video, output_dir=tmp_path / "b", audio_tracks=[1])

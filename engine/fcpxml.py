@@ -7,6 +7,7 @@ V1에 원본 영상, A1에 음량을 정리한 오디오가 올라온 타임라�
 
 from __future__ import annotations
 
+import math
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 from pathlib import Path, PurePath, PureWindowsPath
@@ -32,8 +33,13 @@ class FrameClock:
         self.fps = fps
         self.frame = 1 / fps  # 한 프레임 길이(초)
 
+    # 영상 길이는 소수점 6자리(ffprobe)나 1ms 단위(MKV)로 적혀 있어 마지막 프레임이 조금 모자라 보인다
+    # (301프레임이 300.99프레임). 프레임의 1/10까지 모자란 것은 한 프레임으로 센다.
+    _TOLERANCE = Fraction(1, 10)
+
     def frames(self, seconds: float) -> int:
-        return int(Fraction(seconds).limit_denominator(1_000_000) * self.fps)
+        exact = Fraction(seconds).limit_denominator(1_000_000) * self.fps
+        return max(0, math.floor(exact + self._TOLERANCE))
 
     def time(self, frames: int) -> str:
         if frames == 0:

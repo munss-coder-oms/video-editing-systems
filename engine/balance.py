@@ -62,16 +62,29 @@ def _limiter(true_peak: float) -> str:
     )
 
 
-def track_filter(media: MediaInfo) -> str:
+# 오디오를 꺼내는 FFmpeg 호출은 모두 -copyts로 파일에 적힌 시각을 그대로 쓴다.
+# (그렇지 않으면 FFmpeg가 파일 형식에 따라 다른 기준으로 시각을 당겨서, 캠코더 .mts처럼
+#  오디오가 늦게 시작하는 파일에서 소리가 앞당겨진다.)
+INPUT_OPTIONS = ["-copyts"]
+
+
+def _zero_time(media: MediaInfo, tracks: Sequence[int]) -> float:
+    """WAV의 0초로 삼을 파일 속 시각: 영상 첫 프레임 (오디오 파일이면 가장 먼저 시작하는 트랙)."""
+    if media.has_video:
+        return media.video_start
+    starts = [t.start for t in media.audio_tracks if t.index in tracks]
+    return min(starts) if starts else media.format_start
+
+
+def track_filter(media: MediaInfo, tracks: Sequence[int] = (0,)) -> str:
     """오디오 트랙 하나를 영상 첫 프레임 기준 시각으로 맞추는 필터.
 
     - 카메라·휴대폰 파일은 오디오가 영상보다 조금 늦게(또는 먼저) 시작하는 경우가 있다.
-      FFmpeg는 파일에서 가장 먼저 시작하는 트랙을 0초로 당기므로, 영상 시작 시각만큼 더 빼면
-      영상 첫 프레임이 0초가 된다.
+      파일에 적힌 시각에서 영상 시작 시각을 빼면 영상 첫 프레임이 0초가 된다.
     - aresample의 first_pts=0은 0초 전의 소리는 자르고, 0초부터 소리가 늦게 시작하면 무음으로 채운다.
       async=1은 중간에 소리가 끊긴 곳(이어 붙인 파일, OBS 녹화)도 무음으로 채워 뒤쪽이 밀리지 않게 한다.
     """
-    offset = (media.video_start - media.format_start) if media.has_video else 0.0
+    offset = _zero_time(media, tracks)
     shift = f"asetpts=PTS-{offset:.6f}/TB," if abs(offset) > 1e-6 else ""
     return (
         f"{shift}aresample={OUTPUT_SAMPLE_RATE}:async=1:min_hard_comp=0.020:first_pts=0,"
@@ -80,18 +93,31 @@ def track_filter(media: MediaInfo) -> str:
 
 
 def selected_tracks(media: MediaInfo, tracks: Optional[Sequence[int]] = None) -> List[int]:
-    """처리할 오디오 트랙 번호. 지정하지 않으면 모든 트랙을 섞는다.
+    """처리할 오디오 트랙 번호. 지정하지 않으면 FFmpeg가 풀 수 있는 트랙을 모두 섞는다.
 
     게임 소리와 마이크가 따로 녹음된 영상(OBS, 엔비디아 녹화)에서 첫 트랙만 쓰면
-    목소리가 통째로 빠지므로, 기본은 모두 섞기다.
+    목소리가 통째로 빠지므로, 기본은 모두 섞기다. 아이폰 공간 음향처럼 풀 수 없는 트랙은 뺀다.
     """
-    count = len(media.audio_tracks) or (1 if media.has_audio else 0)
+    if not media.audio_tracks:  # 예전 프로젝트 파일 등 트랙 목록이 없을 때
+        return [0] if media.has_audio else []
+    count = len(media.audio_tracks)
+    usable = [t.index for t in media.audio_tracks if t.decodable]
     if tracks is None or len(tracks) == 0:
-        return list(range(count))
+        if not usable:
+            raise ffmpeg.FFmpegError(
+                "이 영상의 오디오는 FFmpeg가 읽을 수 없는 형식입니다 (예: 아이폰 공간 음향만 있는 경우)."
+            )
+        return usable
     chosen = sorted(set(int(t) for t in tracks))
     bad = [t for t in chosen if not 0 <= t < count]
     if bad:
         raise ValueError(f"없는 오디오 트랙입니다: {', '.join(str(t + 1) for t in bad)}번 (이 파일은 {count}개)")
+    unreadable = [t for t in chosen if t not in usable]
+    if unreadable:
+        raise ValueError(
+            f"{', '.join(str(t + 1) for t in unreadable)}번 트랙은 FFmpeg가 읽을 수 없는 형식입니다 "
+            "(예: 아이폰 공간 음향). 다른 트랙을 고르세요."
+        )
     return chosen
 
 
@@ -100,7 +126,7 @@ def source_graph(media: MediaInfo, tracks: Optional[Sequence[int]] = None) -> st
     chosen = selected_tracks(media, tracks)
     if not chosen:
         raise ffmpeg.FFmpegError("이 영상에는 오디오가 없습니다.")
-    per_track = track_filter(media)
+    per_track = track_filter(media, chosen)
     if len(chosen) == 1:
         return f"[0:a:{chosen[0]}]{per_track}[src]"
     parts = [f"[0:a:{t}]{per_track}[t{i}]" for i, t in enumerate(chosen)]
@@ -184,7 +210,7 @@ def balance(
         input_lufs=input_lufs,
         duration=media.duration,
         channels=OUTPUT_CHANNELS,
-        noise_floor=before.noise_floor if before.noise_floor > SILENCE else None,
+        noise_floor=before.noise_floor,
     )
     chain = build_dynamics_chain(others, ctx)
 
@@ -233,7 +259,7 @@ def balance(
         try:
             ffmpeg.run(
                 [
-                    "-y", "-i", src,
+                    "-y", *INPUT_OPTIONS, "-i", src,
                     "-filter_complex", f"{graph};[src]{fc}[out]", "-map", "[out]",
                     "-ar", str(OUTPUT_SAMPLE_RATE), "-ac", str(OUTPUT_CHANNELS), "-c:a", "pcm_s24le",
                     # 4GB가 넘는 긴 오디오(약 4시간)도 깨지지 않게 필요하면 RF64 형식으로 저장

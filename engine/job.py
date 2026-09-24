@@ -104,15 +104,21 @@ def media_warnings(media: MediaInfo, tracks: Sequence[int]) -> List[str]:
     """리졸브로 넘길 때 사용자가 알아야 할 점."""
     notes: List[str] = []
     count = len(media.audio_tracks)
-    if count > 1:
-        if len(tracks) == count:
-            notes.append(
-                f"이 영상에는 오디오 트랙이 {count}개 있어 모두 섞어서 정리했습니다 "
-                "(예: 게임 소리 + 마이크). 한 트랙만 쓰려면 앱의 '오디오 트랙'에서 고르세요."
-            )
-        else:
-            names = ", ".join(f"{t + 1}번" for t in tracks)
-            notes.append(f"오디오 트랙 {count}개 중 {names}만 썼습니다.")
+    usable = [t.index for t in media.audio_tracks if t.decodable]
+    skipped = [t.index for t in media.audio_tracks if not t.decodable]
+    if skipped:
+        names = ", ".join(f"{t + 1}번" for t in skipped)
+        notes.append(
+            f"{names} 오디오 트랙은 FFmpeg가 읽을 수 없는 형식(예: 아이폰 공간 음향)이라 빼고 처리했습니다."
+        )
+    if len(usable) > 1 and list(tracks) == usable:
+        notes.append(
+            f"이 영상에는 오디오 트랙이 {len(usable)}개 있어 모두 섞어서 정리했습니다 "
+            "(예: 게임 소리 + 마이크). 한 트랙만 쓰려면 앱의 '오디오 트랙'에서 고르세요."
+        )
+    elif len(usable) > 1:
+        names = ", ".join(f"{t + 1}번" for t in tracks)
+        notes.append(f"오디오 트랙 {count}개 중 {names}만 썼습니다.")
     if media.has_video:
         native, timeline = media.native_fps, media.fps
         if native > 0 and abs(float(native) / float(timeline) - 1) > 0.001:

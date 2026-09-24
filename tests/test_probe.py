@@ -63,3 +63,29 @@ def test_all_audio_tracks_are_listed(two_track_video):
     assert [t.index for t in info.audio_tracks] == [0, 1]
     assert [t.title for t in info.audio_tracks] == ["Game", "Mic"]
     assert info.audio_tracks[1].label().startswith("2번 트랙")
+
+
+@requires_ffmpeg
+def test_unreadable_track_is_marked(spatial_audio_video):
+    info = probe(spatial_audio_video)
+    assert [t.decodable for t in info.audio_tracks] == [True, False]
+    assert info.has_audio and info.audio_codec == "pcm_s16le"
+
+
+@requires_ffmpeg
+def test_cut_mkv_length_is_real_video_length(cut_mkv):
+    """스트림 복사로 잘라 영상이 늦게 시작하는 MKV도 실제 영상 길이로 타임라인을 만든다."""
+    import json
+
+    from engine.fcpxml import timeline_frames
+    from engine.ffmpeg import find_tool
+
+    info = probe(cut_mkv)
+    out = subprocess.run(
+        [find_tool("ffprobe"), "-v", "error", "-select_streams", "v:0", "-count_frames",
+         "-show_entries", "stream=nb_read_frames", "-of", "json", str(cut_mkv)],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    frames = int(json.loads(out)["streams"][0]["nb_read_frames"])
+    assert info.video_start > 0.1
+    assert timeline_frames(info) == frames

@@ -79,6 +79,22 @@ def test_frame_clock():
 
 
 @pytest.mark.parametrize(
+    "fps, seconds, expected",
+    [
+        (Fraction(30), 10.033333, 301),  # ffprobe가 소수점 6자리로 적은 301프레임
+        (Fraction(30000, 1001), 10.043367, 301),
+        (Fraction(30), 10.033, 301),  # MKV처럼 1ms 단위로 적힌 길이
+        (Fraction(60), 10.016, 601),
+        (Fraction(30), 10.05, 301),  # 반 프레임 넘게 남아도 다음 프레임으로 올리지는 않는다
+        (Fraction(30), 0.0, 0),
+    ],
+)
+def test_frame_count_survives_rounded_lengths(fps, seconds, expected):
+    """마지막 프레임이 잘리지 않는다 (점검 결과, 소수점 반올림)."""
+    assert FrameClock(fps).frames(seconds) == expected
+
+
+@pytest.mark.parametrize(
     "measured, expected",
     [
         (Fraction(2997, 100), Fraction(30000, 1001)),

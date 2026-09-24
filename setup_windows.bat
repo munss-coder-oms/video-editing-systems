@@ -22,10 +22,6 @@ call "%~dp0find_conda.bat"
 if not defined CONDA_BAT call :ask_conda
 if not defined CONDA_BAT goto :no_conda
 echo Using conda: %CONDA_BAT%
-rem Remember this conda so the app and check_setup.bat use the same one.
-if not exist "%STATE_DIR%" mkdir "%STATE_DIR%"
-> "%STATE_DIR%\conda_path.txt" echo %CONDA_BAT%
-
 rem Earlier versions installed PySide6 with pip, which clashes with conda-forge DLLs.
 rem Remove it first (does nothing on a fresh install).
 call "%CONDA_BAT%" run -n %ENV_NAME% python -m pip uninstall -y PySide6 PySide6_Essentials PySide6_Addons shiboken6 >nul 2>&1
@@ -39,6 +35,11 @@ if errorlevel 1 (
   if not defined NOPAUSE pause
   exit /b 1
 )
+
+rem Remember this conda so the app and check_setup.bat use the same one.
+rem Saved only after the environment is ready, so a failed install never points them at a conda without it.
+if not exist "%STATE_DIR%" mkdir "%STATE_DIR%"
+> "%STATE_DIR%\conda_path.txt" echo %CONDA_BAT%
 
 echo.
 echo [2/3] Running automatic tests...

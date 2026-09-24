@@ -200,9 +200,10 @@ class LiftQuiet(Command):
         """(입력 dB, 출력 dB) 점 목록. 올릴 수 없는 소리(너무 시끄러운 녹음 등)면 None."""
         lift = self._PRESETS[self.strength]
         level = ctx.channel_level + self._ENVELOPE_OFFSET_DB  # 보통 말소리
-        # 바닥 소음이 말소리보다 15dB 넘게 작을 때만 믿는다. 아니면 쉬는 구간이 없는 녹음으로 본다.
+        # 잰 바닥 소음은 항상 믿는다. 소음이 말소리와 가까우면 덜 올리거나 올리지 않는다
+        # (작은 목소리를 덜 올리는 것보다 쉬는 구간의 잡음을 키우는 쪽이 더 거슬린다).
         floor = level - 40.0
-        if ctx.noise_floor is not None and ctx.noise_floor < ctx.input_lufs - 15.0:
+        if ctx.noise_floor is not None:
             noise = ctx.noise_floor - 10 * math.log10(max(1, ctx.channels)) + self._ENVELOPE_OFFSET_DB
             floor = max(floor, noise + 6.0)  # 바닥 소음보다 6dB 위까지는 그대로 둔다
         floor = max(floor, -85.0)
