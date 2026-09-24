@@ -55,6 +55,7 @@ def test_structure_for_resolve():
     video, audio = root.findall("resources/asset")
     assert video.get("format") == "r2"  # 원본 형식 (타임라인 형식 r1과 따로)
     assert video.get("hasVideo") == "1"
+    assert video.get("hasAudio") is None  # 원본 오디오가 타임라인에 함께 올라오지 않게
     assert audio.get("hasAudio") == "1" and audio.get("audioRate") == "48000"
     clip = root.find("library/event/project/sequence/spine/asset-clip")
     assert clip.get("ref") == video.get("id")

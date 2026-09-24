@@ -30,6 +30,7 @@ class Project:
     source: str
     commands: List[Command] = field(default_factory=list)
     media: dict = field(default_factory=dict)
+    settings: dict = field(default_factory=dict)  # 쓴 오디오 트랙 등 사용자가 고른 값
     outputs: dict = field(default_factory=dict)
     reports: dict = field(default_factory=dict)
     app_version: str = __version__
@@ -41,6 +42,7 @@ class Project:
             "source": self.source,
             "media": self.media,
             "commands": [c.to_dict() for c in self.commands],
+            "settings": self.settings,
             "outputs": self.outputs,
             "reports": self.reports,
         }
@@ -59,6 +61,7 @@ class Project:
             source=data["source"],
             commands=commands_from_list(data.get("commands", [])),
             media=data.get("media", {}),
+            settings=data.get("settings", {}),
             outputs=data.get("outputs", {}),
             reports=data.get("reports", {}),
             app_version=data.get("app_version", __version__),

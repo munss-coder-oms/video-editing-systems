@@ -20,6 +20,17 @@ jobs:
         shell: cmd
         run: call setup_windows.bat
 
+      - name: 바탕화면 바로가기가 만들어졌는지
+        shell: pwsh
+        run: |
+          $p = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Video Editing.lnk'
+          if (-not (Test-Path -LiteralPath $p)) { Write-Error "바로가기 없음: $p"; exit 1 }
+          (New-Object -ComObject WScript.Shell).CreateShortcut($p).TargetPath
+
+      - name: setup_windows.bat 두 번째 실행 (새 버전으로 바꿀 때와 같음)
+        shell: cmd
+        run: call setup_windows.bat
+
       - name: 자동 테스트
         shell: cmd
         run: call "%CONDA%\condabin\conda.bat" run -n video-editing --no-capture-output python -m pytest -q
@@ -31,6 +42,16 @@ jobs:
           set RC=%errorlevel%
           type setup_check_result.txt
           exit /b %RC%
+
+      - name: conda 위치 기록이 없어도 찾는지 (사용자 PC처럼 환경 변수 없이)
+        shell: cmd
+        run: |
+          set "CONDA="
+          set "CONDA_EXE="
+          del "%LOCALAPPDATA%\video-editing-systems\conda_path.txt" >nul 2>&1
+          call find_conda.bat
+          echo found: %CONDA_BAT%
+          if not defined CONDA_BAT exit /b 1
 
       - name: run_app.bat (바탕화면 아이콘과 같은 실행)
         shell: cmd

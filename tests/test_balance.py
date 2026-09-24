@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from pathlib import Path
 
 import pytest
 
@@ -11,7 +13,7 @@ from engine.job import process_video
 from engine.balance import balance
 from engine.probe import probe
 
-from .conftest import load_mono, requires_ffmpeg, segment_lufs, segment_rms
+from .conftest import ffmpeg, load_mono, requires_ffmpeg, segment_lufs, segment_rms
 
 pytestmark = requires_ffmpeg
 
@@ -108,10 +110,12 @@ def test_section_gain_command(click_audio, tmp_path):
     cmds = [Gain(start=1.0, end=3.0, db=-10.0)]
     result = balance(media, cmds, tmp_path / "out.wav")
     wav = result.output_wav
-    changed = segment_rms(wav, 1.2, 1.6) - segment_rms(click_audio, 1.2, 1.6)
+    # 모노 원본도 스테레오로 내보내므로(채널마다 -3dB) 바꾸지 않은 구간과 비교한 차이로 본다.
     same = segment_rms(wav, 7.0, 3.0) - segment_rms(click_audio, 7.0, 3.0)
+    changed = segment_rms(wav, 1.2, 1.6) - segment_rms(click_audio, 1.2, 1.6) - same
+    early = segment_rms(wav, 0.2, 0.6) - segment_rms(click_audio, 0.2, 0.6) - same
     assert changed == pytest.approx(-10.0, abs=0.5)
-    assert same == pytest.approx(0.0, abs=0.5)
+    assert early == pytest.approx(0.0, abs=0.5)
 
 
 def test_default_commands_end_with_normalize():
@@ -149,5 +153,124 @@ def test_section_gain_uses_video_time(late_audio_video, click_audio, tmp_path):
     media = probe(late_audio_video)
     result = balance(media, [Gain(start=5.3, end=5.6, db=-20.0)], tmp_path / "out.wav")
     d = media.audio_start - media.video_start
-    changed = segment_rms(result.output_wav, 5.0 + d, 0.05) - segment_rms(click_audio, 5.0, 0.05)
+    same = segment_rms(result.output_wav, 8.0 + d, 2.0) - segment_rms(click_audio, 8.0, 2.0)
+    changed = segment_rms(result.output_wav, 5.0 + d, 0.05) - segment_rms(click_audio, 5.0, 0.05) - same
     assert changed == pytest.approx(-20.0, abs=1.0)
+
+
+def test_early_audio_is_trimmed_to_video(early_audio_video, click_audio, tmp_path):
+    """오디오가 영상보다 먼저 시작하면 영상 첫 프레임 전의 소리를 잘라서 맞춘다."""
+    result = process_video(early_audio_video, output_dir=tmp_path)
+    expected = _tone_onset(load_mono(click_audio)) - 0.3
+    onset = _tone_onset(load_mono(result.balance.output_wav), 4.0, 6.5)
+    assert abs(onset - expected) < 0.003
+
+
+def test_joined_file_gap_keeps_sync(joined_video, click_audio, tmp_path):
+    """중간에 소리가 끊긴 파일(이어 붙인 영상)도 끊긴 곳을 무음으로 채워 뒤쪽이 밀리지 않는다."""
+    result = process_video(joined_video, output_dir=tmp_path)
+    expected = _tone_onset(load_mono(click_audio)) + 2.0  # 원본 5초 → 뒤 파일 2초 → 영상 7초
+    onset = _tone_onset(load_mono(result.balance.output_wav), 6.0, 8.5)
+    assert abs(onset - expected) < 0.003
+
+
+def _wav_samples(path) -> int:
+    import subprocess
+
+    from engine.ffmpeg import find_tool
+
+    out = subprocess.run(
+        [find_tool("ffprobe"), "-v", "error", "-select_streams", "a:0", "-count_packets",
+         "-show_entries", "stream=duration_ts,channels,sample_rate", "-of", "json", str(path)],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    import json
+
+    return json.loads(out)["streams"][0]
+
+
+@pytest.mark.parametrize("fixture", ["uneven_video", "late_audio_video", "joined_video"])
+def test_wav_matches_timeline_length(fixture, request, tmp_path):
+    """WAV가 리졸브 타임라인의 영상 길이와 샘플 단위까지 같고, 항상 48kHz 스테레오다."""
+    from engine.fcpxml import timeline_frames
+
+    video = request.getfixturevalue(fixture)
+    result = process_video(video, output_dir=tmp_path)
+    info = _wav_samples(result.balance.output_wav)
+    expected = round(timeline_frames(result.media) * 48000 / result.media.fps)
+    assert int(info["duration_ts"]) == expected
+    assert int(info["channels"]) == 2 and int(info["sample_rate"]) == 48000
+
+
+@pytest.mark.parametrize("strength", ["medium", "strong"])
+def test_room_noise_in_long_pause_not_boosted(noisy_pause_audio, tmp_path, strength):
+    """말을 오래 쉬는 동안의 방 소음이 말소리에 비해 3dB 넘게 커지지 않는다 (점검 E2)."""
+    result = process_video(noisy_pause_audio, output_dir=tmp_path, strength=strength)
+    wav = result.balance.output_wav
+    before = segment_rms(noisy_pause_audio, 12, 3) - segment_rms(noisy_pause_audio, 2, 7)
+    after = segment_rms(wav, 12, 3) - segment_rms(wav, 2, 7)
+    assert after - before < 3.0
+
+
+@pytest.mark.parametrize("strength", ["weak", "medium", "strong"])
+def test_lone_word_in_pause_is_kept(noisy_pause_audio, tmp_path, strength):
+    """오래 쉬다가 짧게 한마디 한 소리가 줄어들지 않는다."""
+    result = process_video(noisy_pause_audio, output_dir=tmp_path, strength=strength)
+    wav = result.balance.output_wav
+    before = segment_rms(noisy_pause_audio, 16.05, 0.4) - segment_rms(noisy_pause_audio, 2, 7)
+    after = segment_rms(wav, 16.05, 0.4) - segment_rms(wav, 2, 7)
+    assert abs(after - before) < 3.0
+
+
+def test_mono_and_stereo_get_same_processing(uneven_video, media_dir, tmp_path):
+    """같은 소리면 모노든 스테레오든 같은 강도로 처리된다 (점검 E3)."""
+    mono = media_dir / "uneven_mono.wav"
+    ffmpeg("-i", str(uneven_video), "-vn", "-ac", "1", "-c:a", "pcm_s16le", str(mono))
+    stereo = media_dir / "uneven_stereo.wav"
+    ffmpeg("-i", str(mono), "-af", "pan=stereo|c0=c0|c1=c0", "-c:a", "pcm_s16le", str(stereo))
+    diffs = []
+    for i, src in enumerate((mono, stereo)):
+        wav = process_video(src, output_dir=tmp_path / str(i)).balance.output_wav
+        diffs.append(segment_lufs(wav, 2, 7) - segment_lufs(wav, 13, 6))
+    assert abs(diffs[0] - diffs[1]) < 1.0
+
+
+def test_all_audio_tracks_are_mixed_by_default(two_track_video, tmp_path):
+    """게임 소리와 마이크가 따로 녹음돼 있으면 기본으로 둘 다 섞는다 (마이크가 빠지지 않게)."""
+    import numpy as np
+
+    result = process_video(two_track_video, output_dir=tmp_path / "all")
+    assert result.balance.audio_tracks == [0, 1]
+    assert any("오디오 트랙이 2개" in w for w in result.warnings)
+    x = load_mono(result.balance.output_wav)
+    mic = np.abs(x[int(5.0 * 48000):int(5.05 * 48000)]).max()
+    around = np.abs(x[int(4.0 * 48000):int(4.9 * 48000)]).max()
+    assert mic > around
+
+    only_game = process_video(two_track_video, output_dir=tmp_path / "game", audio_tracks=[0])
+    assert only_game.balance.audio_tracks == [0]
+    data = json.loads((Path(only_game.output_dir) / "project.json").read_text(encoding="utf-8"))
+    assert data["settings"]["audio_tracks"] == [0]
+
+
+def test_bad_track_number_rejected(two_track_video, tmp_path):
+    with pytest.raises(ValueError):
+        process_video(two_track_video, output_dir=tmp_path, audio_tracks=[5])
+
+
+def test_near_silent_track_is_not_blown_up(media_dir, tmp_path):
+    """마이크가 빠져 거의 무음인 트랙은 목표까지 키우지 않고 알린다 (점검 L2)."""
+    path = media_dir / "near_silent.wav"
+    ffmpeg("-f", "lavfi", "-i", "anoisesrc=c=pink:a=0.005:d=10:r=48000", "-c:a", "pcm_s16le", str(path))
+    result = process_video(path, output_dir=tmp_path)
+    b, a = result.balance.before, result.balance.after
+    assert -70 < b.integrated < -45
+    assert a.integrated - b.integrated <= 26.0
+    assert any("거의 없습니다" in w for w in result.balance.warnings)
+
+
+def test_progress_never_goes_backwards(uneven_video, tmp_path):
+    values = []
+    process_video(uneven_video, output_dir=tmp_path, on_stage=lambda _s, v: values.append(v))
+    assert values == sorted(values)
+    assert values[-1] == pytest.approx(1.0)

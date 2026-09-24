@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from . import ffmpeg
 
@@ -31,6 +31,24 @@ _TC_RE = re.compile(r"^(\d{1,2})[:;](\d{2})[:;](\d{2})([:;.])(\d{2,3})$")
 
 
 @dataclass
+class AudioTrack:
+    """파일 안의 오디오 트랙 하나 (게임 소리·마이크가 따로 녹음된 영상은 여러 개)."""
+
+    index: int  # 오디오 트랙 순서 (0부터). FFmpeg의 0:a:<index>
+    channels: int = 0
+    sample_rate: int = 0
+    codec: str = ""
+    title: str = ""  # OBS 등이 붙인 트랙 이름 (없으면 빈 값)
+    language: str = ""
+
+    def label(self) -> str:
+        name = f"{self.index + 1}번 트랙"
+        extra = [f"{self.channels}ch" if self.channels else "", self.title, self.language]
+        extra = [e for e in extra if e and e != "und"]
+        return f"{name} ({', '.join(extra)})" if extra else name
+
+
+@dataclass
 class MediaInfo:
     path: str
     duration: float
@@ -41,13 +59,16 @@ class MediaInfo:
     native_frame_rate: str = ""  # 파일에 기록된 프레임 속도 (120fps 슬로모션 등 그대로)
     video_duration: float = 0.0  # 영상 트랙 길이 (전체 길이와 다를 수 있음)
     video_start: float = 0.0  # 영상 트랙 시작 시각 (초)
-    audio_start: float = 0.0  # 오디오 트랙 시작 시각 (초). 영상과 다르면 싱크를 맞춰 준다
+    audio_start: float = 0.0  # 첫 오디오 트랙 시작 시각 (초). 영상과 다르면 싱크를 맞춰 준다
+    format_start: float = 0.0  # 파일 전체 시작 시각. FFmpeg는 이 값을 0으로 당겨서 처리한다
+    variable_frame_rate: bool = False  # 휴대폰 영상처럼 프레임 간격이 일정하지 않음
     timecode: str = ""  # 카메라가 기록한 시작 타임코드 ("01:00:00:00"). 없으면 빈 값
     has_audio: bool = False
     audio_channels: int = 0
     audio_sample_rate: int = 0
     audio_codec: str = ""
     video_codec: str = ""
+    audio_tracks: List[AudioTrack] = field(default_factory=list)
 
     @property
     def fps(self) -> Fraction:
@@ -185,34 +206,6 @@ def _clean_rate(rate: Fraction) -> Fraction:
     return rate.limit_denominator(1001)
 
 
-def _first_audio_pts(path: Path) -> Optional[float]:
-    """처음 디코딩되는 오디오 프레임의 시각.
-
-    스트림 start_time에는 디코더가 버리는 앞부분(Opus pre-skip 등)이 들어 있을 수 있어,
-    실제로 소리가 나오는 첫 프레임 시각을 쓴다.
-    """
-    try:
-        result = ffmpeg.run(
-            [
-                "-v", "error", "-select_streams", "a:0", "-show_frames",
-                "-read_intervals", "%+#10", "-show_entries", "frame=pts_time",
-                "-of", "csv=p=0", str(path),
-            ],
-            tool="ffprobe",
-        )
-    except ffmpeg.FFmpegError:
-        return None
-    for line in result.stdout.splitlines():
-        line = line.strip().rstrip(",")
-        try:
-            v = float(line)
-        except ValueError:
-            continue
-        if math.isfinite(v):
-            return v
-    return None
-
-
 def probe(path: str | Path) -> MediaInfo:
     path = Path(path)
     if not path.is_file():
@@ -254,6 +247,7 @@ def probe(path: str | Path) -> MediaInfo:
             native = nominal
         else:  # 가변 프레임: 평균값 사용
             native = avg if avg > 0 else nominal
+            info.variable_frame_rate = nominal > 0 and avg > 0
         if native > 0:
             native = _clean_rate(native)
             info.native_frame_rate = f"{native.numerator}/{native.denominator}"
@@ -270,11 +264,36 @@ def probe(path: str | Path) -> MediaInfo:
         info.video_start = _float(video.get("start_time"))
         info.video_codec = video.get("codec_name", "")
         info.timecode = _find_timecode(data, streams, video)
+    info.format_start = _float(data.get("format", {}).get("start_time"))
+    audios = [s for s in streams if s.get("codec_type") == "audio"]
+    for i, a in enumerate(audios):
+        tags = a.get("tags") or {}
+        info.audio_tracks.append(
+            AudioTrack(
+                index=i,
+                channels=int(a.get("channels") or 0),
+                sample_rate=int(a.get("sample_rate") or 0),
+                codec=a.get("codec_name", ""),
+                title=_track_title(tags),
+                language=(tags.get("language") or "").strip(),
+            )
+        )
     if audio:
         info.has_audio = True
         info.audio_channels = int(audio.get("channels") or 0)
         info.audio_sample_rate = int(audio.get("sample_rate") or 0)
         info.audio_codec = audio.get("codec_name", "")
-        first = _first_audio_pts(path) if video else None
-        info.audio_start = first if first is not None else _float(audio.get("start_time"))
+        info.audio_start = _float(audio.get("start_time"))
     return info
+
+
+_GENERIC_HANDLERS = {"soundhandler", "sound media handler", "core media audio", "apple sound media handler", "audio"}
+
+
+def _track_title(tags: dict) -> str:
+    """OBS 등이 붙인 트랙 이름. mp4가 자동으로 붙이는 의미 없는 이름(SoundHandler 등)은 뺀다."""
+    title = (tags.get("title") or "").strip()
+    if title:
+        return title
+    handler = (tags.get("handler_name") or "").strip()
+    return "" if handler.lower() in _GENERIC_HANDLERS else handler

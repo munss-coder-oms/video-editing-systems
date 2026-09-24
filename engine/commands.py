@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field, fields
 from typing import ClassVar, Dict, List, Optional, Type
 
@@ -25,6 +26,17 @@ class AudioContext:
 
     input_lufs: float  # 원본 말소리의 보통 음량 (loudness.typical_level)
     duration: float
+    channels: int = 2  # 엔진은 항상 스테레오로 바꿔서 처리한다
+    noise_floor: Optional[float] = None  # 말을 쉬는 순간의 바닥 소음 (LUFS). 모르면 None
+
+    @property
+    def channel_level(self) -> float:
+        """채널 하나의 말소리 크기 (dBFS 근사).
+
+        LUFS는 채널을 모두 더한 값이지만 압축기와 작은 소리 올리기는 채널마다 동작하므로,
+        채널 수만큼 빼야 모노와 스테레오가 같은 강도로 처리된다.
+        """
+        return self.input_lufs - 10 * math.log10(max(1, self.channels))
 
 
 _REGISTRY: Dict[str, Type["Command"]] = {}
@@ -150,7 +162,7 @@ class TamePeaks(Command):
         above, ratio = self._PRESETS[self.strength]
         if self.threshold_db is not None:
             above = self.threshold_db
-        threshold_db = min(-1.0, max(-60.0, ctx.input_lufs + above))
+        threshold_db = min(-1.0, max(-60.0, ctx.channel_level + above))
         threshold = _db_to_linear(threshold_db)
         return (
             f"acompressor=threshold={threshold:.6f}:ratio={ratio}:attack=5:release=200"
@@ -161,35 +173,64 @@ class TamePeaks(Command):
 @register
 @dataclass
 class LiftQuiet(Command):
-    """작은 목소리 올리기 (A-04). 조용히 말한 구간을 끌어올려 전체를 고르게 한다."""
+    """작은 목소리 올리기 (A-04). 조용히 말한 구간을 끌어올려 전체를 고르게 한다.
+
+    소리 크기에 따라 올리는 양이 정해진 곡선(FFmpeg compand)을 쓴다.
+    - 보통 말소리: 그대로
+    - 보통보다 8~18dB 작은 말소리: 최대치만큼 올림
+    - 말을 쉬는 순간의 바닥 소음(방 소음, 선풍기, 배경음): 올리지 않음
+    쉬는 구간이 길어도 잡음이 커지지 않고, 쉬는 중간의 짧은 한마디도 그대로 들린다.
+    """
 
     op: ClassVar[str] = "lift_quiet"
     stage: ClassVar[int] = 30
 
     strength: str = "medium"
 
-    _PRESETS: ClassVar[dict] = {
-        # 최대 증폭 배수, 분석 단위(ms), 부드럽게 바꾸는 창 크기(단위 개수, 홀수)
-        "weak": (2.5, 400, 31),
-        "medium": (4.0, 300, 21),
-        "strong": (8.0, 250, 15),
-    }
+    _PRESETS: ClassVar[dict] = {"weak": 5.0, "medium": 8.0, "strong": 12.0}  # 최대로 올리는 양(dB)
+    # compand가 재는 소리 크기는 짧게 들어 올리고(0.03초) 천천히 내려(0.8초) RMS보다 약 3dB 크다.
+    _ENVELOPE_OFFSET_DB: ClassVar[float] = 3.0
+    _ATTACK: ClassVar[float] = 0.03
+    _DECAY: ClassVar[float] = 0.8
 
     def validate(self) -> None:
         _check_strength(self.strength)
 
-    # 말소리를 이 크기(약 -20 dBFS RMS)에 맞춘 뒤, 작은 구간을 이 크기까지 끌어올린다.
-    _SPEECH_DBFS: ClassVar[float] = -20.0
+    def curve(self, ctx: AudioContext) -> Optional[List[tuple]]:
+        """(입력 dB, 출력 dB) 점 목록. 올릴 수 없는 소리(너무 시끄러운 녹음 등)면 None."""
+        lift = self._PRESETS[self.strength]
+        level = ctx.channel_level + self._ENVELOPE_OFFSET_DB  # 보통 말소리
+        # 바닥 소음이 말소리보다 15dB 넘게 작을 때만 믿는다. 아니면 쉬는 구간이 없는 녹음으로 본다.
+        floor = level - 40.0
+        if ctx.noise_floor is not None and ctx.noise_floor < ctx.input_lufs - 15.0:
+            noise = ctx.noise_floor - 10 * math.log10(max(1, ctx.channels)) + self._ENVELOPE_OFFSET_DB
+            floor = max(floor, noise + 6.0)  # 바닥 소음보다 6dB 위까지는 그대로 둔다
+        floor = max(floor, -85.0)
+        upper = level - 8.0
+        lower = max(level - 18.0, floor + lift)  # 곡선이 너무 가파르지 않게
+        if lower > upper - 2.0:  # 잡음이 큰 녹음: 올리는 양을 줄인다
+            lower = upper - 2.0
+            lift = lower - floor
+        if lift < 0.5 or level >= -1.0:
+            return None
+        return [
+            (-90.0, -90.0),
+            (floor, floor),
+            (lower, lower + lift),
+            (upper, upper + lift * 0.6),
+            (level, level),
+            (0.0, 0.0),
+        ]
 
-    def audio_filter(self, ctx: AudioContext) -> str:
-        maxgain, framelen, window = self._PRESETS[self.strength]
-        pre_gain = max(-30.0, min(30.0, self._SPEECH_DBFS - ctx.input_lufs))
-        target_rms = _db_to_linear(self._SPEECH_DBFS)
-        # threshold: 말소리를 맞춘 뒤 -40 dBFS보다 작은 소리(무음·바닥 소음)는 키우지 않는다.
+    def audio_filter(self, ctx: AudioContext) -> Optional[str]:
+        points = self.curve(ctx)
+        if not points:
+            return None
+        text = "|".join(f"{i:.1f}/{o:.1f}" for i, o in points)
+        level = points[-2][0]
         return (
-            f"volume={pre_gain:.2f}dB,"
-            f"dynaudnorm=framelen={framelen}:gausssize={window}:peak=0.9"
-            f":maxgain={maxgain}:targetrms={target_rms:.4f}:threshold=0.01"
+            f"compand=attacks={self._ATTACK}:decays={self._DECAY}:points={text}"
+            f":soft-knee=4:volume={level:.1f}"
         )
 
 

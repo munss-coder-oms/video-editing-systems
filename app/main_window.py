@@ -35,8 +35,10 @@ from engine.ffmpeg import Cancelled, FFmpegError, find_tool
 from engine.job import JobResult, default_output_dir, process_video
 from engine.probe import MediaInfo, probe
 
-VIDEO_FILTER = "영상 파일 (*.mp4 *.mov *.mkv *.m4v *.avi *.mts *.m2ts *.webm);;모든 파일 (*.*)"
-VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".mts", ".m2ts", ".webm", ".wav", ".mp3", ".m4a"}
+VIDEO_FILTER = "영상 파일 (*.mp4 *.mov *.mkv *.m4v *.avi *.mts *.m2ts *.mxf *.webm);;모든 파일 (*.*)"
+VIDEO_SUFFIXES = {
+    ".mp4", ".mov", ".mkv", ".m4v", ".avi", ".mts", ".m2ts", ".mxf", ".webm", ".wav", ".mp3", ".m4a",
+}
 
 
 class Worker(QObject):
@@ -45,12 +47,13 @@ class Worker(QObject):
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, video: str, output_dir: str, strength: str, target: float):
+    def __init__(self, video: str, output_dir: str, strength: str, target: float, tracks=None):
         super().__init__()
         self.video = video
         self.output_dir = output_dir
         self.strength = strength
         self.target = target
+        self.tracks = tracks
         self._cancel = False
 
     def cancel(self) -> None:
@@ -64,6 +67,7 @@ class Worker(QObject):
                 output_dir=self.output_dir,
                 strength=self.strength,
                 target_lufs=self.target,
+                audio_tracks=self.tracks,
                 on_stage=lambda stage, value: self.progress.emit(stage, value),
                 is_cancelled=lambda: self._cancel,
             )
@@ -78,7 +82,11 @@ class Worker(QObject):
                 "결과 폴더를 [바꾸기...]로 다른 곳으로 고른 뒤 다시 실행하세요.\n\n" + str(exc)
             )
         except OSError as exc:
-            self.failed.emit(f"파일을 읽거나 쓰는 중에 문제가 생겼습니다.\n\n{exc}")
+            self.failed.emit(
+                "파일을 읽거나 쓰는 중에 문제가 생겼습니다. 결과 폴더에 쓸 수 없거나(읽기 전용, 권한 없음) "
+                "디스크 공간이 부족할 수 있습니다. [바꾸기...]로 다른 결과 폴더를 고른 뒤 다시 실행하세요."
+                f"\n\n{exc}"
+            )
         except Exception:  # 예상 못 한 오류도 화면에 보여준다
             self.failed.emit(traceback.format_exc())
         else:
@@ -87,6 +95,7 @@ class Worker(QObject):
 
 class DropArea(QFrame):
     fileDropped = Signal(str)
+    dropProblem = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -101,14 +110,26 @@ class DropArea(QFrame):
         layout.addWidget(self.label)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        urls = event.mimeData().urls()
-        if urls and Path(urls[0].toLocalFile()).suffix.lower() in VIDEO_SUFFIXES:
+        # 지원하지 않는 파일도 일단 받아서, 놓았을 때 왜 안 되는지 알려 준다.
+        if any(u.isLocalFile() for u in event.mimeData().urls()):
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent) -> None:
-        urls = event.mimeData().urls()
-        if urls:
-            self.fileDropped.emit(urls[0].toLocalFile())
+        files = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        if not files:
+            return
+        usable = [f for f in files if Path(f).suffix.lower() in VIDEO_SUFFIXES]
+        if not usable:
+            suffix = Path(files[0]).suffix or "(확장자 없음)"
+            self.dropProblem.emit(
+                f"지원하지 않는 파일 형식입니다: {suffix}. mp4, mov, mkv 같은 영상 파일을 넣어 주세요."
+            )
+            return
+        if len(files) > 1:
+            self.dropProblem.emit(
+                f"한 번에 영상 하나씩 처리합니다. 첫 번째 영상({Path(usable[0]).name})을 열었습니다."
+            )
+        self.fileDropped.emit(usable[0])
 
 
 class MainWindow(QMainWindow):
@@ -127,6 +148,7 @@ class MainWindow(QMainWindow):
 
         self.media: Optional[MediaInfo] = None
         self.output_dir: Optional[str] = None
+        self.output_parent: Optional[str] = None  # [바꾸기...]로 고른 폴더. 없으면 영상 옆
         self.result: Optional[JobResult] = None
         self.thread: Optional[QThread] = None
         self.worker: Optional[Worker] = None
@@ -145,6 +167,7 @@ class MainWindow(QMainWindow):
         # 1. 영상 열기
         self.drop = DropArea()
         self.drop.fileDropped.connect(self.load_video)
+        self.drop.dropProblem.connect(self.show_drop_problem)
         root.addWidget(self.drop)
 
         open_row = QHBoxLayout()
@@ -176,8 +199,22 @@ class MainWindow(QMainWindow):
         self.target.setToolTip("유튜브 기준은 -14 LUFS입니다.")
         form.addRow("목표 음량", self.target)
 
+        # 게임 소리·마이크처럼 오디오 트랙이 여러 개인 영상에서만 보인다.
+        self.tracks = QComboBox()
+        self.tracks.setToolTip(
+            "이 영상에는 오디오 트랙이 여러 개 있습니다 (예: 게임 소리와 마이크).\n"
+            "보통은 '모든 트랙 섞기'를 쓰고, 목소리 트랙만 쓰고 싶으면 그 트랙을 고르세요."
+        )
+        self.tracks_label = QLabel("오디오 트랙")
+        form.addRow(self.tracks_label, self.tracks)
+        self.tracks_label.setVisible(False)
+        self.tracks.setVisible(False)
+
         out_row = QHBoxLayout()
-        self.out_label = QLabel("영상을 열면 영상 옆에 '<이름>_resolve' 폴더를 만듭니다")
+        self.out_label = QLabel(
+            "영상을 열면 영상 옆에 '<이름>_resolve' 폴더를 만듭니다. 다시 처리하면 '_2', '_3' 폴더에 "
+            "따로 저장해서 이전 결과를 덮어쓰지 않습니다."
+        )
         self.out_label.setWordWrap(True)
         self.out_btn = QPushButton("바꾸기...")
         self.out_btn.clicked.connect(self.choose_output)
@@ -263,8 +300,9 @@ class MainWindow(QMainWindow):
             return
         if media.duration <= 0:
             msg = (
-                "이 영상은 길이 정보가 없어 처리할 수 없습니다 (브라우저로 녹화한 WebM 등). "
-                "MP4로 다시 저장한 뒤 열어 주세요."
+                "이 영상은 길이 정보가 없어 처리할 수 없습니다. 녹화가 비정상적으로 끝난 파일이거나 "
+                "브라우저로 녹화한 WebM일 수 있습니다. OBS 녹화라면 OBS의 [파일 → 녹화 리먹스]로 "
+                "MP4로 바꾼 뒤 열어 주세요."
             )
             self.stage.setText(msg)
             if self.interactive:
@@ -273,21 +311,41 @@ class MainWindow(QMainWindow):
         self.media = media
         self.result = None
         self.settings.setValue("last_dir", str(Path(path).parent))
-        self.output_dir = str(default_output_dir(path))
+        self.output_dir = str(default_output_dir(path, self.output_parent))
         self.drop.label.setText(f"{Path(path).name}\n{media.summary()}")
         self.out_label.setText(self.output_dir)
+        self.fill_tracks(media)
         self.run_btn.setEnabled(True)
         self.open_out_btn.setEnabled(False)
         self.report.clear()
         self.progress.setValue(0)
         self.stage.setText("")
 
+    def fill_tracks(self, media: MediaInfo) -> None:
+        self.tracks.clear()
+        several = len(media.audio_tracks) > 1
+        if several:
+            self.tracks.addItem(f"모든 트랙 섞기 ({len(media.audio_tracks)}개, 추천)", None)
+            for track in media.audio_tracks:
+                self.tracks.addItem(f"{track.label()}만 쓰기", [track.index])
+        self.tracks_label.setVisible(several)
+        self.tracks.setVisible(several)
+
+    @Slot(str)
+    def show_drop_problem(self, message: str) -> None:
+        self.stage.setText(message)
+
     def choose_output(self) -> None:
-        start = self.output_dir or self.settings.value("last_dir", str(Path.home()))
-        folder = QFileDialog.getExistingDirectory(self, "결과 폴더 고르기", start)
+        start = self.output_parent or self.settings.value("last_dir", str(Path.home()))
+        folder = QFileDialog.getExistingDirectory(self, "결과를 넣을 폴더 고르기", start)
         if folder:
-            self.output_dir = folder
-            self.out_label.setText(folder)
+            # 고른 폴더 안에 영상마다 '<이름>_resolve' 폴더를 만든다.
+            self.output_parent = folder
+            if self.media:
+                self.output_dir = str(default_output_dir(self.media.path, folder))
+                self.out_label.setText(self.output_dir)
+            else:
+                self.out_label.setText(f"{folder} 안에 영상마다 '<이름>_resolve' 폴더를 만듭니다")
 
     # ---------- 실행 ----------
 
@@ -299,7 +357,8 @@ class MainWindow(QMainWindow):
         self.settings.setValue("strength", strength)
         self.settings.setValue("target", target)
 
-        self.worker = Worker(self.media.path, self.output_dir, strength, target)
+        tracks = self.tracks.currentData() if self.tracks.count() else None  # None = 모든 트랙 섞기
+        self.worker = Worker(self.media.path, self.output_dir, strength, target, tracks)
         self.thread = QThread(self)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
@@ -328,6 +387,7 @@ class MainWindow(QMainWindow):
         self.out_btn.setEnabled(not busy)
         self.strength.setEnabled(not busy)
         self.target.setEnabled(not busy)
+        self.tracks.setEnabled(not busy)
         self.drop.setAcceptDrops(not busy)
 
     @Slot(str, float)
@@ -339,8 +399,16 @@ class MainWindow(QMainWindow):
     def on_finished(self, result: JobResult) -> None:
         self.result = result
         self.progress.setValue(1000)
-        self.stage.setText("완료! 결과 폴더의 .fcpxml 파일을 다빈치 리졸브에서 불러오세요.")
+        if result.fcpxml:
+            done = "완료! 결과 폴더의 .fcpxml 파일을 다빈치 리졸브에서 불러오세요."
+        else:
+            done = "완료! 오디오 파일이라 타임라인 없이 정리된 .wav만 만들었습니다."
+        alerts = len(result.warnings) + len(result.balance.warnings)
+        if alerts:
+            done += f" 알림 {alerts}개가 있으니 아래 결과를 확인하세요."
+        self.stage.setText(done)
         self.report.setPlainText(result.summary() + f"\n\n결과 폴더: {result.output_dir}")
+        self.out_label.setText(result.output_dir)
         self.open_out_btn.setEnabled(True)
 
     @Slot(str)
@@ -373,11 +441,15 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(self.result.output_dir))
 
     def show_guide(self) -> None:
-        from engine.job import RESOLVE_GUIDE
+        from engine.job import AUDIO_ONLY_GUIDE, RESOLVE_GUIDE
 
-        fcpxml = Path(self.result.fcpxml).name if self.result and self.result.fcpxml else "<이름>_timeline.fcpxml"
-        wav = Path(self.result.balance.output_wav).name if self.result else "<이름>_balanced.wav"
-        QMessageBox.information(self, "리졸브에서 불러오는 방법", RESOLVE_GUIDE.format(fcpxml=fcpxml, wav=wav))
+        wav = Path(self.result.balance.output_wav) if self.result else Path("<이름>_balanced.wav")
+        if self.result and not self.result.fcpxml:
+            text = AUDIO_ONLY_GUIDE.format(wav=wav.name)
+        else:
+            fcpxml = Path(self.result.fcpxml).name if self.result else "<이름>_timeline.fcpxml"
+            text = RESOLVE_GUIDE.format(fcpxml=fcpxml, wav=wav.name, wav_stem=wav.stem)
+        QMessageBox.information(self, "리졸브에서 불러오는 방법", text)
 
     def closeEvent(self, event) -> None:
         if self.thread is not None:
@@ -385,6 +457,8 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.Yes:
                 event.ignore()
                 return
+        # 확인 창이 떠 있는 동안 작업이 끝났을 수 있으니 다시 확인한다.
+        if self.thread is not None:
             if self.worker:
                 self.worker.cancel()
             self.thread.quit()

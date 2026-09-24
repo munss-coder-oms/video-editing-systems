@@ -51,6 +51,8 @@ class LoudnessReport:
     lra: float  # LU
     # 말소리 구간의 보통 음량 (무음을 뺀 3초 음량의 중앙값). 튀는 소리에 덜 휘둘린다.
     typical: float = SILENCE
+    # 말을 쉬는 순간의 바닥 소음 (0.4초 음량의 하위 10%). 작은 소리 올리기가 이보다 충분히 큰 소리만 키운다.
+    noise_floor: float = SILENCE
     spikes: List[Region] = field(default_factory=list)
     quiet: List[Region] = field(default_factory=list)
 
@@ -99,6 +101,14 @@ def typical_level(short: list[tuple[float, float]], integrated: float) -> float:
     return values[len(values) // 2]
 
 
+def noise_floor(momentary: list[tuple[float, float]]) -> float:
+    """0.4초 음량 중 하위 10% 값. 말 사이사이 쉬는 순간의 방 소음·배경음 크기에 가깝다."""
+    values = sorted(v for _, v in momentary if v > SILENCE)
+    if not values:
+        return SILENCE
+    return values[len(values) // 10]
+
+
 def find_spikes(
     frames: list[tuple[float, float]], integrated: float, above_lu: float = 8.0
 ) -> list[Region]:
@@ -129,16 +139,25 @@ def find_quiet(
 def analyze(
     path: str,
     *,
+    source: Optional[str] = None,
     audio_filter: Optional[str] = None,
     duration: Optional[float] = None,
     progress: Optional[ffmpeg.ProgressCallback] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
 ) -> LoudnessReport:
-    """파일(에 audio_filter를 적용한 결과)의 음량을 분석한다. 파일은 바꾸지 않는다."""
+    """파일(에 audio_filter를 적용한 결과)의 음량을 분석한다. 파일은 바꾸지 않는다.
+
+    source: 오디오를 꺼내는 FFmpeg 필터 그래프 (balance.source_graph, 결과 이름 [src]).
+    없으면 첫 번째 오디오 트랙을 그대로 쓴다.
+    """
     chain = f"{audio_filter}," if audio_filter else ""
     chain += "ebur128=peak=true:framelog=info"
+    if source:
+        args = ["-i", str(path), "-filter_complex", f"{source};[src]{chain}[out]", "-map", "[out]"]
+    else:
+        args = ["-i", str(path), "-map", "0:a:0", "-vn", "-sn", "-dn", "-af", chain]
     result = ffmpeg.run(
-        ["-i", str(path), "-map", "0:a:0", "-vn", "-sn", "-dn", "-af", chain, "-f", "null", "-"],
+        [*args, "-f", "null", "-"],
         duration=duration,
         progress=progress,
         is_cancelled=is_cancelled,
@@ -167,6 +186,7 @@ def analyze(
     )
     if integrated > SILENCE:
         report.typical = typical_level(short, integrated)
+        report.noise_floor = noise_floor(frames)
         report.spikes = find_spikes(frames, report.typical)
         report.quiet = find_quiet(short, report.typical)
     return report

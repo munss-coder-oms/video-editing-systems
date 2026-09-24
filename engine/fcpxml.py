@@ -74,6 +74,11 @@ def timeline_size(width: int, height: int) -> tuple[int, int]:
     return even(width * scale), even(height * scale)
 
 
+def timeline_frames(media: MediaInfo) -> int:
+    """리졸브 타임라인에 놓일 영상 길이 (타임라인 프레임 수). 정리된 WAV도 정확히 이 길이로 만든다."""
+    return FrameClock(media.fps).frames(media.video_duration or media.duration)
+
+
 def build_fcpxml(
     media: MediaInfo,
     audio_wav: str | PurePath,
@@ -86,7 +91,7 @@ def build_fcpxml(
     if not media.has_video:
         raise ValueError("영상 트랙이 없는 파일은 타임라인을 만들 수 없습니다.")
     clock = FrameClock(media.fps)
-    video_frames = clock.frames(media.video_duration or media.duration)
+    video_frames = timeline_frames(media)
     if video_frames <= 0:
         raise ValueError("영상 길이를 알 수 없습니다.")
     # 타임라인과 영상 클립은 영상 전체 길이. 정리된 오디오 클립만 WAV 길이를 넘지 않게 한다.
@@ -121,7 +126,11 @@ def build_fcpxml(
         width=str(media.width),
         height=str(media.height),
     )
-    video_attrs = dict(
+    # 원본 영상은 영상으로만 알린다 (hasAudio를 쓰지 않음). 원본 오디오가 정리된 오디오와 함께
+    # 타임라인에 올라와 소리가 겹치는 일을 막기 위해, 아래 srcEnable="video"와 이중으로 막는다.
+    ET.SubElement(
+        res,
+        "asset",
         id="r3",
         name=PurePath(media.path).stem,
         src=file_uri(media.path),
@@ -130,14 +139,6 @@ def build_fcpxml(
         hasVideo="1",
         format="r2",
     )
-    if media.has_audio:
-        video_attrs.update(
-            hasAudio="1",
-            audioSources="1",
-            audioChannels=str(media.audio_channels or 2),
-            audioRate=str(media.audio_sample_rate or 48000),
-        )
-    ET.SubElement(res, "asset", **video_attrs)
     ET.SubElement(
         res,
         "asset",

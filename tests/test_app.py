@@ -44,3 +44,21 @@ def test_diagnose_keeps_partial_result(tmp_path, monkeypatch):
     text = out.read_text(encoding="utf-8-sig")
     assert "[정상] 파이썬" in text
     assert "[문제] 죽는 항목: RuntimeError: 종료 코드 1" in text
+
+
+def test_track_picker_shows_only_for_several_tracks(two_track_video, uneven_video):
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from app.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(interactive=False)
+    window.load_video(str(uneven_video))
+    assert window.tracks.count() == 0
+    window.load_video(str(two_track_video))
+    assert window.tracks.count() == 3  # 모두 섞기 + 트랙 2개
+    assert window.tracks.itemData(0) is None and window.tracks.itemData(2) == [1]
+    window.close()
+    app.processEvents()

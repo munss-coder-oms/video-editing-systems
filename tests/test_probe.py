@@ -55,3 +55,11 @@ def test_portrait_video_size(media_dir):
 def test_audio_start_offset_is_read(late_audio_video):
     info = probe(late_audio_video)
     assert info.audio_start - info.video_start == pytest.approx(0.4, abs=0.05)
+
+
+@requires_ffmpeg
+def test_all_audio_tracks_are_listed(two_track_video):
+    info = probe(two_track_video)
+    assert [t.index for t in info.audio_tracks] == [0, 1]
+    assert [t.title for t in info.audio_tracks] == ["Game", "Mic"]
+    assert info.audio_tracks[1].label().startswith("2번 트랙")

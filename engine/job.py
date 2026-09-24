@@ -7,17 +7,20 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import os
+import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Sequence
 
 from . import __version__
-from .balance import OUTPUT_SAMPLE_RATE, BalanceResult, StageCallback, balance
+from .balance import OUTPUT_CHANNELS, OUTPUT_SAMPLE_RATE, BalanceResult, StageCallback, balance
 from .commands import Command, default_balance_commands
-from .fcpxml import build_fcpxml, write_fcpxml
+from .ffmpeg import Cancelled
+from .fcpxml import build_fcpxml, timeline_size, write_fcpxml
 from .loudness import LoudnessReport
 from .probe import MediaInfo, probe
-from .project import Project
+from .project import PROJECT_FILENAME, Project
 
 log = logging.getLogger("engine")
 
@@ -25,22 +28,36 @@ RESOLVE_GUIDE = """\
 다빈치 리졸브(무료판)에서 불러오는 방법
 ========================================
 
-1. 다빈치 리졸브를 열고 프로젝트를 새로 만들거나 기존 프로젝트를 엽니다.
+1. 다빈치 리졸브를 열고 프로젝트를 새로 만듭니다. (기존 프로젝트도 되지만, 새 프로젝트가
+   프레임 속도·해상도를 이 영상에 맞추기 쉽습니다.)
 2. 위 메뉴에서 [파일] → [가져오기] → [타임라인...]을 누릅니다.
    (영문 메뉴: File → Import → Timeline...)
 3. 이 폴더의 "{fcpxml}" 파일을 선택합니다.
 4. 창이 뜨면 "Automatically import source clips into media pool"(소스 클립을 미디어 풀로
-   자동 가져오기)이 체크된 상태로 [OK]를 누릅니다.
-5. V1에 원본 영상, A1에 음량을 정리한 오디오("{wav}")가 올라온 타임라인이 생깁니다.
+   자동 가져오기)이 체크된 상태로 [OK]를 누릅니다. "Automatically set project settings"
+   (프로젝트 설정 자동 맞춤) 항목이 보이면 그것도 체크합니다.
+5. 영상 트랙(V1)에 원본 영상, 오디오 트랙에 음량을 정리한 오디오("{wav}")가 올라온
+   타임라인이 생깁니다.
 
-문제가 생기면
-- 원본 오디오가 따로 한 트랙 더 올라오면: 그 트랙은 소리를 끄거나(M 버튼) 지우세요.
-  음량을 정리한 오디오는 "{wav}"입니다.
+확인할 것
+- 오디오 트랙에는 "{wav_stem}" 클립 하나만 있어야 합니다. 원본 영상 이름의 오디오 클립이
+  함께 있으면 소리가 겹쳐 커집니다. 그 트랙은 소리를 끄거나(M 버튼) 지우세요.
 - 미디어가 오프라인(빨간 화면)으로 뜨면: 원본 영상이나 이 폴더를 옮기지 않았는지 확인하고,
   미디어 풀에서 클립을 오른쪽 클릭 → [Relink Selected Clips]로 다시 연결하세요.
 - 타임라인 불러오기가 안 되면: 원본 영상과 "{wav}"를 미디어 풀에 직접 끌어다 놓고,
-  영상은 V1, 정리된 오디오는 A1의 0초 위치에 놓으면 똑같습니다.
+  영상은 V1, 정리된 오디오는 A1의 맨 앞(0초)에 놓으면 똑같습니다. 원본 영상의 오디오는 지우세요.
 """
+
+AUDIO_ONLY_GUIDE = """\
+오디오 파일을 처리했습니다
+==========================
+
+영상이 아니라서 타임라인 파일(.fcpxml)은 만들지 않았습니다.
+다빈치 리졸브의 미디어 풀에 "{wav}"를 끌어다 놓고 타임라인에 올려 쓰세요.
+"""
+
+# 윈도우 경로 길이 제한(260자)에 덜 걸리도록 폴더·파일 이름에 쓰는 영상 이름 길이를 줄인다.
+_NAME_LIMIT = 40
 
 
 @dataclass
@@ -51,14 +68,70 @@ class JobResult:
     fcpxml: Optional[str]
     report_txt: str
     project_file: str
+    warnings: List[str] = field(default_factory=list)
 
     def summary(self) -> str:
-        return format_report(self.media, self.balance)
+        return format_report(self.media, self.balance, self.warnings)
 
 
-def default_output_dir(video: str | Path) -> Path:
+def short_name(stem: str) -> str:
+    name = stem[:_NAME_LIMIT].rstrip(" .")
+    return name or "video"
+
+
+def default_output_dir(video: str | Path, parent: str | Path | None = None) -> Path:
+    """결과 폴더: 영상 옆(또는 고른 폴더 안)의 '<영상 이름>_resolve'."""
     video = Path(video)
-    return video.parent / f"{video.stem}_resolve"
+    base = Path(parent) if parent else video.parent
+    return base / f"{short_name(video.stem)}_resolve"
+
+
+def free_output_dir(base: str | Path) -> Path:
+    """이미 끝난 결과가 들어 있는 폴더는 건드리지 않고 '_2', '_3' 폴더를 새로 쓴다.
+
+    리졸브에 이미 불러온 타임라인은 예전 WAV를 가리키므로, 덮어쓰면 그 타임라인의 소리가
+    말없이 바뀐다. 카메라가 카드마다 C0001.MP4 같은 같은 이름을 다시 쓰는 경우도 막는다.
+    """
+    base = Path(base)
+    candidate, n = base, 2
+    while (candidate / PROJECT_FILENAME).exists():
+        candidate = base.with_name(f"{base.name}_{n}")
+        n += 1
+    return candidate
+
+
+def media_warnings(media: MediaInfo, tracks: Sequence[int]) -> List[str]:
+    """리졸브로 넘길 때 사용자가 알아야 할 점."""
+    notes: List[str] = []
+    count = len(media.audio_tracks)
+    if count > 1:
+        if len(tracks) == count:
+            notes.append(
+                f"이 영상에는 오디오 트랙이 {count}개 있어 모두 섞어서 정리했습니다 "
+                "(예: 게임 소리 + 마이크). 한 트랙만 쓰려면 앱의 '오디오 트랙'에서 고르세요."
+            )
+        else:
+            names = ", ".join(f"{t + 1}번" for t in tracks)
+            notes.append(f"오디오 트랙 {count}개 중 {names}만 썼습니다.")
+    if media.has_video:
+        native, timeline = media.native_fps, media.fps
+        if native > 0 and abs(float(native) / float(timeline) - 1) > 0.001:
+            notes.append(
+                f"리졸브 타임라인은 {float(timeline):.3f}fps로 만들었습니다 (원본 {float(native):.3f}fps). "
+                "리졸브 무료판이 쓸 수 있는 속도 중 가장 가까운 값입니다."
+            )
+        if media.variable_frame_rate:
+            notes.append(
+                "휴대폰 영상처럼 프레임 간격이 일정하지 않은 영상(가변 프레임)입니다. 리졸브에서 긴 영상은 "
+                "뒤로 갈수록 소리와 입 모양이 조금씩 어긋날 수 있습니다. 어긋나면 알려 주세요."
+            )
+        size = timeline_size(media.width, media.height)
+        if size != (media.width, media.height):
+            notes.append(
+                f"리졸브 무료판 한도(UHD)에 맞춰 타임라인 크기를 {size[0]}x{size[1]}로 만들었습니다 "
+                f"(원본 {media.width}x{media.height}). 영상은 원본 화질 그대로 들어갑니다."
+            )
+    return notes
 
 
 def _regions_text(title: str, regions, limit: int = 30) -> List[str]:
@@ -70,13 +143,20 @@ def _regions_text(title: str, regions, limit: int = 30) -> List[str]:
     return lines
 
 
-def format_report(media: MediaInfo, result: BalanceResult) -> str:
+def format_report(media: MediaInfo, result: BalanceResult, notes: Sequence[str] = ()) -> str:
     b: LoudnessReport = result.before
     a: LoudnessReport = result.after
     lines = [
         f"파일: {Path(media.path).name}",
         f"정보: {media.summary()}",
         "",
+    ]
+    alerts = [*notes, *result.warnings]
+    if alerts:
+        lines.append("알림")
+        lines += [f"  - {n}" for n in alerts]
+        lines.append("")
+    lines += [
         "음량 비교         처리 전      처리 후",
         f"평균 음량(LUFS)  {b.integrated:>8.1f}    {a.integrated:>8.1f}   (유튜브 기준 -14)",
         f"최대치(dBTP)     {b.true_peak:>8.1f}    {a.true_peak:>8.1f}   (-1 이하 권장)",
@@ -110,53 +190,78 @@ def process_video(
     strength: str = "medium",
     target_lufs: float = -14.0,
     commands: Optional[List[Command]] = None,
+    audio_tracks: Optional[Sequence[int]] = None,
     on_stage: Optional[StageCallback] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
 ) -> JobResult:
-    video = Path(video).resolve()
-    out = Path(output_dir).resolve() if output_dir else default_output_dir(video)
+    """영상 하나를 처리한다.
+
+    output_dir: 결과를 넣을 폴더 (기본: 영상 옆 '<이름>_resolve'). 이미 끝난 결과가 있으면
+    '_2', '_3'처럼 새 폴더를 만든다. 실패하거나 취소하면 이번에 만든 결과 파일은 지운다.
+    """
+    # resolve() 대신 abspath: 네트워크 드라이브(Z: 등)가 \\서버\... 경로로 바뀌지 않게 한다.
+    video = Path(os.path.abspath(video))
+    base = Path(os.path.abspath(output_dir)) if output_dir else default_output_dir(video)
+    out = free_output_dir(base)
+    created = not out.exists()
     out.mkdir(parents=True, exist_ok=True)
     handler = _attach_log(out)
+    written: List[Path] = []
+    outcome = "failed"
     try:
         log.info("엔진 %s, 입력 %s", __version__, video)
         media = probe(video)
         log.info("영상 정보: %s", media.summary())
 
         cmds = commands if commands is not None else default_balance_commands(strength, target_lufs)
-        wav = out / f"{video.stem}_balanced.wav"
-        if wav.resolve() == video:
+        name = short_name(video.stem)
+        wav = out / f"{name}_balanced.wav"
+        if os.path.normcase(str(wav)) == os.path.normcase(str(video)):
             raise ValueError("출력 파일이 원본과 같습니다.")
 
-        result = balance(media, cmds, wav, on_stage=on_stage, is_cancelled=is_cancelled)
+        written.append(wav)
+        result = balance(
+            media, cmds, wav, audio_tracks=audio_tracks, on_stage=on_stage, is_cancelled=is_cancelled
+        )
+        notes = media_warnings(media, result.audio_tracks)
         log.info("처리 전: %s", result.before.summary())
         log.info("처리 후: %s", result.after.summary())
         log.info("필터: %s", result.filter_chain)
+        for note in [*notes, *result.warnings]:
+            log.info("알림: %s", note)
 
         fcpxml_path: Optional[Path] = None
+        guide = out / "리졸브_불러오기_방법.txt"
+        written.append(guide)
         if media.has_video:
-            fcpxml_path = out / f"{video.stem}_timeline.fcpxml"
-            channels = min(media.audio_channels or 2, 8)
+            fcpxml_path = out / f"{name}_timeline.fcpxml"
+            written.append(fcpxml_path)
             write_fcpxml(
                 fcpxml_path,
                 build_fcpxml(
                     media,
                     wav,
-                    audio_channels=channels,
+                    audio_channels=OUTPUT_CHANNELS,
                     audio_rate=OUTPUT_SAMPLE_RATE,
                     wav_duration=probe(wav).duration,
                 ),
             )
-            (out / "리졸브_불러오기_방법.txt").write_text(
-                RESOLVE_GUIDE.format(fcpxml=fcpxml_path.name, wav=wav.name), encoding="utf-8"
+            guide.write_text(
+                RESOLVE_GUIDE.format(fcpxml=fcpxml_path.name, wav=wav.name, wav_stem=wav.stem),
+                encoding="utf-8",
             )
+        else:
+            guide.write_text(AUDIO_ONLY_GUIDE.format(wav=wav.name), encoding="utf-8")
 
         report_txt = out / "음량_리포트.txt"
-        report_txt.write_text(format_report(media, result), encoding="utf-8")
+        written.append(report_txt)
+        report_txt.write_text(format_report(media, result, notes), encoding="utf-8")
 
         project = Project(
             source=str(video),
             commands=cmds,
             media=media.to_dict(),
+            settings={"audio_tracks": result.audio_tracks},
             outputs={
                 "audio_wav": wav.name,
                 "fcpxml": fcpxml_path.name if fcpxml_path else None,
@@ -166,10 +271,13 @@ def process_video(
                 "before": result.before.to_dict(),
                 "after": result.after.to_dict(),
                 "applied_gain_db": result.applied_gain_db,
+                "warnings": [*notes, *result.warnings],
             },
         )
+        # project.json은 마지막에 쓴다. 이 파일이 있으면 '끝난 결과'로 보고 다음 실행은 새 폴더를 쓴다.
         project_file = project.save(out)
         log.info("완료: %s", out)
+        outcome = "done"
         return JobResult(
             output_dir=str(out),
             media=media,
@@ -177,10 +285,31 @@ def process_video(
             fcpxml=str(fcpxml_path) if fcpxml_path else None,
             report_txt=str(report_txt),
             project_file=str(project_file),
+            warnings=notes,
         )
+    except Cancelled:
+        log.info("취소됨")
+        outcome = "cancelled"
+        raise
     except Exception:
         log.exception("처리 실패")
         raise
     finally:
         log.removeHandler(handler)
         handler.close()
+        if outcome != "done":
+            _clean_up(out, written, remove_dir=created and outcome == "cancelled")
+
+
+def _clean_up(out: Path, written: List[Path], *, remove_dir: bool) -> None:
+    """실패·취소한 실행이 만든 결과 파일을 지워서, 반쯤 만든 결과가 남지 않게 한다.
+
+    실패한 경우 작업로그.log는 남겨서 원인을 볼 수 있게 한다.
+    """
+    for path in written:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if remove_dir:
+        shutil.rmtree(out, ignore_errors=True)

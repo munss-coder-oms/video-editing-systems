@@ -8,6 +8,8 @@ setlocal
 rem UTF-8 console so conda activation works with Korean Windows user names.
 chcp 65001 >nul
 set "PYTHONUTF8=1"
+rem Ignore packages installed outside the environment (they can clash with its DLLs).
+set "PYTHONNOUSERSITE=1"
 cd /d "%~dp0"
 set "ENV_NAME=video-editing"
 set "LOGDIR=%LOCALAPPDATA%\video-editing-systems"
@@ -21,7 +23,12 @@ echo  Video Editing app is starting...
 echo  The app window will open in a few seconds. This black window closes by itself.
 echo.
 
-call :find_conda
+if not exist "%~dp0environment.yml" (
+  echo [ERROR] Please extract the whole ZIP file first, then run setup_windows.bat in that folder.
+  goto :fail
+)
+
+call "%~dp0find_conda.bat"
 if not defined CONDA_BAT (
   echo [ERROR] Miniconda was not found. Install Miniconda, then run setup_windows.bat.
   echo Miniconda not found>> "%LOG%"
@@ -73,21 +80,3 @@ echo  Please run check_setup.bat and send the result file (setup_check_result.tx
 echo.
 if not defined NOPAUSE pause
 exit /b 1
-
-:find_conda
-rem Finds conda.bat of Miniconda/Anaconda in the usual places.
-if defined CONDA_EXE (
-  for %%P in ("%CONDA_EXE%\..\..\condabin\conda.bat") do if exist "%%~fP" set "CONDA_BAT=%%~fP"
-)
-if defined CONDA_BAT exit /b 0
-if defined CONDA if exist "%CONDA%\condabin\conda.bat" set "CONDA_BAT=%CONDA%\condabin\conda.bat"
-if defined CONDA_BAT exit /b 0
-for %%D in ("%USERPROFILE%\miniconda3" "%LOCALAPPDATA%\miniconda3" "%ProgramData%\miniconda3" "%USERPROFILE%\anaconda3" "%LOCALAPPDATA%\anaconda3" "%ProgramData%\anaconda3" "C:\miniconda3" "C:\anaconda3") do (
-  if not defined CONDA_BAT if exist "%%~D\condabin\conda.bat" set "CONDA_BAT=%%~D\condabin\conda.bat"
-)
-if defined CONDA_BAT exit /b 0
-rem Miniconda records its install folder here, wherever it was installed.
-if exist "%USERPROFILE%\.conda\environments.txt" for /f "usebackq delims=" %%L in ("%USERPROFILE%\.conda\environments.txt") do if not defined CONDA_BAT if exist "%%L\condabin\conda.bat" set "CONDA_BAT=%%L\condabin\conda.bat"
-if defined CONDA_BAT exit /b 0
-for /f "delims=" %%P in ('where conda.bat 2^>nul') do if not defined CONDA_BAT set "CONDA_BAT=%%P"
-exit /b 0
