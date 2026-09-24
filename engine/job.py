@@ -138,7 +138,13 @@ def process_video(
             channels = min(media.audio_channels or 2, 8)
             write_fcpxml(
                 fcpxml_path,
-                build_fcpxml(media, wav, audio_channels=channels, audio_rate=OUTPUT_SAMPLE_RATE),
+                build_fcpxml(
+                    media,
+                    wav,
+                    audio_channels=channels,
+                    audio_rate=OUTPUT_SAMPLE_RATE,
+                    wav_duration=probe(wav).duration,
+                ),
             )
             (out / "리졸브_불러오기_방법.txt").write_text(
                 RESOLVE_GUIDE.format(fcpxml=fcpxml_path.name, wav=wav.name), encoding="utf-8"

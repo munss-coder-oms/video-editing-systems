@@ -5,8 +5,8 @@ from fractions import Fraction
 
 import pytest
 
-from engine.fcpxml import FrameClock, build_fcpxml, file_uri
-from engine.probe import MediaInfo, snap_frame_rate
+from engine.fcpxml import FrameClock, build_fcpxml, file_uri, timeline_size
+from engine.probe import MediaInfo, snap_frame_rate, timecode_seconds
 
 
 def _media(**kw) -> MediaInfo:
@@ -53,6 +53,7 @@ def test_structure_for_resolve():
     root = ET.fromstring(xml.split("\n", 2)[2])
     assert root.get("version") == "1.8"
     video, audio = root.findall("resources/asset")
+    assert video.get("format") == "r2"  # 원본 형식 (타임라인 형식 r1과 따로)
     assert video.get("hasVideo") == "1"
     assert audio.get("hasAudio") == "1" and audio.get("audioRate") == "48000"
     clip = root.find("library/event/project/sequence/spine/asset-clip")
@@ -83,7 +84,75 @@ def test_frame_clock():
         (Fraction(30), Fraction(30)),
         (Fraction(5994, 100), Fraction(60000, 1001)),
         (Fraction(0), Fraction(30)),
+        # 리졸브 무료판 타임라인은 60fps 이하의 정해진 값만 된다.
+        (Fraction(285, 10), Fraction(30000, 1001)),
+        (Fraction(589, 10), Fraction(60000, 1001)),
+        (Fraction(120), Fraction(60)),
+        (Fraction(240), Fraction(60)),
+        (Fraction(15), Fraction(30)),
     ],
 )
 def test_snap_frame_rate(measured, expected):
     assert snap_frame_rate(measured) == expected
+
+
+def test_camera_timecode_start():
+    """카메라 타임코드가 01:00:00:00이면 원본 클립의 start도 그 시각이어야 한다."""
+    media = _media(timecode="01:00:00:00")
+    root = ET.fromstring(build_fcpxml(media, r"C:\out\a.wav").split("\n", 2)[2])
+    tc = Fraction(108000 * 1001, 30000)  # 29.97fps에서 01:00:00:00
+    video = root.find("resources/asset[@id='r3']")
+    clip = root.find("library/event/project/sequence/spine/asset-clip")
+    connected = clip.find("asset-clip")
+    assert _seconds(video.get("start")) == tc
+    assert _seconds(clip.get("start")) == tc
+    # 붙인 오디오는 부모 클립의 원본 시간 기준이라 offset도 같은 값이어야 첫 프레임에 맞는다.
+    assert _seconds(connected.get("offset")) == tc
+    assert connected.get("start") == "0s"
+
+
+@pytest.mark.parametrize(
+    "tc, rate, expected",
+    [
+        ("00:00:01:00", Fraction(25), Fraction(1)),
+        ("01:00:00:00", Fraction(24000, 1001), Fraction(86400 * 1001, 24000)),
+        # 29.97 드롭 프레임: 00:01:00;02가 1800번째 프레임
+        ("00:01:00;02", Fraction(30000, 1001), Fraction(1800 * 1001, 30000)),
+        ("00:10:00;00", Fraction(30000, 1001), Fraction(17982 * 1001, 30000)),
+        ("", Fraction(30), Fraction(0)),
+        ("잘못된 값", Fraction(30), Fraction(0)),
+    ],
+)
+def test_timecode_seconds(tc, rate, expected):
+    assert timecode_seconds(tc, rate) == expected
+
+
+def test_shorter_wav_limits_timeline():
+    media = _media(duration=10.0, video_duration=10.0)
+    root = ET.fromstring(build_fcpxml(media, "a.wav", wav_duration=8.0).split("\n", 2)[2])
+    seq = root.find("library/event/project/sequence")
+    assert _seconds(seq.get("duration")) <= Fraction(8)
+
+
+@pytest.mark.parametrize(
+    "size, expected",
+    [
+        ((1920, 1080), (1920, 1080)),
+        ((1080, 1920), (1080, 1920)),
+        ((3840, 2160), (3840, 2160)),
+        ((7680, 4320), (3840, 2160)),
+        ((4320, 7680), (2160, 3840)),
+        ((5120, 2880), (3840, 2160)),
+    ],
+)
+def test_timeline_size_fits_resolve_free(size, expected):
+    assert timeline_size(*size) == expected
+
+
+def test_high_frame_rate_keeps_native_format():
+    media = _media(frame_rate="60/1", native_frame_rate="120/1")
+    root = ET.fromstring(build_fcpxml(media, "a.wav").split("\n", 2)[2])
+    seq_format = root.find("resources/format[@id='r1']")
+    native_format = root.find("resources/format[@id='r2']")
+    assert seq_format.get("frameDuration") == "1/60s"
+    assert native_format.get("frameDuration") == "1/120s"

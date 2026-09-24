@@ -41,6 +41,11 @@ if errorlevel 1 (
   echo [WARNING] Some tests failed. Please run check_setup.bat and send the result file.
 )
 
+rem Files extracted from a downloaded ZIP carry a "from the internet" mark, which makes
+rem Windows show a security warning every time. Clear it for this folder only.
+set "ROOT=%~dp0"
+powershell -NoProfile -Command "Get-ChildItem -LiteralPath $env:ROOT -Recurse -File | Unblock-File" >nul 2>&1
+
 echo.
 echo [3/3] Creating desktop shortcut...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
@@ -65,6 +70,9 @@ if defined CONDA_BAT exit /b 0
 for %%D in ("%USERPROFILE%\miniconda3" "%LOCALAPPDATA%\miniconda3" "%ProgramData%\miniconda3" "%USERPROFILE%\anaconda3" "%LOCALAPPDATA%\anaconda3" "%ProgramData%\anaconda3" "C:\miniconda3" "C:\anaconda3") do (
   if not defined CONDA_BAT if exist "%%~D\condabin\conda.bat" set "CONDA_BAT=%%~D\condabin\conda.bat"
 )
+if defined CONDA_BAT exit /b 0
+rem Miniconda records its install folder here, wherever it was installed.
+if exist "%USERPROFILE%\.conda\environments.txt" for /f "usebackq delims=" %%L in ("%USERPROFILE%\.conda\environments.txt") do if not defined CONDA_BAT if exist "%%L\condabin\conda.bat" set "CONDA_BAT=%%L\condabin\conda.bat"
 if defined CONDA_BAT exit /b 0
 for /f "delims=" %%P in ('where conda.bat 2^>nul') do if not defined CONDA_BAT set "CONDA_BAT=%%P"
 exit /b 0

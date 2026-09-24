@@ -71,6 +71,14 @@ class Worker(QObject):
             self.cancelled.emit()
         except (FFmpegError, FileNotFoundError, ValueError) as exc:
             self.failed.emit(str(exc))
+        except PermissionError as exc:
+            self.failed.emit(
+                "결과 파일을 저장할 수 없습니다. 다빈치 리졸브나 음악 재생 프로그램이 이전 결과 "
+                "파일(.wav)을 열고 있거나, 이 폴더에 쓸 권한이 없습니다. 그 프로그램을 닫거나 "
+                "결과 폴더를 [바꾸기...]로 다른 곳으로 고른 뒤 다시 실행하세요.\n\n" + str(exc)
+            )
+        except OSError as exc:
+            self.failed.emit(f"파일을 읽거나 쓰는 중에 문제가 생겼습니다.\n\n{exc}")
         except Exception:  # 예상 못 한 오류도 화면에 보여준다
             self.failed.emit(traceback.format_exc())
         else:
@@ -110,6 +118,11 @@ class MainWindow(QMainWindow):
         self.interactive = interactive
         self.setWindowTitle(f"영상 편집 자동화 v{__version__} - 음량 정리 + 다빈치 리졸브 내보내기")
         self.resize(760, 680)
+        # 노트북처럼 화면이 작거나 배율이 크면 창 아래가 작업 표시줄에 가리지 않게 줄인다.
+        screen = self.screen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            self.resize(min(760, avail.width() - 40), min(680, avail.height() - 80))
         self.settings = QSettings("munss-coder-oms", "video-editing-systems")
 
         self.media: Optional[MediaInfo] = None
@@ -248,6 +261,15 @@ class MainWindow(QMainWindow):
             if self.interactive:
                 QMessageBox.warning(self, "오디오 없음", "이 파일에는 오디오 트랙이 없습니다.")
             return
+        if media.duration <= 0:
+            msg = (
+                "이 영상은 길이 정보가 없어 처리할 수 없습니다 (브라우저로 녹화한 WebM 등). "
+                "MP4로 다시 저장한 뒤 열어 주세요."
+            )
+            self.stage.setText(msg)
+            if self.interactive:
+                QMessageBox.warning(self, "영상 길이를 알 수 없음", msg)
+            return
         self.media = media
         self.result = None
         self.settings.setValue("last_dir", str(Path(path).parent))
@@ -366,5 +388,9 @@ class MainWindow(QMainWindow):
             if self.worker:
                 self.worker.cancel()
             self.thread.quit()
-            self.thread.wait(5000)
+            if not self.thread.wait(5000):
+                # 아직 FFmpeg가 멈추는 중. 여기서 닫으면 앱이 비정상 종료되므로 잠시 뒤 다시 닫게 한다.
+                event.ignore()
+                self.stage.setText("취소하는 중입니다. 잠시 뒤 다시 닫아 주세요.")
+                return
         event.accept()

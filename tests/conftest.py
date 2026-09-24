@@ -94,6 +94,24 @@ def click_audio(media_dir) -> Path:
     return path
 
 
+@pytest.fixture(scope="session")
+def late_audio_video(media_dir, click_audio) -> Path:
+    """오디오가 영상보다 0.4초 늦게 시작하는 영상 (카메라·휴대폰 파일에서 흔함).
+
+    소리는 click_audio와 같아서 5초 지점의 짧은 신호가 실제로는 영상 5.4초에 들린다.
+    """
+    if not _have_ffmpeg():
+        pytest.skip("FFmpeg가 설치되어 있지 않음")
+    video = media_dir / "video_only.mp4"
+    ffmpeg("-f", "lavfi", "-i", "testsrc2=s=320x240:r=30:d=12", "-c:v", "mpeg4", str(video))
+    path = media_dir / "late_audio.mov"
+    ffmpeg(
+        "-i", str(video), "-itsoffset", "0.4", "-i", str(click_audio),
+        "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "pcm_s16le", str(path),
+    )
+    return path
+
+
 def segment_lufs(path: Path, start: float, length: float) -> float:
     """파일 일부 구간의 평균 음량(LUFS)."""
     import re

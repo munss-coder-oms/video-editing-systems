@@ -12,7 +12,7 @@ from fractions import Fraction
 from pathlib import Path, PurePath, PureWindowsPath
 from typing import Optional
 
-from .probe import MediaInfo
+from .probe import MediaInfo, timecode_seconds
 
 FCPXML_VERSION = "1.8"  # 리졸브 17 이상이 안정적으로 불러오는 버전
 
@@ -53,43 +53,82 @@ def _audio_layout(channels: int) -> str:
     return "mono" if channels == 1 else "stereo" if channels == 2 else "surround"
 
 
+def _rational(value: Fraction) -> str:
+    if value == 0:
+        return "0s"
+    if value.denominator == 1:
+        return f"{value.numerator}s"
+    return f"{value.numerator}/{value.denominator}s"
+
+
+def timeline_size(width: int, height: int) -> tuple[int, int]:
+    """리졸브 무료판 타임라인 한도(UHD 3840x2160)에 맞춘 크기. 방향과 비율은 유지."""
+    long_side, short_side = max(width, height), min(width, height)
+    scale = min(1.0, 3840 / long_side if long_side else 1.0, 2160 / short_side if short_side else 1.0)
+    if scale >= 1.0:
+        return width, height
+
+    def even(v: float) -> int:
+        return max(2, int(round(v / 2)) * 2)
+
+    return even(width * scale), even(height * scale)
+
+
 def build_fcpxml(
     media: MediaInfo,
     audio_wav: str | PurePath,
     *,
     audio_channels: Optional[int] = None,
     audio_rate: int = 48000,
+    wav_duration: Optional[float] = None,
     project_name: Optional[str] = None,
 ) -> str:
     if not media.has_video:
         raise ValueError("영상 트랙이 없는 파일은 타임라인을 만들 수 없습니다.")
     clock = FrameClock(media.fps)
-    total = clock.frames(media.duration)
+    video_frames = clock.frames(media.video_duration or media.duration)
+    total = video_frames
+    if wav_duration:
+        total = min(total, clock.frames(wav_duration))
     if total <= 0:
         raise ValueError("영상 길이를 알 수 없습니다.")
     dur = clock.time(total)
     channels = audio_channels or media.audio_channels or 2
     name = project_name or PurePath(media.path).stem
     wav_name = PurePath(str(audio_wav)).stem
+    # 카메라 영상은 타임코드가 01:00:00:00처럼 0이 아닌 값에서 시작할 수 있다.
+    # FCPXML의 start는 원본 타임코드 기준이라, 여기에 맞춰야 리졸브가 원본을 제대로 찾는다.
+    tc_start = timecode_seconds(media.timecode, media.native_fps)
 
     root = ET.Element("fcpxml", version=FCPXML_VERSION)
     res = ET.SubElement(root, "resources")
+    seq_w, seq_h = timeline_size(media.width, media.height)
     ET.SubElement(
         res,
         "format",
         id="r1",
         frameDuration=clock.frame_duration,
+        width=str(seq_w),
+        height=str(seq_h),
+    )
+    # 원본 영상 자체의 형식 (실제 크기와 프레임 속도. 120fps, 8K 등도 그대로)
+    native = media.native_fps
+    ET.SubElement(
+        res,
+        "format",
+        id="r2",
+        frameDuration=_rational(1 / native) if native > 0 else clock.frame_duration,
         width=str(media.width),
         height=str(media.height),
     )
     video_attrs = dict(
-        id="r2",
+        id="r3",
         name=PurePath(media.path).stem,
         src=file_uri(media.path),
-        start="0s",
-        duration=dur,
+        start=_rational(tc_start),
+        duration=clock.time(video_frames),
         hasVideo="1",
-        format="r1",
+        format="r2",
     )
     if media.has_audio:
         video_attrs.update(
@@ -102,11 +141,11 @@ def build_fcpxml(
     ET.SubElement(
         res,
         "asset",
-        id="r3",
+        id="r4",
         name=wav_name,
         src=file_uri(audio_wav),
         start="0s",
-        duration=dur,
+        duration=clock.time(clock.frames(wav_duration)) if wav_duration else dur,
         hasAudio="1",
         audioSources="1",
         audioChannels=str(channels),
@@ -131,22 +170,23 @@ def build_fcpxml(
     video_clip = ET.SubElement(
         spine,
         "asset-clip",
-        ref="r2",
+        ref="r3",
         name=PurePath(media.path).stem,
         offset="0s",
-        start="0s",
+        start=_rational(tc_start),
         duration=dur,
-        format="r1",
         tcFormat="NDF",
         srcEnable="video",
     )
+    # 붙인 클립의 offset은 부모 클립의 원본 시간 기준이라, 부모의 start(타임코드)와 같아야
+    # 영상 첫 프레임과 같은 위치에 놓인다.
     ET.SubElement(
         video_clip,
         "asset-clip",
-        ref="r3",
+        ref="r4",
         name=wav_name,
         lane="-1",
-        offset="0s",
+        offset=_rational(tc_start),
         start="0s",
         duration=dur,
         audioRole="dialogue",

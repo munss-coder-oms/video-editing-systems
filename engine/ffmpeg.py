@@ -116,7 +116,16 @@ def run(
         stdout = b"".join(stdout_lines)
         stderr = b"".join(stderr_chunks)
     else:
-        stdout, stderr = proc.communicate()
+        # 진행률을 모를 때도 0.5초마다 취소 여부를 확인한다.
+        while True:
+            try:
+                stdout, stderr = proc.communicate(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                if is_cancelled and is_cancelled():
+                    proc.kill()
+                    proc.communicate()
+                    raise Cancelled()
         if is_cancelled and is_cancelled():
             raise Cancelled()
 

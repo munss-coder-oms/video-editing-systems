@@ -51,6 +51,22 @@ def _limiter(true_peak: float) -> str:
     )
 
 
+def sync_filter(media: MediaInfo) -> str:
+    """WAV의 첫 샘플이 영상 첫 프레임과 같은 순간이 되도록 앞을 채우거나 자른다.
+
+    카메라·휴대폰 파일은 오디오가 영상보다 조금 늦게(또는 먼저) 시작하는 경우가 있다.
+    """
+    if not media.has_video:
+        return ""
+    d = media.audio_start - media.video_start
+    if d > 0.0005:
+        samples = round(d * (media.audio_sample_rate or OUTPUT_SAMPLE_RATE))
+        return f"adelay=delays={samples}S:all=1"
+    if d < -0.0005:
+        return f"asetpts=PTS-STARTPTS,atrim=start={-d:.6f},asetpts=PTS-STARTPTS"
+    return ""
+
+
 def build_dynamics_chain(commands: List[Command], ctx: AudioContext) -> str:
     """normalize_loudness를 뺀 나머지 명령을 순서대로 FFmpeg 필터 체인으로 만든다."""
     parts: list[str] = []
@@ -102,6 +118,7 @@ def balance(
     ctx = AudioContext(input_lufs=input_lufs, duration=media.duration)
     chain = build_dynamics_chain(others, ctx)
 
+    align = sync_filter(media)
     gain_db = 0.0
     if normalize:
         mid = analyze(
@@ -113,7 +130,9 @@ def balance(
         step(1)(1.0)
 
     def full_chain(gain: float) -> str:
-        parts = [chain] if chain else []
+        parts = [align] if align else []
+        if chain:
+            parts.append(chain)
         if normalize:
             parts.append(f"volume={gain:.3f}dB")
             parts.append(_limiter(normalize.true_peak))
@@ -136,10 +155,11 @@ def balance(
                 progress=step(2),
                 is_cancelled=is_cancelled,
             )
+            # 이전 결과 WAV를 리졸브나 재생 프로그램이 열고 있으면 여기서 실패한다 (PermissionError).
+            tmp.replace(output_wav)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
-        tmp.replace(output_wav)
         return fc
 
     fc = render(gain_db)

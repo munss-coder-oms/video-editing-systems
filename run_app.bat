@@ -5,6 +5,9 @@ rem  Run setup_windows.bat once before the first use.
 rem  If something is wrong, this window stays open and says why.
 rem ============================================================
 setlocal
+rem UTF-8 console so conda activation works with Korean Windows user names.
+chcp 65001 >nul
+set "PYTHONUTF8=1"
 cd /d "%~dp0"
 set "ENV_NAME=video-editing"
 set "LOGDIR=%LOCALAPPDATA%\video-editing-systems"
@@ -30,6 +33,12 @@ call "%CONDA_BAT%" activate %ENV_NAME% >> "%LOG%" 2>&1
 if /i not "%CONDA_DEFAULT_ENV%"=="%ENV_NAME%" (
   echo [ERROR] The "%ENV_NAME%" environment is missing. Run setup_windows.bat first.
   echo activate failed, CONDA_DEFAULT_ENV=%CONDA_DEFAULT_ENV%>> "%LOG%"
+  goto :fail
+)
+
+if not exist "%CONDA_PREFIX%\python.exe" (
+  echo [ERROR] Activating the environment failed. Please run check_setup.bat and send the result file.
+  echo activate gave no python.exe in CONDA_PREFIX>> "%LOG%"
   goto :fail
 )
 
@@ -76,6 +85,9 @@ if defined CONDA_BAT exit /b 0
 for %%D in ("%USERPROFILE%\miniconda3" "%LOCALAPPDATA%\miniconda3" "%ProgramData%\miniconda3" "%USERPROFILE%\anaconda3" "%LOCALAPPDATA%\anaconda3" "%ProgramData%\anaconda3" "C:\miniconda3" "C:\anaconda3") do (
   if not defined CONDA_BAT if exist "%%~D\condabin\conda.bat" set "CONDA_BAT=%%~D\condabin\conda.bat"
 )
+if defined CONDA_BAT exit /b 0
+rem Miniconda records its install folder here, wherever it was installed.
+if exist "%USERPROFILE%\.conda\environments.txt" for /f "usebackq delims=" %%L in ("%USERPROFILE%\.conda\environments.txt") do if not defined CONDA_BAT if exist "%%L\condabin\conda.bat" set "CONDA_BAT=%%L\condabin\conda.bat"
 if defined CONDA_BAT exit /b 0
 for /f "delims=" %%P in ('where conda.bat 2^>nul') do if not defined CONDA_BAT set "CONDA_BAT=%%P"
 exit /b 0

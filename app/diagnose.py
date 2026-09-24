@@ -111,6 +111,18 @@ def format_results(results: List[Result]) -> str:
     return "\n".join(lines)
 
 
+def _extra_lines() -> List[str]:
+    """문제 파악에 필요한 추가 정보: conda 위치와 앱 실행 기록의 마지막 부분."""
+    lines = ["", f"conda: {os.environ.get('CONDA_BAT') or os.environ.get('CONDA_EXE') or '?'}"]
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".local" / "share")
+    for name in ("app.log", "launch.log"):
+        log = Path(base) / "video-editing-systems" / name
+        if log.is_file():
+            tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
+            lines += ["", f"---- {name} 마지막 부분 ----", *tail]
+    return lines
+
+
 def main(argv: List[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     for stream in (sys.stdout, sys.stderr):
@@ -119,10 +131,11 @@ def main(argv: List[str] | None = None) -> int:
         except (AttributeError, ValueError):
             pass
     results = run_all()
-    text = format_results(results)
+    text = format_results(results) + "\n" + "\n".join(_extra_lines())
     print(text)
     if argv:
-        Path(argv[0]).write_text(text, encoding="utf-8")
+        # 메모장이 인코딩을 헷갈리지 않게 BOM을 붙인 UTF-8로 저장한다.
+        Path(argv[0]).write_text(text, encoding="utf-8-sig")
     return 0 if all(ok for _, ok, _ in results) else 1
 
 

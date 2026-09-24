@@ -118,3 +118,23 @@ def test_default_commands_end_with_normalize():
     cmds = default_balance_commands("strong", -14.0)
     assert isinstance(cmds[-1], NormalizeLoudness)
     assert {c.op for c in cmds} == {"tame_peaks", "lift_quiet", "normalize_loudness"}
+
+
+def _tone_onset(x, start=4.5, end=7.0):
+    import numpy as np
+
+    seg = x[int(start * 48000):int(end * 48000)]
+    t = np.arange(len(seg)) / 48000
+    i = np.convolve(seg * np.sin(2 * np.pi * 1000 * t), np.ones(96), "same")
+    q = np.convolve(seg * np.cos(2 * np.pi * 1000 * t), np.ones(96), "same")
+    env = np.hypot(i, q)
+    return start + np.argmax(env > 0.5 * env.max()) / 48000
+
+
+def test_late_audio_is_aligned_to_video(late_audio_video, click_audio, tmp_path):
+    """오디오가 영상보다 늦게 시작하면 WAV 앞을 채워서 영상 첫 프레임에 맞춘다."""
+    result = process_video(late_audio_video, output_dir=tmp_path)
+    info = result.media
+    expected = _tone_onset(load_mono(click_audio)) + (info.audio_start - info.video_start)
+    onset = _tone_onset(load_mono(result.balance.output_wav))
+    assert abs(onset - expected) < 0.003

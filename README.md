@@ -25,15 +25,20 @@
 2. 이 저장소를 내려받습니다. (GitHub에서 **Code → Download ZIP** 후 압축 풀기, 또는 `git clone`)
    - 폴더 경로에 특수문자가 없는 곳을 권장합니다. 예: `C:\video-editing-systems`
 3. 폴더 안의 **`setup_windows.bat`** 을 더블클릭합니다.
+   - 파란 **"Windows의 PC 보호"** 창이 뜨면 **[추가 정보] → [실행]** 을 누르세요. 인터넷에서 받은 파일이라 한 번 뜨는 경고입니다. 설치가 끝나면 이 폴더의 파일에는 다시 뜨지 않습니다.
    - Python 3.11, FFmpeg, PySide6가 든 `video-editing` 환경을 만들고
    - 자동 테스트를 돌린 뒤
-   - 바탕화면에 **Video Editing** 바로가기를 만듭니다.
+   - 바탕화면에 **Video Editing** 바로가기를 만들고, 앱을 한 번 띄웁니다.
+
+### 새 버전으로 바꾸기
+
+새 ZIP을 받아 압축을 풀고, 새 폴더의 `setup_windows.bat` 을 다시 실행하면 됩니다. 환경은 새 버전에 맞게 고쳐지고, 바탕화면 아이콘도 새 폴더를 가리키게 바뀝니다. 예전 폴더는 지워도 됩니다.
 
 명령어로 직접 하고 싶다면 (Anaconda Prompt에서):
 
 ```bat
 cd C:\video-editing-systems
-conda env create -f environment.yml
+conda env update -n video-editing -f environment.yml --prune
 conda activate video-editing
 python -m pytest -q
 python -m app
@@ -43,7 +48,7 @@ python -m app
 
 1. 바탕화면의 **Video Editing** (또는 `run_app.bat`) 실행
 2. 영상을 창에 끌어다 놓기
-3. 정리 강도 고르고 **[음량 정리하고 리졸브용으로 내보내기]**
+3. 정리 강도 고르고 **[③ 음량 정리하고 리졸브용으로 내보내기]**
 4. 끝나면 처리 전/후 음량 비교가 나오고, 영상 옆에 `<영상이름>_resolve` 폴더가 생깁니다.
 
 ```
@@ -99,5 +104,6 @@ PRD 7.4절 원칙을 따릅니다: 엔진과 화면 분리, 새 기능은 편집
 | --- | --- |
 | `Miniconda was not found` | Miniconda 설치 후 `setup_windows.bat` 다시 실행 |
 | `ffmpeg을(를) 찾을 수 없습니다` | `setup_windows.bat` 다시 실행, 또는 `conda install -n video-editing -c conda-forge ffmpeg` |
-| 앱이 조용히 안 켜짐 | `%LOCALAPPDATA%\video-editing-systems\crash.log` 확인 |
+| 앱이 안 켜짐 | 검은 창의 안내대로 폴더의 `check_setup.bat` 을 실행하고, 생기는 `setup_check_result.txt` 내용을 보내 주세요 (기록 위치: `%LOCALAPPDATA%\video-editing-systems\app.log`, `launch.log`) |
+| "결과 파일을 저장할 수 없습니다" | 리졸브나 재생 프로그램이 이전 결과 WAV를 열고 있습니다. 그 프로그램을 닫거나 결과 폴더를 바꿔서 다시 실행 |
 | 처리 중 오류 | 결과 폴더의 `작업로그.log` 확인 |
