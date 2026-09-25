@@ -10,8 +10,10 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import wave
@@ -939,11 +941,29 @@ FAKE_TEMPLATE = (
 
 
 @pytest.fixture
-def install_env(tmp_path, monkeypatch):
+def lua_dir(tmp_path):
+    """우체통으로 쓸 시험 폴더.
+
+    LuaJIT는 윈도우에서 ANSI 코드 페이지로 파일을 열어서 mailbox_dir()은 늘 그 코드 페이지로 쓸 수 있는
+    경로를 고른다. 영어 윈도우에서 한글 이름 임시 폴더(윈도우 검사의 한글 임시 폴더 시험)를 쓰면
+    tmp_path는 그렇지 않으므로, 그때는 시스템 임시 폴더 아래에 따로 만든다.
+    """
+    try:
+        install_mod.mailbox_hex(tmp_path)
+    except UnicodeEncodeError:
+        path = Path(tempfile.mkdtemp(prefix="aih-test-"))
+        yield path
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        yield tmp_path
+
+
+@pytest.fixture
+def install_env(tmp_path, lua_dir, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
     monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "pd"))
-    monkeypatch.setenv("AIH_MAILBOX_DIR", str(tmp_path / "mailbox"))
+    monkeypatch.setenv("AIH_MAILBOX_DIR", str(lua_dir / "mailbox"))
     template = tmp_path / "template.lua"
     template.write_bytes(b"\xef\xbb\xbf" + FAKE_TEMPLATE.encode("utf-8"))
     monkeypatch.setattr(install_mod, "default_template", lambda: template)
@@ -956,15 +976,16 @@ def test_install_fills_placeholders_and_is_idempotent(install_env):
     first = install_mod.install_script()
     target = target_dir / SCRIPT_FILENAME
     assert first.paths_written == [target] and first.unchanged == [] and first.paths == [target]
-    assert first.mailbox == tmp / "mailbox" and first.version == SCRIPT_VERSION
+    mailbox = Path(os.environ["AIH_MAILBOX_DIR"])
+    assert first.mailbox == mailbox and first.version == SCRIPT_VERSION
     data = target.read_bytes()
     assert not data.startswith(b"\xef\xbb\xbf")  # BOM이 있으면 LuaJIT가 문법 오류를 낸다
     text = data.decode("utf-8")
     assert "@@" not in text
-    assert f'local MAILBOX_HEX = "{install_mod.mailbox_hex(tmp / "mailbox")}"' in text
+    assert f'local MAILBOX_HEX = "{install_mod.mailbox_hex(mailbox)}"' in text
     assert f'local SCRIPT_VERSION = "{SCRIPT_VERSION}"' in text
     assert "AI 도우미" in text
-    assert (tmp / "mailbox" / "files").is_dir()
+    assert (mailbox / "files").is_dir()
     assert "설치했습니다" in first.message
 
     stamp = target.stat().st_mtime_ns
@@ -996,7 +1017,7 @@ def test_install_template_hex_is_readable_by_lua(install_env):
     decoded = lua.eval(b"function(h) return (h:gsub('..', function(c) return string.char(tonumber(c, 16)) end)) end")(hex_path)
     # LuaJIT가 윈도우에서 파일을 여는 인코딩(ANSI 코드 페이지) 그대로
     encoding = "mbcs" if sys.platform == "win32" else "utf-8"
-    assert decoded == str(install_env / "mailbox").encode(encoding) and version == SCRIPT_VERSION.encode()
+    assert decoded == os.environ["AIH_MAILBOX_DIR"].encode(encoding) and version == SCRIPT_VERSION.encode()
 
 
 def test_install_embeds_long_mailbox_for_comparison(install_env, monkeypatch, tmp_path):
@@ -1045,15 +1066,15 @@ def test_install_module_runs_as_main():
     assert "AI_Helper_Connect" in proc.stdout
 
 
-def test_real_template_renders(tmp_path):
+def test_real_template_renders(tmp_path, lua_dir):
     template = install_mod.default_template()
     if not template.is_file():
         pytest.skip("resolve_scripts/AI_Helper_Connect.lua가 아직 없음")
     target_dir = tmp_path / "Utility"
-    result = install_mod.install_script(target_dir=target_dir, mailbox=tmp_path / "mb")
+    result = install_mod.install_script(target_dir=target_dir, mailbox=lua_dir / "mb")
     text = result.paths[0].read_text(encoding="utf-8")
     assert "@@MAILBOX_HEX@@" not in text and "@@SCRIPT_VERSION@@" not in text
-    assert install_mod.mailbox_hex(tmp_path / "mb") in text and "@@MAILBOX_LONG_HEX@@" not in text
+    assert install_mod.mailbox_hex(lua_dir / "mb") in text and "@@MAILBOX_LONG_HEX@@" not in text
 
 
 # ── 시험용 소리 ───────────────────────────────────────────────────────

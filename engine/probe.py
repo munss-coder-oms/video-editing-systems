@@ -247,15 +247,31 @@ def _clean_rate(rate: Fraction) -> Fraction:
     return rate.limit_denominator(1001)
 
 
+def _probe_json(path: Path) -> dict:
+    """ffprobe가 돌려준 JSON.
+
+    윈도우 자동 검사에서 ffprobe가 정상 종료(코드 0)했는데도 JSON 맨 끝의 '}' 한 줄이 빠진 채로
+    온 적이 있다 (2026-09-25, 같은 파일을 다시 읽으면 정상). 그래서 한 번 더 읽고, 그래도 깨져 있으면
+    알아볼 수 있는 오류를 낸다.
+    """
+    error: Optional[json.JSONDecodeError] = None
+    for _ in range(2):
+        result = ffmpeg.run(
+            ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)],
+            tool="ffprobe",
+        )
+        try:
+            return json.loads(result.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            error = exc
+    raise ffmpeg.FFmpegError(f"ffprobe가 영상 정보를 온전히 돌려주지 않았습니다 ({error}): {path}")
+
+
 def probe(path: str | Path) -> MediaInfo:
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"파일이 없습니다: {path}")
-    result = ffmpeg.run(
-        ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)],
-        tool="ffprobe",
-    )
-    data = json.loads(result.stdout or "{}")
+    data = _probe_json(path)
     streams = data.get("streams", [])
     video = next(
         (

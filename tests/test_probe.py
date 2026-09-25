@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -89,3 +90,30 @@ def test_cut_mkv_length_is_real_video_length(cut_mkv):
     frames = int(json.loads(out)["streams"][0]["nb_read_frames"])
     assert info.video_start > 0.1
     assert timeline_frames(info) == frames
+
+
+def test_truncated_ffprobe_json_is_read_again(monkeypatch, tmp_path):
+    """ffprobe가 코드 0으로 끝났는데 JSON 끝이 잘려 온 경우 (윈도우 자동 검사, 2026-09-25) 한 번 더 읽는다."""
+    from engine import ffmpeg as ffmpeg_mod
+    from engine import probe as probe_mod
+
+    good = json.dumps({"streams": [{"index": 0, "codec_type": "audio", "sample_rate": "48000",
+                                     "channels": 2, "duration": "10.0"}],
+                       "format": {"duration": "10.0"}}, indent=4)
+    outputs = [good[: good.rstrip().rfind("}")], good]
+    calls = []
+
+    def fake_run(args, tool="ffmpeg", **kwargs):
+        calls.append(tool)
+        return subprocess.CompletedProcess(args, 0, outputs.pop(0), "")
+
+    monkeypatch.setattr(ffmpeg_mod, "run", fake_run)
+    media = tmp_path / "a.wav"
+    media.write_bytes(b"")
+    assert probe_mod._probe_json(media)["format"]["duration"] == "10.0"
+    assert calls == ["ffprobe", "ffprobe"]
+
+    outputs[:] = ["{", "{"]
+    with pytest.raises(ffmpeg_mod.FFmpegError):
+        probe_mod._probe_json(media)
+
