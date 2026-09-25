@@ -1,0 +1,142 @@
+# 실제 윈도우에서 사용자와 같은 순서(설치 → 점검 → 실행 → 영상 처리)로 확인한다.
+name: windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      NOPAUSE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 예전 버전의 바탕화면 바로가기 (새 설치가 지우는지 보려고)
+        shell: pwsh
+        run: |
+          $p = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Video Editing.lnk'
+          $s = (New-Object -ComObject WScript.Shell).CreateShortcut($p)
+          $s.TargetPath = Join-Path $env:GITHUB_WORKSPACE 'run_app.bat'
+          $s.Save()
+          if (-not (Test-Path -LiteralPath $p)) { Write-Error "예전 바로가기를 못 만듦: $p"; exit 1 }
+
+      - name: setup_windows.bat (사용자가 처음 한 번 실행하는 설치)
+        shell: cmd
+        run: call setup_windows.bat
+
+      - name: 바탕화면 바로가기가 만들어졌는지 (AI 도우미, 예전 Video Editing은 지워짐)
+        shell: pwsh
+        run: |
+          # setup_windows.bat과 같은 방법으로 이름을 만든다 (0xB3C4 0xC6B0 0xBBF8 = 도우미)
+          $desktop = [Environment]::GetFolderPath('Desktop')
+          $name = 'AI ' + [char]0xB3C4 + [char]0xC6B0 + [char]0xBBF8 + '.lnk'
+          $p = Join-Path $desktop $name
+          if (-not (Test-Path -LiteralPath $p)) { Write-Error "바로가기 없음: $p"; exit 1 }
+          # WScript.Shell은 영어 윈도우에서 한글 이름 파일을 못 열어서 영어 이름으로 복사해 읽는다
+          $copy = Join-Path $env:RUNNER_TEMP 'shortcut-check.lnk'
+          Copy-Item -LiteralPath $p -Destination $copy -Force
+          $target = (New-Object -ComObject WScript.Shell).CreateShortcut($copy).TargetPath
+          $target
+          if (-not $target.EndsWith('run_app.bat')) { Write-Error "바로가기 대상이 다름: $target"; exit 1 }
+          $old = Join-Path $desktop 'Video Editing.lnk'
+          if (Test-Path -LiteralPath $old) { Write-Error "예전 바로가기가 남아 있음: $old"; exit 1 }
+          $tmp = Join-Path $desktop 'ai-helper-new.lnk'
+          if (Test-Path -LiteralPath $tmp) { Write-Error "임시 바로가기가 남아 있음: $tmp"; exit 1 }
+
+      - name: 리졸브 Scripts 메뉴에 스크립트가 들어갔는지
+        shell: pwsh
+        run: |
+          $p = Join-Path $env:APPDATA 'Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\AI_Helper_Connect.lua'
+          if (-not (Test-Path -LiteralPath $p)) { Write-Error "스크립트 없음: $p"; exit 1 }
+          if (Select-String -LiteralPath $p -SimpleMatch '@@MAILBOX_HEX@@') { Write-Error "우체통 경로가 채워지지 않음"; exit 1 }
+          if (Select-String -LiteralPath $p -SimpleMatch '"@@MAILBOX_LONG_HEX@@"') { Write-Error "긴 우체통 경로 자리가 채워지지 않음"; exit 1 }
+          Get-Item -LiteralPath $p | Format-List FullName, Length, LastWriteTime
+
+      - name: setup_windows.bat 두 번째 실행 (새 버전으로 바꿀 때와 같음)
+        shell: cmd
+        run: call setup_windows.bat
+
+      - name: 자동 테스트
+        shell: cmd
+        run: call "%CONDA%\condabin\conda.bat" run -n video-editing --no-capture-output python -m pytest -q
+
+      - name: 한글 이름 임시 폴더에서 연결 시험 (한글 사용자 이름 PC의 setup과 같게)
+        shell: pwsh
+        run: |
+          # 윈도우에서 pytest 임시 폴더에는 사용자 이름이 들어간다. 0xD64D 0xAE38 0xB3D9 = 홍길동
+          # cmd(.bat)를 거치면 한글이 깨질 수 있어 환경의 python.exe를 바로 부른다.
+          $py = (& "$env:CONDA\condabin\conda.bat" run -n video-editing python -c "import sys; print(sys.executable)" | Select-Object -Last 1).Trim()
+          $base = Join-Path $env:RUNNER_TEMP ('pytest-of-' + [char]0xD64D + [char]0xAE38 + [char]0xB3D9)
+          & $py -m pytest -q -rs -p no:cacheprovider tests/test_resolve_link.py "--basetemp=$base"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: check_setup.bat (설치 점검)
+        shell: cmd
+        run: |
+          call check_setup.bat
+          set RC=%errorlevel%
+          type setup_check_result.txt
+          exit /b %RC%
+
+      - name: conda 위치 기록이 없어도 찾는지 (사용자 PC처럼 환경 변수 없이)
+        shell: cmd
+        run: |
+          set "CONDA="
+          set "CONDA_EXE="
+          del "%LOCALAPPDATA%\video-editing-systems\conda_path.txt" >nul 2>&1
+          call find_conda.bat
+          echo found: %CONDA_BAT%
+          if not defined CONDA_BAT exit /b 1
+
+      - name: run_app.bat (바탕화면 아이콘과 같은 실행)
+        shell: cmd
+        run: |
+          call run_app.bat
+          set RC=%errorlevel%
+          taskkill /f /im pythonw.exe >nul 2>&1
+          exit /b %RC%
+
+      - name: AI 도우미 창 (리졸브 없이 설치 → 창 → 결과 파일)
+        shell: cmd
+        run: |
+          call "%CONDA%\condabin\conda.bat" activate video-editing
+          python -m app --helper-smoke-test || exit /b 1
+
+      - name: 창에서 영상 처리까지 (공백 있는 경로)
+        shell: cmd
+        run: |
+          call "%CONDA%\condabin\conda.bat" activate video-editing
+          mkdir "%RUNNER_TEMP%\test folder"
+          ffmpeg -v error -y -f lavfi -i testsrc2=s=1280x720:r=30000/1001:d=20 -f lavfi -i anoisesrc=c=pink:a=0.05:d=20:r=48000 -map 0:v -map 1:a -c:v mpeg4 -q:v 5 -c:a aac "%RUNNER_TEMP%\test folder\first video.mp4" || exit /b 1
+          python -m app --smoke-test "%RUNNER_TEMP%\test folder\first video.mp4" || exit /b 1
+          dir "%RUNNER_TEMP%\test folder\first video_resolve"
+          type "%RUNNER_TEMP%\test folder\first video_resolve\first video_timeline.fcpxml"
+
+      - name: 리졸브 스크립트(Lua) 시험 (CI에서만 lupa를 설치해서)
+        shell: cmd
+        run: |
+          call "%CONDA%\condabin\conda.bat" activate video-editing
+          python -m pip install lupa || exit /b 1
+          python -c "import lupa.luajit21 as l; print(l.LuaRuntime().eval('jit.version'))" || exit /b 1
+          python -m pytest -q -rs tests/test_lua_script.py tests/test_bridge_roundtrip.py tests/test_resolve_link.py || exit /b 1
+
+      - name: 기록 파일 모으기
+        if: always()
+        shell: cmd
+        run: |
+          mkdir logs
+          copy "%LOCALAPPDATA%\video-editing-systems\*.log" logs\ >nul 2>&1
+          copy setup_check_result.txt logs\ >nul 2>&1
+          copy "%LOCALAPPDATA%\video-editing-systems\AI*.txt" logs\ >nul 2>&1
+          exit /b 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-logs
+          path: logs
