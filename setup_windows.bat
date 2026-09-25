@@ -65,9 +65,12 @@ echo [4/4] Creating desktop shortcut...
 rem The folder path goes through an environment variable so names with ' or ( ) still work.
 rem The shortcut name has Korean letters, which a .bat file cannot hold safely,
 rem so PowerShell builds it from character codes: 0xB3C4 0xC6B0 0xBBF8 = Korean "helper".
+rem WScript.Shell can only save a shortcut under a name in the system's ANSI code page
+rem (an English Windows turns the Korean letters into ???), so it is saved under an
+rem English name first and then renamed, which works on every Windows language.
 rem The old "Video Editing" shortcut of the previous version is removed.
 set "SHORTCUT_OK=1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=[Environment]::GetFolderPath('Desktop'); $old=Join-Path $d 'Video Editing.lnk'; if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force }; $n='AI '+[char]0xB3C4+[char]0xC6B0+[char]0xBBF8+'.lnk'; $p=Join-Path $d $n; $s=(New-Object -ComObject WScript.Shell).CreateShortcut($p); $s.TargetPath=(Join-Path $env:ROOT 'run_app.bat'); $s.WorkingDirectory=$env:ROOT; $s.WindowStyle=1; $s.Save(); if (-not (Test-Path -LiteralPath $p)) { exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=[Environment]::GetFolderPath('Desktop'); $old=Join-Path $d 'Video Editing.lnk'; if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force }; $n='AI '+[char]0xB3C4+[char]0xC6B0+[char]0xBBF8+'.lnk'; $p=Join-Path $d $n; $t=Join-Path $d 'ai-helper-new.lnk'; $s=(New-Object -ComObject WScript.Shell).CreateShortcut($t); $s.TargetPath=(Join-Path $env:ROOT 'run_app.bat'); $s.WorkingDirectory=$env:ROOT; $s.WindowStyle=1; $s.Save(); if (-not (Test-Path -LiteralPath $t)) { exit 1 }; if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force }; Move-Item -LiteralPath $t -Destination $p; if (-not (Test-Path -LiteralPath $p)) { exit 1 }"
 if errorlevel 1 set "SHORTCUT_OK="
 
 echo.

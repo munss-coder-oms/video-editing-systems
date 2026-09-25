@@ -37,11 +37,16 @@ jobs:
           $name = 'AI ' + [char]0xB3C4 + [char]0xC6B0 + [char]0xBBF8 + '.lnk'
           $p = Join-Path $desktop $name
           if (-not (Test-Path -LiteralPath $p)) { Write-Error "바로가기 없음: $p"; exit 1 }
-          $target = (New-Object -ComObject WScript.Shell).CreateShortcut($p).TargetPath
+          # WScript.Shell은 영어 윈도우에서 한글 이름 파일을 못 열어서 영어 이름으로 복사해 읽는다
+          $copy = Join-Path $env:RUNNER_TEMP 'shortcut-check.lnk'
+          Copy-Item -LiteralPath $p -Destination $copy -Force
+          $target = (New-Object -ComObject WScript.Shell).CreateShortcut($copy).TargetPath
           $target
           if (-not $target.EndsWith('run_app.bat')) { Write-Error "바로가기 대상이 다름: $target"; exit 1 }
           $old = Join-Path $desktop 'Video Editing.lnk'
           if (Test-Path -LiteralPath $old) { Write-Error "예전 바로가기가 남아 있음: $old"; exit 1 }
+          $tmp = Join-Path $desktop 'ai-helper-new.lnk'
+          if (Test-Path -LiteralPath $tmp) { Write-Error "임시 바로가기가 남아 있음: $tmp"; exit 1 }
 
       - name: 리졸브 Scripts 메뉴에 스크립트가 들어갔는지
         shell: pwsh
