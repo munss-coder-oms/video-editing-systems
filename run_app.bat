@@ -1,6 +1,6 @@
 @echo off
 rem ============================================================
-rem  Starts the Video Editing app.
+rem  Starts the AI helper app (the window next to DaVinci Resolve).
 rem  Run setup_windows.bat once before the first use.
 rem  If something is wrong, this window stays open and says why.
 rem ============================================================
@@ -19,7 +19,7 @@ set "FLAG=%LOGDIR%\window_ok.flag"
 echo ==== %date% %time% run_app.bat in %CD% ====>> "%LOG%"
 
 echo.
-echo  Video Editing app is starting...
+echo  AI helper is starting...
 echo  The app window will open in a few seconds. This black window closes by itself.
 echo.
 

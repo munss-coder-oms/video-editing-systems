@@ -4,8 +4,10 @@ pythonw로 실행하면 콘솔이 없어 오류가 보이지 않으므로,
 실행 과정과 오류를 로그 파일에 남기고 창으로도 알린다 (PRD 7.4 원칙 6).
 Qt(PySide6)를 불러오지 못한 경우에도 윈도우 기본 알림 창으로 알린다.
 
-    python -m app                    앱 실행
-    python -m app --smoke-test 영상  창을 띄우고 영상을 처리한 뒤 스스로 종료 (자동 검사용)
+    python -m app                      AI 도우미 창 (리졸브 연결 시험판)
+    python -m app --legacy             예전 창 (영상을 넣어 음량 정리 → 리졸브용 파일 내보내기)
+    python -m app --smoke-test 영상    예전 창을 띄우고 영상을 처리한 뒤 스스로 종료 (자동 검사용)
+    python -m app --helper-smoke-test  스크립트를 설치하고 AI 도우미 창을 띄운 뒤 스스로 종료 (자동 검사용)
 """
 
 from __future__ import annotations
@@ -71,23 +73,30 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     sys.excepthook = report_crash
     startup_log(f"시작: python {sys.version.split()[0]} ({sys.executable}), 폴더 {os.getcwd()}")
+    mode = argv[0] if argv[:1] in (["--smoke-test"], ["--legacy"], ["--helper-smoke-test"]) else ""
+    legacy = mode in ("--smoke-test", "--legacy")
     try:
         from PySide6 import __version__ as pyside_version
         from PySide6.QtCore import QTimer
         from PySide6.QtWidgets import QApplication
 
-        from .main_window import MainWindow
+        if legacy:
+            from .main_window import MainWindow
+        else:
+            from .companion.window import HelperWindow
     except Exception:
         report_crash(*sys.exc_info())
         return 1
     startup_log(f"PySide6 {pyside_version} 불러옴")
 
     smoke_video = None
-    if argv[:1] == ["--smoke-test"]:
+    if mode == "--smoke-test":
         if len(argv) < 2:
             native_message("영상 편집 자동화", "--smoke-test 다음에 영상 경로가 필요합니다.")
             return 2
         smoke_video = argv[1]
+    helper_smoke = mode == "--helper-smoke-test"
+    if smoke_video or helper_smoke:
         # 자동 검사에서는 알림 창을 띄우면 멈추므로 오류를 출력만 하고, 한글이 깨지지 않게 한다.
         for stream in (sys.stdout, sys.stderr):
             try:
@@ -99,10 +108,20 @@ def main(argv: list[str] | None = None) -> int:
             traceback.print_exception(*exc),
         )
 
+    install = None
     try:
         app = QApplication(sys.argv[:1])
-        app.setApplicationName("영상 편집 자동화")
-        window = MainWindow(interactive=smoke_video is None)
+        if legacy:
+            app.setApplicationName("영상 편집 자동화")
+            window = MainWindow(interactive=smoke_video is None)
+        else:
+            app.setApplicationName("AI 도우미")
+            install = install_resolve_script()
+            window = HelperWindow(
+                interactive=not helper_smoke,
+                install=install,
+                report_dir=log_dir() if helper_smoke else None,
+            )
         window.show()
         window.raise_()
         window.activateWindow()
@@ -118,7 +137,27 @@ def main(argv: list[str] | None = None) -> int:
 
     if smoke_video:
         return _run_smoke_test(app, window, smoke_video, QTimer)
+    if helper_smoke:
+        return _run_helper_smoke_test(app, window, install, QTimer)
     return app.exec()
+
+
+def install_resolve_script() -> dict:
+    """켤 때마다 리졸브 Scripts 메뉴의 스크립트를 최신으로 맞춘다 (내용이 같으면 그대로 둔다).
+
+    우체통 폴더가 바뀌었을 수도 있어서, 스크립트 안의 경로를 늘 이 앱과 같게 해 둔다.
+    실패해도 창은 띄운다 (결과 파일에 이유가 남는다).
+    """
+    try:
+        from engine.resolve_link.install import install_script
+
+        result = install_script()
+    except Exception as exc:
+        startup_log(f"리졸브 스크립트 설치 실패: {exc!r}")
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    startup_log(result.message)
+    return {"message": result.message, "paths": [str(p) for p in result.paths],
+            "mailbox": str(result.mailbox), "version": result.version}
 
 
 def _run_smoke_test(app, window, video: str, QTimer) -> int:
@@ -148,6 +187,65 @@ def _run_smoke_test(app, window, video: str, QTimer) -> int:
     timer.timeout.connect(poll)
     timer.start(300)
     QTimer.singleShot(300_000, lambda: (print("SMOKE FAIL: 5분 안에 끝나지 않음"), app.quit()))
+    app.exec()
+    return outcome["code"]
+
+
+def _run_helper_smoke_test(app, window, install, QTimer) -> int:
+    """리졸브 없이 AI 도우미 창을 확인한다: 스크립트 설치, 창이 멈추지 않는지, 결과 파일 저장."""
+    import time
+
+    outcome = {"code": 1, "done": False}
+    ticks = {"last": time.monotonic(), "worst": 0.0}
+
+    def finish(code: int, message: str) -> None:
+        if outcome["done"]:
+            return
+        outcome["done"] = True
+        outcome["code"] = code
+        print(message, flush=True)
+        window.close()
+        app.quit()
+
+    def tick():
+        # 리졸브의 답을 기다리는 동안에도 창이 계속 움직이는지 (0.1초마다 불려야 함)
+        now = time.monotonic()
+        ticks["worst"] = max(ticks["worst"], now - ticks["last"])
+        ticks["last"] = now
+
+    def check_install():
+        paths = [Path(p) for p in (install or {}).get("paths", [])]
+        if not paths or not all(p.is_file() for p in paths):
+            finish(1, f"HELPER SMOKE FAIL: 스크립트가 설치되지 않음 {install}")
+            return
+        print(f"스크립트: {paths[0]}", flush=True)
+
+    def save_report():
+        if window.session.auto_attempts < 1:
+            finish(1, "HELPER SMOKE FAIL: 리졸브 연결 확인을 한 번도 하지 않음")
+            return
+        window.on_report()
+
+    def poll():
+        if window.last_report is None:
+            return
+        if not window.last_report.is_file():
+            finish(1, f"HELPER SMOKE FAIL: 결과 파일 없음 {window.last_report}")
+        elif ticks["worst"] > 1.0:
+            finish(1, f"HELPER SMOKE FAIL: 창이 {ticks['worst']:.1f}초 멈춤")
+        else:
+            print(f"결과 파일: {window.last_report}", flush=True)
+            finish(0, "HELPER SMOKE OK")
+
+    tick_timer = QTimer()
+    tick_timer.timeout.connect(tick)
+    tick_timer.start(100)
+    QTimer.singleShot(500, check_install)
+    QTimer.singleShot(3500, save_report)
+    timer = QTimer()
+    timer.timeout.connect(poll)
+    timer.start(200)
+    QTimer.singleShot(20_000, lambda: finish(1, "HELPER SMOKE FAIL: 20초 안에 끝나지 않음"))
     app.exec()
     return outcome["code"]
 

@@ -56,6 +56,10 @@ where python >> "%RESULT%" 2>&1
 powershell -NoProfile -Command "Get-Content -Tail 30 -LiteralPath (Join-Path $env:LOCALAPPDATA 'video-editing-systems\launch.log') -ErrorAction SilentlyContinue" >> "%RESULT%" 2>&1
 
 :show
+rem Also report whether the DaVinci Resolve script is in the Workspace - Scripts menu folder.
+set "AIH_LUA=%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\AI_Helper_Connect.lua"
+if exist "%AIH_LUA%" >> "%RESULT%" echo [OK] Resolve script AI_Helper_Connect.lua: "%AIH_LUA%"
+if not exist "%AIH_LUA%" >> "%RESULT%" echo [PROBLEM] Resolve script AI_Helper_Connect.lua not found: "%AIH_LUA%" - run setup_windows.bat again.
 echo.
 echo Result saved to: %RESULT%
 if not defined NOPAUSE start "" notepad "%RESULT%"

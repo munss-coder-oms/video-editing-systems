@@ -1,10 +1,30 @@
 # 영상 편집 자동화 시스템
 
-영상을 넣으면 **음량 밸런스를 자동으로 정리**하고, **다빈치 리졸브 무료판**에서 바로 이어서 편집할 수 있는 타임라인 파일로 넘겨주는 윈도우 데스크톱 앱입니다.
+**다빈치 리졸브 무료판을 켜고 프로젝트를 연 상태에서**, 옆에 뜨는 **AI 도우미** 창이 지금 열린 타임라인에 바로 작업하는 윈도우 앱입니다.
+밖에서 파일을 만들어 리졸브로 불러오는 방식이 아니라, 리졸브 안에서 도는 작은 스크립트(`AI_Helper_Connect`)를 통해 리졸브에 직접 넣습니다.
 
-현재 버전: **v0.1.0 (초기 버전)** · 기획 문서: [docs/PRD.md](docs/PRD.md) (PR #1)
+현재 버전: **리졸브 연결 시험판** · 기획 문서: [docs/PRD.md](docs/PRD.md) (PR #1)
 
-## 지금 되는 것
+이번 버전은 사용자 PC의 리졸브와 연결이 되는지, 표시(마커)와 소리를 타임라인에 바로 넣을 수 있는지 **한 번 시험해 보는 판**입니다.
+음량 정리 엔진은 그대로 있고, 다음 단계에서 이 연결 위에 다시 붙입니다.
+
+## 연결 시험 하는 법 (5분)
+
+1. **리졸브를 켜고 새 프로젝트**를 만든 뒤, 영상 하나를 타임라인에 올려 둡니다.
+2. 바탕화면의 **AI 도우미** 를 두 번 누릅니다. 화면 오른쪽에 좁은 창이 뜹니다.
+3. 리졸브 위 메뉴에서 **Workspace(워크스페이스) → Scripts(스크립트) → AI_Helper_Connect** 를 누릅니다.
+   - 리졸브를 켤 때마다 한 번 누르면 됩니다. 누르면 AI 도우미 창의 불이 **초록색(연결됨)** 으로 바뀝니다.
+   - 메뉴에 AI_Helper_Connect가 없으면 리졸브를 껐다 켜 보세요. 그래도 없으면 `setup_windows.bat`을 다시 실행하세요.
+4. AI 도우미 창에서 차례로 누릅니다.
+   - **② 표시 찍기 시험**: 재생 위치(빨간 세로줄)에 노란 표시가 하나 생깁니다.
+   - **③ 소리 넣기 시험**: 새 오디오 트랙("AI 도우미 시험")에 3초짜리 '삐' 소리가 들어갑니다.
+   - **시험 흔적 지우기**: 이 창이 넣은 표시와 트랙만 지웁니다 (다른 것은 건드리지 않음).
+5. **결과 저장** 을 누르면 바탕화면에 `AI도우미_연결시험_결과.txt`가 생기고 폴더가 열립니다. **그 파일을 보내 주세요.**
+   연결이 안 됐어도 결과 파일은 꼭 보내 주세요. 왜 안 되는지가 그 안에 적혀 있습니다.
+
+> 예전 방식(영상을 창에 넣어 음량을 정리하고 리졸브용 파일을 내보내기)은 `python -m app --legacy` 로 아직 쓸 수 있습니다. 아래 "예전 창" 내용은 그 창의 설명입니다.
+
+## 예전 창에서 되는 것 (`python -m app --legacy`)
 
 | 기능 | 설명 |
 | --- | --- |
@@ -34,7 +54,8 @@
    - 설치 중 영어로 약관(Terms of Service) 동의를 물으면 `a`를 입력하고 Enter를 누르세요.
    - Python 3.11, FFmpeg, PySide6가 든 `video-editing` 환경을 만들고
    - 자동 테스트를 돌린 뒤
-   - 바탕화면에 **Video Editing** 바로가기를 만들고, 앱을 한 번 띄웁니다.
+   - 리졸브 **Workspace → Scripts** 메뉴에 `AI_Helper_Connect`를 넣고 (리졸브를 나중에 설치해도 됨)
+   - 바탕화면에 **AI 도우미** 바로가기를 만들고 (예전 **Video Editing** 바로가기는 지움), 앱을 한 번 띄웁니다.
 
 ### 새 버전으로 바꾸기
 
@@ -47,12 +68,13 @@ cd C:\video-editing-systems
 conda env update -n video-editing -f environment.yml --prune
 conda activate video-editing
 python -m pytest -q
+python -m engine.resolve_link.install
 python -m app
 ```
 
-## 사용법
+## 예전 창 사용법 (`python -m app --legacy`)
 
-1. 바탕화면의 **Video Editing** (또는 `run_app.bat`) 실행
+1. Anaconda Prompt에서 `conda activate video-editing` 후 `python -m app --legacy` 실행
 2. 영상을 창에 끌어다 놓기
 3. 정리 강도 고르고 **[③ 음량 정리하고 리졸브용으로 내보내기]**
 4. 끝나면 처리 전/후 음량 비교가 나오고, 영상 옆에 `<영상이름>_resolve` 폴더가 생깁니다.
@@ -97,7 +119,9 @@ python -m engine balance "D:\촬영\게임.mkv" --tracks 2
 ## 구조
 
 ```
+resolve_scripts/  리졸브 안에서 도는 Lua 스크립트 틀 (AI_Helper_Connect.lua)
 engine/        편집 엔진 (화면 코드를 전혀 모름)
+  resolve_link/  리졸브 연결: 우체통 폴더에 요청을 쓰고 Fusion.prefs에서 답을 읽음, 스크립트 설치
   ffmpeg.py      FFmpeg 호출을 한곳에 모음
   probe.py       영상 정보 읽기
   loudness.py    음량 분석 (EBU R128), 튀는/작은 구간 찾기
@@ -106,7 +130,9 @@ engine/        편집 엔진 (화면 코드를 전혀 모름)
   fcpxml.py      리졸브용 타임라인 파일
   project.py     프로젝트 파일 (schema_version + 자동 변환)
   job.py         영상 하나를 처음부터 끝까지 처리
-app/           PySide6 화면 (engine.job.process_video만 호출)
+app/           PySide6 화면
+  companion/     AI 도우미 창 (리졸브 연결 시험)
+  main_window.py 예전 창 (engine.job.process_video만 호출)
 tests/         자동 테스트 (테스트 음원은 FFmpeg로 즉석에서 만듦)
 ```
 
@@ -119,6 +145,8 @@ PRD 7.4절 원칙을 따릅니다: 엔진과 화면 분리, 새 기능은 편집
 | `Miniconda was not found` | Miniconda 설치 후 `setup_windows.bat` 다시 실행. 설치했는데도 못 찾으면 설치 폴더(예: `D:\miniconda3`)를 물어볼 때 입력 |
 | `Please extract the whole ZIP file first` | ZIP 파일을 오른쪽 클릭 → [압축 풀기] 후, 풀린 폴더의 `setup_windows.bat` 실행 |
 | `ffmpeg을(를) 찾을 수 없습니다` | `setup_windows.bat` 다시 실행, 또는 `conda install -n video-editing -c conda-forge ffmpeg` |
+| AI 도우미 창의 불이 초록색으로 안 바뀜 | 리졸브에서 **Workspace → Scripts → AI_Helper_Connect** 를 눌렀는지 확인. 리졸브에 열린 대화 상자가 있으면 닫기. 그래도 안 되면 **결과 저장** 후 그 파일을 보내 주세요 |
+| 리졸브 Scripts 메뉴에 AI_Helper_Connect가 없음 | 리졸브를 껐다 켜기. 그래도 없으면 `setup_windows.bat` 다시 실행 (`check_setup.bat` 결과에 스크립트 위치가 나옵니다) |
 | 앱이 안 켜짐 | 검은 창의 안내대로 폴더의 `check_setup.bat` 을 실행하고, 생기는 `setup_check_result.txt` 내용을 보내 주세요 (기록 위치: `%LOCALAPPDATA%\video-editing-systems\app.log`, `launch.log`) |
 | "결과 파일을 저장할 수 없습니다" | 리졸브나 재생 프로그램이 이전 결과 WAV를 열고 있습니다. 그 프로그램을 닫거나 결과 폴더를 바꿔서 다시 실행 |
 | 처리 중 오류 | 결과 폴더의 `작업로그.log` 확인 |

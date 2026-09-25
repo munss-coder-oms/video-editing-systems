@@ -2,8 +2,9 @@
 rem ============================================================
 rem  Video Editing Systems - one-time setup (Windows)
 rem  1) finds Miniconda  2) creates the "video-editing" env
-rem  3) runs the automatic tests  4) makes a desktop shortcut
-rem  5) opens the app once
+rem  3) runs the automatic tests
+rem  4) puts AI_Helper_Connect into DaVinci Resolve's Workspace - Scripts menu
+rem  5) makes the desktop shortcut of the AI helper  6) opens the app once
 rem  Run it again after downloading a new version.
 rem ============================================================
 setlocal
@@ -27,7 +28,7 @@ rem Remove it first (does nothing on a fresh install).
 call "%CONDA_BAT%" run -n %ENV_NAME% python -m pip uninstall -y PySide6 PySide6_Essentials PySide6_Addons shiboken6 >nul 2>&1
 
 echo.
-echo [1/3] Creating / updating the "%ENV_NAME%" environment. The first time takes a few minutes...
+echo [1/4] Creating / updating the "%ENV_NAME%" environment. The first time takes a few minutes...
 echo       If it asks in English to accept Terms of Service, type a and press Enter.
 call "%CONDA_BAT%" env update -n %ENV_NAME% -f environment.yml --prune
 if errorlevel 1 (
@@ -42,7 +43,7 @@ if not exist "%STATE_DIR%" mkdir "%STATE_DIR%"
 > "%STATE_DIR%\conda_path.txt" echo %CONDA_BAT%
 
 echo.
-echo [2/3] Running automatic tests...
+echo [2/4] Running automatic tests...
 call "%CONDA_BAT%" run -n %ENV_NAME% --no-capture-output python -m pytest -q
 if errorlevel 1 (
   echo [WARNING] Some tests failed. Please run check_setup.bat and send the result file.
@@ -54,15 +55,25 @@ set "ROOT=%~dp0"
 powershell -NoProfile -Command "Get-ChildItem -LiteralPath $env:ROOT -Recurse -File | Unblock-File" >nul 2>&1
 
 echo.
-echo [3/3] Creating desktop shortcut...
+echo [3/4] Adding AI_Helper_Connect to DaVinci Resolve - Workspace - Scripts...
+rem Works even before Resolve is installed. The app also does this each time it starts.
+call "%CONDA_BAT%" run -n %ENV_NAME% --no-capture-output python -m engine.resolve_link.install
+if errorlevel 1 echo [WARNING] The Resolve script could not be installed now. The app will try again when it starts.
+
+echo.
+echo [4/4] Creating desktop shortcut...
 rem The folder path goes through an environment variable so names with ' or ( ) still work.
+rem The shortcut name has Korean letters, which a .bat file cannot hold safely,
+rem so PowerShell builds it from character codes: 0xB3C4 0xC6B0 0xBBF8 = Korean "helper".
+rem The old "Video Editing" shortcut of the previous version is removed.
 set "SHORTCUT_OK=1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=[Environment]::GetFolderPath('Desktop'); $p=Join-Path $d 'Video Editing.lnk'; $s=(New-Object -ComObject WScript.Shell).CreateShortcut($p); $s.TargetPath=(Join-Path $env:ROOT 'run_app.bat'); $s.WorkingDirectory=$env:ROOT; $s.WindowStyle=1; $s.Save(); if (-not (Test-Path -LiteralPath $p)) { exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=[Environment]::GetFolderPath('Desktop'); $old=Join-Path $d 'Video Editing.lnk'; if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force }; $n='AI '+[char]0xB3C4+[char]0xC6B0+[char]0xBBF8+'.lnk'; $p=Join-Path $d $n; $s=(New-Object -ComObject WScript.Shell).CreateShortcut($p); $s.TargetPath=(Join-Path $env:ROOT 'run_app.bat'); $s.WorkingDirectory=$env:ROOT; $s.WindowStyle=1; $s.Save(); if (-not (Test-Path -LiteralPath $p)) { exit 1 }"
 if errorlevel 1 set "SHORTCUT_OK="
 
 echo.
-if defined SHORTCUT_OK echo Done. From now on, double-click "Video Editing" on the desktop (or run_app.bat) to start.
+if defined SHORTCUT_OK echo Done. From now on, double-click the new "AI ..." icon on the desktop (or run_app.bat) to start.
 if not defined SHORTCUT_OK echo [WARNING] The desktop shortcut could not be created. Start the app with run_app.bat in this folder.
+echo Then in DaVinci Resolve: open a project, then click Workspace - Scripts - AI_Helper_Connect.
 echo The app will now open once so you can see it.
 echo.
 if not defined NOPAUSE call "%~dp0run_app.bat"
