@@ -10,9 +10,10 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .protocol import LEGACY_OPS
 from .timecode import parse_fps, tc_offset
@@ -21,11 +22,30 @@ from .transport import Transport
 PROBE_PREFIX = "AI 도우미 점검용"
 PROBE_STAGES = ("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8")
 MAX_ITEM_PAGES = 200  # timeline_items를 이보다 많이 나눠 받지 않는다 (2만 개)
+MAX_ADD_MARKERS = 100  # add_markers 한 번에 보내는 표시 수 (Lua AIH.MAX_ADD)
+MAX_MARKER_NAME = 40
+MAX_MARKER_NOTE = 200
+# 리졸브 표시 색 이름 16개 (Lua AIH.MARKER_COLORS와 같다)
+MARKER_COLORS = ("Blue", "Cyan", "Green", "Yellow", "Red", "Pink", "Purple", "Fuchsia", "Rose", "Lavender",
+                 "Sky", "Mint", "Lemon", "Sand", "Cocoa", "Cream")
+# Lua의 "^aih:[%w:_%-]+$"와 같은 규칙 (영문·숫자만, 한글 같은 다른 글자는 안 됨)
+TAG_RE = re.compile(r"^aih:[A-Za-z0-9:_\-]+$")
+PREFIX_RE = re.compile(r"^aih:[A-Za-z0-9:_\-]*$")
 
 
 def is_our_custom(custom: Any) -> bool:
     """우리가 붙인 표시 꼬리표인지 (Lua의 our_custom과 같은 규칙)."""
     return isinstance(custom, str) and (custom.startswith("aih:") or custom == "aih_test")
+
+
+def is_tag(custom: Any) -> bool:
+    """표시를 넣을 때 쓸 수 있는 꼬리표인지 (aih:P1:3 모양, 64자까지)."""
+    return isinstance(custom, str) and len(custom) <= 64 and TAG_RE.match(custom) is not None
+
+
+def is_tag_prefix(prefix: Any) -> bool:
+    """지울 때 쓰는 꼬리표 앞부분인지 ("aih:"로 시작)."""
+    return isinstance(prefix, str) and len(prefix) <= 64 and PREFIX_RE.match(prefix) is not None
 
 
 def is_probe_name(name: Any) -> bool:
@@ -268,6 +288,101 @@ class ProbeResult:
                 "calls": self.calls}
 
 
+@dataclass
+class MarkerSpec:
+    """넣을 표시 하나. frame은 타임라인 시작부터 센 프레임 (AddMarker의 기준, 읽으면 같은 값)."""
+
+    frame: int
+    dur: int
+    color: str
+    name: str
+    note: str
+    custom: str
+
+    def check(self) -> None:
+        if isinstance(self.frame, bool) or not isinstance(self.frame, int) or self.frame < 0:
+            raise ValueError(f"표시 위치가 잘못됐습니다: {self.frame!r}")
+        if isinstance(self.dur, bool) or not isinstance(self.dur, int) or self.dur < 1:
+            raise ValueError(f"표시 길이가 잘못됐습니다: {self.dur!r}")
+        if self.color not in MARKER_COLORS:
+            raise ValueError(f"리졸브 표시 색이 아닙니다: {self.color!r}")
+        if len(self.name) > MAX_MARKER_NAME or len(self.note) > MAX_MARKER_NOTE:
+            raise ValueError("표시 이름이나 메모가 너무 깁니다")
+        if not is_tag(self.custom):
+            raise ValueError(f"도우미 꼬리표가 아닙니다: {self.custom!r}")
+
+    def to_args(self) -> Dict[str, Any]:
+        return {"frame": self.frame, "dur": self.dur, "color": self.color, "name": self.name, "note": self.note,
+                "custom": self.custom}
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.to_args()
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "MarkerSpec":
+        return cls(frame=int(d["frame"]), dur=int(d.get("dur", 1)), color=str(d["color"]), name=str(d.get("name", "")),
+                   note=str(d.get("note", "")), custom=str(d["custom"]))
+
+
+@dataclass
+class PlacedMarker:
+    custom: str
+    frame: int
+    dur: int
+    shifted: int
+    found: Optional[bool]
+    dur_readback: Optional[int]
+
+
+@dataclass
+class MarkerResult:
+    """add_markers 한 번(또는 여러 번을 합친) 결과. 영수증은 이것과 다시 읽은 표시로 만든다."""
+
+    placed: List[PlacedMarker] = field(default_factory=list)
+    failed: List[Dict[str, Any]] = field(default_factory=list)  # {"custom", "err"}
+    skipped_existing: List[str] = field(default_factory=list)  # 이미 있던 꼬리표
+    point_fallback: bool = False
+    requested: int = 0
+    calls: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_result(cls, specs: Sequence[MarkerSpec], r: Dict[str, Any]) -> "MarkerResult":
+        out = cls(point_fallback=r.get("point_fallback") is True, requested=_int(r.get("requested")) or len(specs),
+                  calls=r.get("calls") if isinstance(r.get("calls"), dict) else {})
+
+        def spec_at(i: Any) -> Optional[MarkerSpec]:
+            n = _int(i)
+            return specs[n - 1] if n is not None and 1 <= n <= len(specs) else None
+
+        for p in r.get("placed") or []:
+            if not isinstance(p, dict):
+                continue
+            spec = spec_at(p.get("i"))
+            custom = _str(p.get("custom")) or (spec.custom if spec else "")
+            out.placed.append(PlacedMarker(custom=custom, frame=_int(p.get("frame")) or 0, dur=_int(p.get("dur")) or 1,
+                                           shifted=_int(p.get("shifted")) or 0, found=_bool(p.get("found")),
+                                           dur_readback=_int(p.get("dur_readback"))))
+        for f in r.get("failed") or []:
+            if isinstance(f, dict):
+                spec = spec_at(f.get("i"))
+                out.failed.append({"custom": spec.custom if spec else None, "err": _str(f.get("err")) or "?"})
+        for i in r.get("skipped_existing") or []:
+            spec = spec_at(i)
+            if spec is not None:
+                out.skipped_existing.append(spec.custom)
+        return out
+
+    def merge(self, other: "MarkerResult") -> None:
+        self.placed += other.placed
+        self.failed += other.failed
+        self.skipped_existing += other.skipped_existing
+        self.point_fallback = self.point_fallback or other.point_fallback
+        self.requested += other.requested
+        for k, v in other.calls.items():
+            if self.calls.get(k) in (None, "ok"):
+                self.calls[k] = v
+
+
 class ResolveOps:
     """리졸브에 시키는 일. 모든 함수는 BridgeTimeout / BridgeError / OldScript를 그대로 올려 보낸다."""
 
@@ -318,9 +433,32 @@ class ResolveOps:
     def probe_read(self, *, cancel=None) -> Dict[str, Any]:
         return self._req("probe_read", cancel=cancel)
 
-    def get_markers(self, *, cancel=None) -> List[Dict[str, Any]]:
-        r = self._req("get_markers", cancel=cancel)
-        return [m for m in r.get("markers", []) if isinstance(m, dict)] if isinstance(r.get("markers"), list) else []
+    def get_markers(self, prefix: Optional[str] = None, *, limit: Optional[int] = None,
+                    cancel=None) -> List[Dict[str, Any]]:
+        """표시 목록 (frame은 타임라인 시작부터 센 프레임). prefix: 꼬리표 앞부분으로 거르기."""
+        return self.read_markers(prefix, limit=limit, cancel=cancel)[0]
+
+    def read_markers(self, prefix: Optional[str] = None, *, limit: Optional[int] = None,
+                     cancel=None) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+        """(표시 목록, 맞는 전체 수). 전체 수는 목록이 limit에서 잘렸어도 모두 센 값 (못 읽으면 None)."""
+        args: Dict[str, Any] = {}
+        if prefix is not None:
+            args["prefix"] = prefix
+        if limit is not None:
+            args["limit"] = int(limit)
+        r = self._req("get_markers", args or None, cancel=cancel)
+        rows = [m for m in r.get("markers", []) if isinstance(m, dict)] if isinstance(r.get("markers"), list) else []
+        total = _int(r.get("total"))
+        if total is None and "total" not in r:
+            total = len(rows)  # 1.0.0 스크립트: 거르지 않고 모두 준다
+            if prefix is not None:
+                rows = [m for m in rows if isinstance(m.get("custom"), str) and m["custom"].startswith(prefix)]
+                total = len(rows)
+        return rows, total
+
+    def marker_total(self, prefix: str, *, cancel=None) -> Optional[int]:
+        """꼬리표가 prefix로 시작하는 표시 수 (목록은 받지 않는다)."""
+        return self.read_markers(prefix, limit=0, cancel=cancel)[1]
 
     # --- 기능 점검과 보기 ---
 
@@ -338,7 +476,54 @@ class ResolveOps:
 
     # --- 고치기 (연결 점검 쪽 시험 도구) ---
 
-    def delete_markers(self, custom: str, *, cancel=None) -> Dict[str, Any]:
-        if not is_our_custom(custom):
-            raise ValueError(f"도우미 꼬리표가 아닌 표시는 지우지 않습니다: {custom!r}")
-        return self._req("delete_markers", {"custom": custom}, cancel=cancel)
+    def delete_markers(self, custom: Optional[str] = None, *, prefix: Optional[str] = None,
+                       colors: Optional[Iterable[str]] = None, snapshot: bool = False, cancel=None) -> Dict[str, Any]:
+        """우리 표시 지우기: custom(꼬리표 하나와 똑같은 것) 또는 prefix("aih:"로 시작하는 앞부분)."""
+        if (custom is None) == (prefix is None):
+            raise ValueError("custom과 prefix 가운데 하나만 주세요")
+        if custom is not None:
+            if not is_our_custom(custom):
+                raise ValueError(f"도우미 꼬리표가 아닌 표시는 지우지 않습니다: {custom!r}")
+            return self._req("delete_markers", {"custom": custom}, cancel=cancel)
+        if not is_tag_prefix(prefix):
+            raise ValueError(f"도우미 꼬리표가 아닌 표시는 지우지 않습니다: {prefix!r}")
+        args: Dict[str, Any] = {"prefix": prefix}
+        if colors is not None:
+            cl = list(colors)
+            if any(c not in MARKER_COLORS for c in cl):
+                raise ValueError(f"리졸브 표시 색이 아닙니다: {cl!r}")
+            args["colors"] = cl
+        if snapshot:
+            args["snapshot"] = True
+        return self._req("delete_markers", args, cancel=cancel)
+
+    def add_markers(self, specs: Sequence[MarkerSpec], *, point_only: bool = False, cancel=None,
+                    timeout: Optional[float] = None) -> MarkerResult:
+        """표시를 한 번에 100개까지 넣는다. 더 많으면 부르는 쪽이 나눠서 부른다."""
+        specs = list(specs)
+        if not specs or len(specs) > MAX_ADD_MARKERS:
+            raise ValueError(f"표시는 한 번에 1~{MAX_ADD_MARKERS}개만 넣습니다: {len(specs)}")
+        seen = set()
+        for sp in specs:
+            sp.check()
+            if sp.custom in seen:
+                raise ValueError(f"같은 꼬리표가 두 번 있습니다: {sp.custom}")
+            seen.add(sp.custom)
+        args: Dict[str, Any] = {"markers": [sp.to_args() for sp in specs]}
+        if point_only:
+            args["point_only"] = True
+        r = self._req("add_markers", args, cancel=cancel, timeout=timeout)
+        return MarkerResult.from_result(specs, r)
+
+    def remove_audio(self, track_name: str, *, switch_page: bool = False, cancel=None) -> Dict[str, Any]:
+        """1차 시험판이 넣은 시험 소리 트랙 빼기 (클립이 모두 우리 파일인 트랙만, Lua가 확인).
+
+        편집(Edit) 화면이 아니면 Lua가 need_edit_page로 거절한다. switch_page=True는
+        사용자가 [바꿔서 빼기]를 누른 뒤에만: 편집 화면으로 바꿔서 하고 원래 화면으로 돌린다.
+        """
+        if not track_name:
+            raise ValueError("트랙 이름이 없습니다")
+        args: Dict[str, Any] = {"track_name": track_name}
+        if switch_page:
+            args["switch_page"] = True
+        return self._req("remove_audio", args, cancel=cancel)

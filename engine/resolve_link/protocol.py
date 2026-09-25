@@ -33,6 +33,7 @@ OPS = (
     "probe_copy",
     "switch_timeline",
     "add_marker",
+    "add_markers",
     "get_markers",
     "delete_markers",
     "place_audio",

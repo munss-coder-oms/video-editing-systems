@@ -1,15 +1,17 @@
 """AI 편집 도우미 창 (설계 B1). 화면 오른쪽 끝에 좁게 붙는다.
 
 위에서 아래로: 머리말(연결 불빛, [연결 확인], ⋯, 타임라인 요약) · 자동화 버튼 1·2·3 · 대화 칸 ·
-[↶ 되돌리기 ▾] [결과 저장]. ⋯ > 연결 점검에는 예전 시험 도구와 [기능 점검]이 있다.
+[↶ 되돌리기 ▾] [결과 저장]. ⋯ > 연결 점검에는 예전 시험 도구와 [기능 점검]이 있다. ⚙는 버튼 설정 쪽.
 
-이 파일은 얇게 둔다: 화면 조각은 *_view.py / check_page.py, 연결 상태는 connection.py,
-작업 스레드는 tasks.py, 결과 파일은 report.py. 리졸브의 답을 기다리는 일은 모두 작업 스레드에서 하고,
-결과 저장은 파일만 읽으므로 작업 중에도 누를 수 있다.
+이 파일은 얇게 둔다: 화면 조각은 *_view.py / check_page.py / slot_settings.py / cards.py, 연결 상태는
+connection.py, 자동화 버튼의 흐름(계산·카드·넣기·되돌리기)은 runs.py, 작업 스레드는 tasks.py와 jobs.py,
+결과 파일은 report.py. 리졸브의 답을 기다리는 일은 모두 작업 스레드에서 하고, 결과 저장은 파일만 읽으므로
+작업 중에도 누를 수 있다.
 """
 
 from __future__ import annotations
 
+import copy
 import functools
 import time
 from pathlib import Path
@@ -39,6 +41,8 @@ from .check_page import CheckPage
 from .connection import AUTO_PING_MS, AUTO_PING_SLOW_MS, AUTO_SLOW_AFTER, UNREAD_LIMIT  # noqa: F401 - 예전 이름
 from .header_view import HeaderView
 from .report import TestSession, build_report, save_report
+from .runs import RunController
+from .slot_settings import SlotSettingsPage
 from .tasks import Relay, ShortTasks, TaskQueue
 from .undo_view import UndoView
 
@@ -168,12 +172,15 @@ class HelperWindow(QMainWindow):
         self.audio_items: List[Dict[str, Any]] = []  # 마지막으로 읽은 소리 클립 (결과 파일의 ffprobe용)
         self._items_ident: Optional[str] = None
         self._journal_key: Optional[str] = None
+        self._timeline_info: Optional[TimelineInfo] = None
         self.caps = None
         self._warned_version: Optional[str] = None
         self._probe_state = self.probe_store.load()
         self.layout_name = "full"
         self._placed = False
         self.confirm: Callable[[str, str, str], bool] = self._ask  # 시험에서 바꾼다
+        # 여러 답 중 하나 (모두 빼기, 되돌리기 확인): 누른 단추의 번호, 닫으면 None. 시험에서 바꾼다
+        self.choose: Callable[[str, str, List[str]], Optional[int]] = self._choose
 
         self.setWindowTitle(WINDOW_TITLE)
         self.setMinimumWidth(MIN_WIDTH)
@@ -189,6 +196,8 @@ class HelperWindow(QMainWindow):
             self.queue, session=self.session, scheduler=scheduler, clock=clock, process_check=process_check,
             auto_ping_ms=auto_ping_ms, extras=self._connect_extras, parent=self,
         )
+        self.runs = RunController(self)
+        self.controller.job_busy = lambda: self.runs.busy
         self._build()
         self.controller.changed.connect(self._refresh)
         self.controller.answered.connect(self._on_answered)
@@ -224,17 +233,27 @@ class HelperWindow(QMainWindow):
         col.addWidget(self.chat, 1)
         col.addWidget(self.footer)
         self.check_page = CheckPage()
+        self.settings_page = SlotSettingsPage()
         self.stack.addWidget(self.panel)
         self.stack.addWidget(self.check_page)
+        self.stack.addWidget(self.settings_page)
 
         self.header.check_clicked.connect(self.on_connect)
         self.header.back_clicked.connect(self.on_switch_back)
         self.automation.slot_clicked.connect(self.on_slot)
         self.automation.settings_clicked.connect(self.on_slot_settings)
+        self.automation.stop_clicked.connect(self.runs.stop)
         self.chat.sent.connect(self.on_chat)
         self.chat.set_collapsed(bool(self.settings.ui.get("chat_collapsed")))
         self.chat.collapsed_changed.connect(lambda v: self._save_ui("chat_collapsed", v))
         self.footer.report_btn.clicked.connect(self.on_report)
+        self.footer.undo_requested.connect(self.runs.undo_from_list)
+        self.footer.remove_all_requested.connect(self.runs.remove_all)
+        self.settings_page.back_clicked.connect(self.show_panel)
+        self.settings_page.saved.connect(self._settings_saved)
+        self.settings_page.move_requested.connect(self._settings_move)
+        self.settings_page.restore_requested.connect(self._settings_restore)
+        self.check_page.manual_btn.clicked.connect(self.on_manual_checks)
         self.check_page.back_clicked.connect(self.show_panel)
         self.check_page.probe_btn.clicked.connect(self.on_probe)
         self.check_page.marker_btn.clicked.connect(self.on_marker)
@@ -452,20 +471,26 @@ class HelperWindow(QMainWindow):
             return S.SLOT_DISABLED_OLD_SCRIPT
         if c.probe_copy_name:
             return S.SLOT_DISABLED_PROBE_COPY
-        if self.action is not None:
+        if self.action is not None or self.runs.busy:
             return S.SLOT_DISABLED_BUSY
         return None
+
+    @property
+    def busy(self) -> bool:
+        """버튼 작업(시험 도구 등)이나 자동화 일(계산·넣기·되돌리기)을 하는 중."""
+        return self.action is not None or self.runs.busy
 
     @Slot()
     def _refresh(self) -> None:
         c = self.controller
-        idle = self.action is None and not self.closing
+        idle = not self.busy and not self.closing
         self.header.set_status(c.status, checking=c.checking)
         self.header.set_probe_copy(c.probe_copy_name, can_switch=self._switch_target() is not None)
         self.header.back_btn.setEnabled(idle and c.connected)
         # [연결 확인]은 작업 중에도 누를 수 있다 (설계 B10). 줄 뒤에 선다.
         self.connect_btn.setEnabled(not self.closing)
-        self.automation.set_reason(self._slot_reason())
+        running = self.runs.running_slot if self.runs.busy else None
+        self.automation.set_reason(self._slot_reason(), running)
         tools = idle and c.connected
         for btn in (self.marker_btn, self.audio_btn, self.cleanup_btn):
             btn.setEnabled(tools)
@@ -474,7 +499,9 @@ class HelperWindow(QMainWindow):
         leftover = st is not None and bool(st.copy_uid or st.copy_name)
         self.check_page.leftover_btn.setVisible(leftover)
         self.check_page.leftover_btn.setEnabled(tools and leftover)
+        # 되돌리기는 다른 일이 도는 동안 꺼 둔다 (설계 B10). ⚙와 대화 입력은 늘 켜 둔다.
         self.footer.undo_btn.setEnabled(idle)
+        self.footer.set_connected(c.connected and c.status != conn.OLD_SCRIPT and not c.probe_copy_name)
         # 연결이 안 될 때 보내 주는 결과 파일이 가장 중요하므로 결과 저장은 작업 중에도 누를 수 있다.
         self.report_btn.setEnabled(not self.closing and not self.report_pending)
 
@@ -530,23 +557,45 @@ class HelperWindow(QMainWindow):
             self.audio_items = list((state.get("items") or {}).get("audio") or [])
         if out.get("caps") is not None:
             self.caps = out["caps"]
+        reconciled = out.get("reconciled") or []
         if state is not None and out.get("state_kind") == "timeline_info" and state.get("timeline") is not None:
-            self._update_undo_menu(TimelineInfo.from_result(state))
-        for r in out.get("reconciled") or []:
+            self._update_undo_menu(TimelineInfo.from_result(state), force=bool(reconciled))
+        for r in reconciled:
             text = r.get("message") or r.get("status")
             self.chat.add_helper(S.RECONCILED.format(summary=text))
 
-    def _update_undo_menu(self, info: TimelineInfo) -> None:
+    @property
+    def journal_key(self) -> Optional[str]:
+        return self._journal_key
+
+    def _ctrl_z_warning(self) -> bool:
+        """Ctrl+Z 시험(M3) 답이 "다른 것이 되돌아감"이었으면 되돌리기 안내에 경고를 덧붙인다."""
+        mine = self.session.manual.get("M3")
+        if isinstance(mine, dict):
+            return mine.get("answer") == "other"
+        manual = getattr(self.caps, "manual", None)
+        rec = manual.get("M3") if isinstance(manual, dict) else None
+        answer = rec.get("answer") if isinstance(rec, dict) else None
+        return isinstance(answer, dict) and answer.get("answer") == "other"
+
+    def _update_undo_menu(self, info: TimelineInfo, force: bool = False) -> None:
         from engine.edits.journal import Journal, key_for
 
         key = key_for(info)
-        if key == self._journal_key:
+        self._timeline_info = info
+        if key == self._journal_key and not force:
             return
         self._journal_key = key
         try:
-            self.footer.set_entries(Journal.for_timeline(info, self.state_root).summaries(20))
+            entries = Journal.for_timeline(info, self.state_root).summaries(20)
         except OSError:
-            self.footer.set_entries([])
+            entries = []
+        self.footer.set_entries(entries, warn_ctrl_z=self._ctrl_z_warning())
+
+    def refresh_undo(self, force: bool = True) -> None:
+        """넣기·되돌리기 뒤: 되돌리기 목록을 일지에서 다시 읽는다 (리졸브에는 묻지 않는다)."""
+        if self._timeline_info is not None:
+            self._update_undo_menu(self._timeline_info, force=force)
 
     @Slot(str, object)
     def _on_answered(self, name: str, out: Dict[str, Any]) -> None:
@@ -588,7 +637,7 @@ class HelperWindow(QMainWindow):
     # ── 버튼 작업 (시험 도구, 기능 점검, 원래 타임라인으로, 남은 복사본 지우기) ────────
 
     def start_action(self, name: str, step, summarize: Optional[Callable[[Dict[str, Any]], Tuple[bool, str]]] = None) -> bool:
-        if self.action is not None or self.closing:
+        if self.busy or self.closing:
             return False
         self.action = name
         self._action_t0 = time.monotonic()
@@ -663,9 +712,27 @@ class HelperWindow(QMainWindow):
         box.exec()
         return box.clickedButton() is ok
 
+    def _choose(self, title: str, text: str, options: List[str]) -> Optional[int]:
+        """단추 여러 개 중 하나. 마지막 단추는 취소(기본). 자동 검사에서는 묻지 않는다 (None)."""
+        if not self.interactive or not options:
+            return None
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle(title)
+        box.setText(text)
+        buttons = []
+        for i, label in enumerate(options):
+            role = QMessageBox.RejectRole if i == len(options) - 1 else (
+                QMessageBox.AcceptRole if i == 0 else QMessageBox.ActionRole)
+            buttons.append(box.addButton(label, role))
+        box.setDefaultButton(buttons[-1])
+        box.exec()
+        clicked = box.clickedButton()
+        return next((i for i, b in enumerate(buttons) if b is clicked), None)
+
     @Slot()
     def on_probe(self) -> None:
-        if self.action is not None or self.closing or not self.probe_btn.isEnabled():
+        if self.busy or self.closing or not self.probe_btn.isEnabled():
             return
         if not self.confirm(S.PROBE_CONFIRM_TITLE, S.PROBE_CONFIRM, S.BTN_START):
             return
@@ -732,7 +799,7 @@ class HelperWindow(QMainWindow):
 
     @Slot()
     def on_leftover(self) -> None:
-        if self.action is not None or self.closing:
+        if self.busy or self.closing:
             return
         st = self._probe_state = self.probe_store.load()
         if st is None or not (st.copy_uid or st.copy_name):
@@ -756,16 +823,16 @@ class HelperWindow(QMainWindow):
             return False, S.LEFTOVER_NO_STATE
         return False, S.LEFTOVER_OTHER.format(reason=reason)
 
-    # 자동화 버튼과 대화 (2.1a: 연결 확인까지만)
+    # 자동화 버튼 (흐름은 runs.py)
 
     @Slot(int)
     def on_slot(self, number: int) -> None:
-        if self.action is not None or self.closing:
+        if self.busy or self.closing:
             return
         self.action = "slot"
         self._action_t0 = time.monotonic()
         self._refresh()
-        # 누르면 먼저 연결을 확인한다 (스크립트 판, 점검용 복사본인지)
+        # 누르면 먼저 연결을 확인한다 (스크립트 판, 점검용 복사본인지, 넣다 멈춘 것 맞춰 보기)
         self.controller.before_action("slot", lambda out: self._slot_checked(number, out))
 
     def _slot_checked(self, number: int, out: Optional[Dict[str, Any]]) -> None:
@@ -778,17 +845,78 @@ class HelperWindow(QMainWindow):
         if reason is not None:
             self.show_message(reason)
             return
+        self.runs.start_slot(number)
+
+    # ⚙ 버튼 설정 (작업 중에도 열 수 있다, 설계 B10)
+
+    def _in_out_ok(self) -> Optional[bool]:
         try:
-            name = self.settings.slot(number).get("name") or S.SLOT_DEFAULT_NAMES.get(number, "")
-        except KeyError:
-            name = S.SLOT_DEFAULT_NAMES.get(number, "")
-        text = S.SLOT_SOON.format(name=name)
-        self.chat.add_helper(text)
-        self.show_message(text)
+            return self.caps.has("in_out") if self.caps is not None else None
+        except (KeyError, AttributeError):
+            return None
+
+    def _slot_index(self, number: int) -> int:
+        return next((i for i, s in enumerate(self.settings.slots) if s["slot"] == number), 0)
 
     @Slot(int)
     def on_slot_settings(self, number: int) -> None:
-        self.show_message(S.SLOT_SETTINGS_SOON)
+        try:
+            slot = self.settings.slot(number)
+        except KeyError:
+            return
+        self.settings_page.open(slot, self._slot_index(number), len(self.settings.slots), self._in_out_ok())
+        self.stack.setCurrentWidget(self.settings_page)
+
+    def _slots_changed(self) -> None:
+        self.automation.set_slots(self.settings.slots)
+        self._apply_layout()
+        self._refresh()
+
+    @Slot(int, str, str, dict)
+    def _settings_saved(self, number: int, kind: str, name: str, params: Dict[str, Any]) -> None:
+        before = copy.deepcopy(self.settings.slot(number))
+        try:
+            after = self.settings.configure_slot(number, kind, name, params)
+        except (OSError, ValueError) as exc:
+            self.show_message(S.REPORT_FAILED.format(error=exc))
+            return
+        changed = after.get("previous") is not None and after != before
+        self._slots_changed()
+        self.show_panel()
+        self.show_message(S.SETTINGS_SAVED.format(name=name) if changed else S.SETTINGS_UNCHANGED)
+
+    @Slot(int, int)
+    def _settings_move(self, number: int, delta: int) -> None:
+        index = self._slot_index(number) + int(delta)
+        if index < 0 or index >= len(self.settings.slots):
+            return
+        try:
+            self.settings.move_slot(number, index)
+        except (OSError, ValueError):
+            return
+        self._slots_changed()
+        self.settings_page.set_order(self._slot_index(number), len(self.settings.slots))
+        self.show_message(S.SETTINGS_MOVED)
+
+    @Slot(int)
+    def _settings_restore(self, number: int) -> None:
+        try:
+            done = self.settings.restore_previous(number)
+        except (OSError, ValueError):
+            done = False
+        if not done:
+            return
+        self._slots_changed()
+        self.show_panel()
+        name = self.settings.slot(number).get("name") or ""
+        self.show_message(S.SETTINGS_RESTORED.format(name=name))
+
+    @Slot()
+    def on_manual_checks(self) -> None:
+        """연결 점검 쪽 [확인 질문 다시 보기]: Ctrl+Z 시험(M3)과 자르기 시험(M2) 질문을 다시 띄운다."""
+        self.show_panel()
+        self.runs.ask_manual("M3", again=True)
+        self.runs.ask_manual("M2", again=True)
 
     @Slot(str)
     def on_chat(self, text: str) -> None:
@@ -834,6 +962,10 @@ class HelperWindow(QMainWindow):
             "screen": self.screen_metrics(),
             "timeline": timeline or None,
             "slots": list(self.settings.slots),
+            "voice": copy.deepcopy(self.settings.voice),
+            "perf": copy.deepcopy(self.settings.data.get("perf")),
+            "analysis_cache": {"folder": str(self.runs.cache.folder), "hits": self.runs.cache.hits,
+                               "misses": self.runs.cache.misses},
             "audio_paths": self._audio_paths(),
         }
 
@@ -928,8 +1060,11 @@ class HelperWindow(QMainWindow):
         if self.closing:
             return
         self.closing = True
+        # 계산은 멈추고(FFmpeg 끝냄), 리졸브 줄을 닫아 기다리던 요청을 끝낸 뒤 작업 스레드를 멈춘다
+        self.runs.shutdown()
         self.controller.shutdown()
         self.queue.shutdown()
+        self.runs.jobs.shutdown()
         self._refresh()
 
     def closeEvent(self, event) -> None:

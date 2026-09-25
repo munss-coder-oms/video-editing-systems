@@ -2003,19 +2003,232 @@ def test_remove_audio_reports_delete_clips_refusal(h):
 
 
 def test_hundred_marker_request_fits_and_loads(h):
+    """add_markers 100개 (이름 40자, 메모 200자에 가깝게)가 요청 크기 안에 들고, 샌드박스에서 읽혀 모두 들어간다."""
     aih = h.init()
-    markers = [{"frame": i * 60, "dur": 120, "color": "Blue", "name": "쉼" * 40, "note": "메모 " * 50,
-                "custom": f"aih:P12:{i}"} for i in range(100)]
-    text = protocol.encode_request(77, "get_markers", {"markers": markers}, t=NOW)
+    markers = [{"frame": i * 60, "dur": 30, "color": "Blue", "name": "쉼" * 40, "note": "메모 " * 66,
+                "custom": f"aih:P12:{i}"} for i in range(1, 101)]
+    text = protocol.encode_request(77, "add_markers", {"markers": markers}, t=NOW)
     assert len(text.encode("utf-8")) <= protocol.MAX_REQUEST_BYTES
     h.write_raw(text)
     r = aih.read_request()
     assert r is not None and r.id == 77
-    check = h.lua.eval("function(A, r) local ok, v = pcall(A.list_arg, r.a.markers, 'markers', 100); "
-                       "return ok and #v or -1 end")
-    assert check(aih, r) == 100
-    too_many = h.lua.eval("function(A, r) table.insert(r.a.markers, r.a.markers[1]); "
-                          "local ok = pcall(A.list_arg, r.a.markers, 'markers', 100); return ok end")
-    assert too_many(aih, r) is False
+    res = json.loads(h._handle_json(aih, r))
+    assert res["ok"] is True, res
+    assert len(res["result"]["placed"]) == 100 and res["result"]["failed"] == []
+    too_many = markers + [dict(markers[0], custom="aih:P12:101")]
+    res = h.op("add_markers", {"markers": too_many})
+    assert (res["ok"], res["error"], res["func"]) == (False, "bad_args", "markers")
     with pytest.raises(ValueError):
         protocol.encode_request(78, "get_markers", {"pad": "x" * protocol.MAX_REQUEST_BYTES})
+
+
+# ---------------------------------------------------------------------------
+# 2.1b: add_markers, delete_markers{prefix}, get_markers{prefix}
+# ---------------------------------------------------------------------------
+
+def _mk(i, frame, dur=30, **kw):
+    row = {"frame": frame, "dur": dur, "color": "Blue", "name": f"쉼 {i}", "note": "메모 · AI 도우미",
+           "custom": f"aih:P1:{i}"}
+    row.update(kw)
+    return row
+
+
+def _user_markers(h):
+    """사용자가 찍은 표시 (꼬리표가 없거나 우리 것이 아닌 것). 어떤 요청으로도 지워지면 안 된다."""
+    for f, custom in ((5, ""), (6, "user"), (7, "aih"), (8, "AIH:P1:1"), (9, "autosubs_1"), (11, "aih-P1-1"),
+                      (12, " aih:P1:1")):
+        h.op("add_marker", {"frame": f, "color": "Green", "name": "내 표시", "custom": custom})
+    h.fake.log = h.lua.table()  # 준비한 AddMarker 기록은 지운다
+    return {5: "", 6: "user", 7: "aih", 8: "AIH:P1:1", 9: "autosubs_1", 11: "aih-P1-1", 12: " aih:P1:1"}
+
+
+def _markers(h, prefix=None):
+    args = {} if prefix is None else {"prefix": prefix}
+    return h.op("get_markers", args)["result"]["markers"]
+
+
+def test_add_markers_places_tagged_markers_and_reads_back(h):
+    h.init()
+    r = h.op("add_markers", {"markers": [_mk(1, 100), _mk(2, 400, dur=90), _mk(3, 900, dur=1)]})
+    assert r["ok"] is True, r
+    res = r["result"]
+    assert [(p["i"], p["frame"], p["dur"], p["custom"], p["shifted"], p["found"], p["dur_readback"])
+            for p in res["placed"]] == [(1, 100, 30, "aih:P1:1", 0, True, 30), (2, 400, 90, "aih:P1:2", 0, True, 90),
+                                        (3, 900, 1, "aih:P1:3", 0, True, 1)]
+    assert res["failed"] == [] and res["skipped_existing"] == [] and res["point_fallback"] is False
+    assert res["requested"] == 3 and res["length"] == 9000
+    assert res["calls"]["Timeline.GetMarkers"] == "ok" and res["calls"]["Timeline.GetMarkers.after"] == "ok"
+    assert [x[4] for x in h.logged("AddMarker")] == [30, 90, 1]
+    assert [m["custom"] for m in _markers(h)] == ["aih:P1:1", "aih:P1:2", "aih:P1:3"]
+
+
+def test_add_markers_hostile_strings_arrive_exact(h):
+    h.init()
+    name = HOSTILE_NAME[:40]
+    r = h.op("add_markers", {"markers": [_mk(1, 300, name=name, note=HOSTILE_NOTE)]})
+    assert r["ok"] is True
+    ((frame, color, got_name, note, duration, custom),) = h.logged("AddMarker")
+    assert (frame, color, got_name, note, duration, custom) == (300, "Blue", name, HOSTILE_NOTE, 30, "aih:P1:1")
+    assert h.fake.pm_calls == 1  # 이름 속 글자가 코드로 실행되지 않았다
+    # 꼬리표에 코드 글자를 넣으면 거절
+    r = h.op("add_markers", {"markers": [_mk(2, 400, custom='aih:P1:2"}) resolve:GetProjectManager() --')]})
+    assert (r["ok"], r["error"], r["func"]) == (False, "bad_args", "custom")
+
+
+@pytest.mark.parametrize("change,func", [
+    ({"color": "Orange"}, "color"),
+    ({"color": ""}, "color"),
+    ({"custom": "user"}, "custom"),
+    ({"custom": "aih_test"}, "custom"),
+    ({"custom": "AIH:P1:1"}, "custom"),
+    ({"custom": "aih:"}, "custom"),
+    ({"custom": "aih:P1 1"}, "custom"),
+    ({"custom": "aih:" + "x" * 61}, "custom"),
+    ({"custom": 5}, "custom"),
+    ({"frame": -1}, "frame"),
+    ({"frame": 1.5}, "frame"),
+    ({"dur": 0}, "dur"),
+    ({"name": "가" * 41}, "name"),
+    ({"note": "나" * 201}, "note"),
+    ({"frame": 8990, "dur": 20}, "frame"),  # 타임라인 끝(9000)을 넘는다
+])
+def test_add_markers_refuses_bad_input_before_any_change(h, change, func):
+    h.init()
+    rows = [_mk(1, 100), {**_mk(2, 200), **change}]
+    r = h.op("add_markers", {"markers": rows})
+    assert (r["ok"], r["error"], r["func"]) == (False, "bad_args", func)
+    assert h.logged("AddMarker") == []  # 하나라도 틀리면 아무것도 넣지 않는다
+
+
+def test_add_markers_refuses_empty_duplicate_and_too_many(h):
+    h.init()
+    for markers in ([], [_mk(1, 100), _mk(1, 200)], [_mk(i, i * 10) for i in range(1, 102)], "x"):
+        r = h.op("add_markers", {"markers": markers})
+        assert r["ok"] is False and r["error"] == "bad_args", r
+    assert h.logged("AddMarker") == []
+
+
+def test_add_markers_resend_is_idempotent(h):
+    h.init()
+    rows = [_mk(1, 100), _mk(2, 200)]
+    first = h.op("add_markers", {"markers": rows})["result"]
+    again = h.op("add_markers", {"markers": rows + [_mk(3, 300)]})["result"]
+    assert len(first["placed"]) == 2
+    assert again["skipped_existing"] == [1, 2] and [p["custom"] for p in again["placed"]] == ["aih:P1:3"]
+    assert len(h.logged("AddMarker")) == 3
+    assert len(_markers(h, "aih:P1:")) == 3
+
+
+def test_add_markers_shifts_past_occupied_frames_and_keeps_the_end(h):
+    h.init()
+    for f in (300, 301):
+        h.op("add_marker", {"frame": f, "name": "사용자 표시", "custom": "user"})
+    for f in range(600, 606):
+        h.op("add_marker", {"frame": f, "name": "사용자 표시", "custom": ""})
+    res = h.op("add_markers", {"markers": [_mk(1, 300, dur=10), _mk(2, 600, dur=10)]})["result"]
+    assert [(p["frame"], p["dur"], p["shifted"]) for p in res["placed"]] == [(302, 8, 2)]
+    assert res["failed"] == [{"i": 2, "err": "taken"}]
+    user = [m for m in _markers(h) if not str(m["custom"]).startswith("aih:")]
+    assert len(user) == 8  # 사용자 표시는 그대로
+
+
+def test_add_markers_falls_back_to_point_markers(h):
+    h.init()
+    h.lua.execute("local S = ...; S.no_range_markers = true", h.fake)
+    res = h.op("add_markers", {"markers": [_mk(1, 100, dur=30), _mk(2, 200, dur=30)]})["result"]
+    assert res["point_fallback"] is True
+    assert [(p["frame"], p["dur"], p["dur_readback"]) for p in res["placed"]] == [(100, 1, 1), (200, 1, 1)]
+    assert res["calls"]["Timeline.AddMarker.point"] == "ok"
+    # 첫 표시에서 길이 있는 표시가 안 되는 것을 알았으니 두 번째는 바로 길이 1로 넣는다
+    assert [x[4] for x in h.logged("AddMarker")] == [30, 1, 1]
+    res = h.op("add_markers", {"markers": [_mk(3, 300, dur=30)], "point_only": True})["result"]
+    assert res["placed"][0]["dur"] == 1 and [x[4] for x in h.logged("AddMarker")][-1] == 1
+
+
+def test_add_markers_needs_readable_timeline(h):
+    h.init()
+    h.fake.timeline.GetMarkers = None
+    r = h.op("add_markers", {"markers": [_mk(1, 100)]})
+    assert (r["ok"], r["error"], r["func"]) == (False, "markers_unreadable", "Timeline.GetMarkers")
+    assert h.logged("AddMarker") == []
+
+
+def test_get_markers_prefix_limit_and_total(h):
+    h.init()
+    _user_markers(h)
+    h.op("add_markers", {"markers": [_mk(i, 100 + i * 10) for i in range(1, 4)]})
+    h.op("add_markers", {"markers": [_mk(1, 500, custom="aih:P2:1")]})
+    r = h.op("get_markers", {"prefix": "aih:P1:", "limit": 2})["result"]
+    assert [m["custom"] for m in r["markers"]] == ["aih:P1:1", "aih:P1:2"] and r["total"] == 3
+    r = h.op("get_markers", {"prefix": "aih:", "limit": 0})["result"]
+    assert r["markers"] == [] and r["total"] == 4
+    r = h.op("get_markers")["result"]
+    assert r["total"] == 11 and len(r["markers"]) == 11
+    assert h.op("get_markers", {"prefix": 5})["error"] == "bad_args"
+
+
+def test_prefix_delete_never_touches_user_markers(h):
+    h.init()
+    user = _user_markers(h)
+    h.op("add_marker", {"frame": 20, "name": "시험", "custom": "aih_test"})
+    h.op("add_markers", {"markers": [_mk(i, 100 + i * 10) for i in range(1, 4)]})
+    h.op("add_markers", {"markers": [_mk(1, 500, custom="aih:P2:1", color="Red")]})
+    r = h.op("delete_markers", {"prefix": "aih:P1:"})["result"]
+    assert (r["deleted"], r["deleted_count"], r["matched"], r["remaining"]) == (True, 3, 3, 0)
+    assert r["remaining_ours"] == 2  # aih:P2:1과 aih_test
+    assert "snapshot" not in r
+    assert sorted(x[0] for x in h.logged("DeleteMarkerAtFrame")) == [110, 120, 130]
+    assert h.logged("DeleteMarkerByCustomData") == []
+    # 색으로 거르기: 빨간 aih: 표시만
+    r = h.op("delete_markers", {"prefix": "aih:", "colors": ["Blue"]})["result"]
+    assert r["deleted_count"] == 0
+    r = h.op("delete_markers", {"prefix": "aih:", "colors": ["Red"], "snapshot": True})["result"]
+    assert r["deleted_count"] == 1 and r["snapshot"][0]["custom"] == "aih:P2:1" and r["snapshot_truncated"] is False
+    left = {m["frame"]: m["custom"] for m in _markers(h)}
+    assert left == {**user, 20: "aih_test"}  # 사용자 표시와 옛 시험 표시는 그대로
+
+
+@pytest.mark.parametrize("args", [
+    {"prefix": ""}, {"prefix": "a"}, {"prefix": "aih"}, {"prefix": "AIH:"}, {"prefix": "user"},
+    {"prefix": "aih: x"}, {"prefix": 5}, {"prefix": "aih:", "custom": "aih:P1:1"}, {"prefix": "aih:", "colors": ["Orange"]},
+    {"prefix": "aih:", "colors": "Blue"},
+])
+def test_prefix_delete_refuses_bad_args_before_any_change(h, args):
+    h.init()
+    user = _user_markers(h)
+    r = h.op("delete_markers", args)
+    assert r["ok"] is False and r["error"] == "bad_args", r
+    assert h.logged("DeleteMarkerAtFrame") == [] and h.logged("DeleteMarkerByCustomData") == []
+    assert {m["frame"]: m["custom"] for m in _markers(h)} == user
+
+
+def test_no_delete_request_removes_a_user_marker(h):
+    """삭제에 쓰일 수 있는 모든 요청 모양을 보내도 사용자 표시는 하나도 지워지지 않는다."""
+    h.init()
+    user = _user_markers(h)
+    tries = [
+        {"prefix": "aih:"}, {"prefix": "aih:P1:"}, {"prefix": "aih:", "colors": ["Green"]},
+        {"custom": "aih_test"}, {"custom": "aih:P1:1"}, {"custom": ""}, {"custom": "user"}, {"custom": "aih"},
+        {"custom": "AIH:P1:1"}, {"custom": " aih:P1:1"}, {"custom": "autosubs_1"}, {}, {"colors": ["Green"]},
+    ]
+    for args in tries:
+        h.op("delete_markers", args)
+    h.op("remove_audio", {"track_name": TRACK_NAME, "switch_page": True})
+    assert {m["frame"]: m["custom"] for m in _markers(h)} == user
+
+
+def test_remove_audio_switches_to_edit_page_only_when_asked(h):
+    ours = str(Path(h.files) / "aih_test_tone.wav")
+    h.fake.add_clip("audio", 1, "원본", 0, 10, "C:\\Users\\문성\\Music\\a.wav")
+    h.fake.add_clip("audio", 2, "ours", 0, 10, ours)
+    h.fake.set_track_name("audio", 2, TRACK_NAME)
+    h.init()
+    h.fake.page = "fairlight"
+    res = h.op("remove_audio", {"track_name": TRACK_NAME})
+    assert (res["ok"], res["error"]) == (False, "need_edit_page")
+    assert h.logged("OpenPage") == [] and h.logged("DeleteClips") == []
+    r = h.op("remove_audio", {"track_name": TRACK_NAME, "switch_page": True})["result"]
+    assert r["page"] == "fairlight" and r["switched_page"] is True and r["removed_tracks"] == 1
+    assert [x[0] for x in h.logged("OpenPage")] == ["edit", "fairlight"]  # 원래 화면으로 돌아간다
+    assert h.logged("DeleteClips")[0][1] == "edit"
+    assert h.fake.page == "fairlight"

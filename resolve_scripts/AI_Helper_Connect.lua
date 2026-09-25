@@ -47,6 +47,17 @@ AIH.TICK = 0.1                  -- 요청 파일을 보는 간격(초)
 AIH.OWNER_EVERY = 10            -- 이 횟수(약 1초)마다 주인 표시를 다시 본다
 AIH.BUSY_CHECK = 300            -- 이 횟수(약 30초)마다 bmd.wait가 실제로 쉬는지 본다
 AIH.MAX_DELETE = 2000           -- 표시를 지울 때 되풀이하는 최대 횟수
+AIH.MAX_ADD = 100               -- add_markers: 한 번에 넣는 표시 수
+AIH.MARKER_SHIFT = 5            -- 그 프레임에 이미 표시가 있으면 이만큼까지 뒤로 옮겨 본다
+AIH.MAX_NAME = 40               -- 표시 이름 글자 수
+AIH.MAX_NOTE = 200              -- 표시 메모 글자 수
+AIH.MAX_SNAPSHOT = 200          -- delete_markers(prefix)가 지운 표시를 적어 돌려주는 최대 수
+-- 리졸브 표시 색 이름 16개 (이 밖의 이름은 받지 않는다)
+AIH.MARKER_COLORS = {
+	Blue = true, Cyan = true, Green = true, Yellow = true, Red = true, Pink = true, Purple = true,
+	Fuchsia = true, Rose = true, Lavender = true, Sky = true, Mint = true, Lemon = true, Sand = true,
+	Cocoa = true, Cream = true,
+}
 AIH.STALE_CLAIM_MS = 600000     -- Claim이 요청 번호보다 이만큼(10분) 넘게 크면 PC 시계가 뒤로 가기 전에 남은 값
 
 local KEY_OWNER = "Global.AIHelper.Owner"
@@ -57,7 +68,7 @@ local KEY_RESPONSE = "Global.AIHelper.Response"
 local OPS_ALLOWED = {
 	ping = true, state = true, timeline_info = true, timeline_items = true, scope = true,
 	probe_read = true, probe_copy = true, switch_timeline = true,
-	add_marker = true, get_markers = true, delete_markers = true,
+	add_marker = true, add_markers = true, get_markers = true, delete_markers = true,
 	place_audio = true, remove_audio = true, stop = true,
 }
 
@@ -542,6 +553,31 @@ local function our_custom(c)
 	return type(c) == "string" and (string.sub(c, 1, 4) == "aih:" or c == "aih_test")
 end
 AIH.our_custom = our_custom
+
+-- 표시를 넣을 때 쓰는 꼬리표: "aih:" 뒤에 영문·숫자·:·_·- 만 (예: aih:P1a2b3:12)
+local function tag_ok(c)
+	return type(c) == "string" and #c <= 64 and string.find(c, "^aih:[%w:_%-]+$") ~= nil
+end
+AIH.tag_ok = tag_ok
+
+-- 지울 때 쓰는 꼬리표 앞부분: "aih:"로 시작해야 한다 (그 뒤는 비어 있어도 된다)
+local function prefix_ok(c)
+	return type(c) == "string" and #c <= 64 and string.find(c, "^aih:[%w:_%-]*$") ~= nil
+end
+AIH.prefix_ok = prefix_ok
+
+-- UTF-8 글자 수 (이어지는 바이트 0x80~0xBF는 세지 않는다)
+local function char_count(s)
+	local n = 0
+	for i = 1, #s do
+		local b = string.byte(s, i)
+		if b < 0x80 or b >= 0xC0 then
+			n = n + 1
+		end
+	end
+	return n
+end
+AIH.char_count = char_count
 
 local function is_probe_name(name)
 	return type(name) == "string" and string.sub(name, 1, #AIH.PROBE_PREFIX) == AIH.PROBE_PREFIX
@@ -1190,21 +1226,33 @@ ops.add_marker = function(a, calls)
 	return { added = false, frame = frame, requested_frame = frame, tried = tried, calls = calls }
 end
 
+-- 표시 목록. prefix가 있으면 custom data가 그것으로 시작하는 것만, limit개까지 (total은 맞는 전체 수)
 ops.get_markers = function(a, calls)
+	local prefix = nil
+	if a.prefix ~= nil then
+		prefix = str_arg(a.prefix, "prefix")
+	end
+	local limit = a.limit == nil and AIH.MAX_MARKERS or math.min(int_arg(a.limit, "limit", 0), AIH.MAX_MARKERS)
 	local _, tl = need_timeline(calls)
 	local markers = call(calls, "Timeline.GetMarkers", tl, "GetMarkers")
 	local list = array()
+	local total = NULL
 	if type(markers) == "table" then
+		total = 0
 		local frames = {}
-		for f in pairs(markers) do
-			if type(f) == "number" then
-				frames[#frames + 1] = f
+		for f, m in pairs(markers) do
+			if type(f) == "number" and type(m) == "table" then
+				local c = m.customData
+				if prefix == nil or (type(c) == "string" and string.sub(c, 1, #prefix) == prefix) then
+					frames[#frames + 1] = f
+				end
 			end
 		end
 		table.sort(frames)
+		total = #frames
 		for i = 1, #frames do
 			local m = markers[frames[i]]
-			if type(m) == "table" and #list < AIH.MAX_MARKERS then
+			if #list < limit then
 				list[#list + 1] = {
 					frame = frames[i], color = m.color, name = m.name, note = m.note,
 					duration = m.duration, custom = m.customData,
@@ -1212,7 +1260,7 @@ ops.get_markers = function(a, calls)
 			end
 		end
 	end
-	return { markers = list, calls = calls }
+	return { markers = list, total = total, calls = calls }
 end
 
 -- custom data가 custom인 표시의 프레임 목록. GetMarkers를 못 쓰면 nil
@@ -1231,7 +1279,7 @@ local function marker_frames(calls, tl, custom, name)
 	return frames
 end
 
-ops.delete_markers = function(a, calls)
+local function delete_by_custom(a, calls)
 	local custom = str_arg(a.custom, "custom")
 	-- 우리 꼬리표("aih:..." 또는 1차 시험판의 "aih_test")가 아니면 리졸브를 부르기 전에 거절한다.
 	-- 다른 프로그램(예: 자막 도구)이 붙인 표시를 지우는 일이 없게.
@@ -1269,6 +1317,232 @@ ops.delete_markers = function(a, calls)
 		remaining = #left
 	end
 	return { deleted = count > 0, deleted_count = count, remaining = remaining, calls = calls }
+end
+
+-- 색 목록 인자 (리졸브 색 이름 16개 가운데서만). 없으면 nil = 모든 색
+local function colors_arg(v)
+	if v == nil then
+		return nil
+	end
+	local list = list_arg(v, "colors", 16)
+	local out = {}
+	for i = 1, #list do
+		if type(list[i]) ~= "string" or not AIH.MARKER_COLORS[list[i]] then
+			fail("bad_args", "colors")
+		end
+		out[list[i]] = true
+	end
+	return out
+end
+
+-- 표시 m이 prefix(와 색)에 맞는지
+local function marker_matches(m, prefix, colors)
+	if type(m) ~= "table" then
+		return false
+	end
+	local c = m.customData
+	return type(c) == "string" and string.sub(c, 1, #prefix) == prefix and (colors == nil or colors[m.color] == true)
+end
+
+-- 꼬리표 앞부분(prefix, "aih:"로 시작)으로 지우기. GetMarkers로 찾아 맞는 프레임만 DeleteMarkerAtFrame
+local function delete_by_prefix(a, calls)
+	if a.custom ~= nil then
+		fail("bad_args", "custom") -- custom과 prefix를 같이 주면 무엇을 지울지 모호하다
+	end
+	local prefix = a.prefix
+	if not prefix_ok(prefix) then
+		fail("bad_args", "prefix")
+	end
+	local colors = colors_arg(a.colors)
+	local want_snapshot = a.snapshot == true
+	local _, tl = need_timeline(calls)
+	local markers = call(calls, "Timeline.GetMarkers", tl, "GetMarkers")
+	if type(markers) ~= "table" then
+		fail("markers_unreadable", "Timeline.GetMarkers")
+	end
+	local frames = {}
+	for f, m in pairs(markers) do
+		if type(f) == "number" and marker_matches(m, prefix, colors) then
+			frames[#frames + 1] = f
+		end
+	end
+	table.sort(frames)
+	local count, snapshot = 0, array()
+	for i = 1, math.min(#frames, AIH.MAX_DELETE) do
+		local f = frames[i]
+		local m = markers[f]
+		local gone = call(calls, "Timeline.DeleteMarkerAtFrame", tl, "DeleteMarkerAtFrame", f)
+		if gone then
+			count = count + 1
+			if want_snapshot and #snapshot < AIH.MAX_SNAPSHOT then
+				snapshot[#snapshot + 1] = {
+					frame = f, color = m.color, name = m.name, note = m.note, duration = m.duration, custom = m.customData,
+				}
+			end
+		end
+	end
+	-- 다시 읽어서 남은 수를 센다 (읽을 수 없으면 null)
+	local after = call(calls, "Timeline.GetMarkers.after", tl, "GetMarkers")
+	local remaining, remaining_ours = NULL, NULL
+	if type(after) == "table" then
+		remaining, remaining_ours = 0, 0
+		for f, m in pairs(after) do
+			if type(f) == "number" and type(m) == "table" and our_custom(m.customData) then
+				remaining_ours = remaining_ours + 1
+				if marker_matches(m, prefix, colors) then
+					remaining = remaining + 1
+				end
+			end
+		end
+		count = math.max(0, #frames - remaining)
+	end
+	local res = {
+		deleted = count > 0, deleted_count = count, matched = #frames,
+		remaining = remaining, remaining_ours = remaining_ours, calls = calls,
+	}
+	if want_snapshot then
+		res.snapshot = snapshot
+		res.snapshot_truncated = count > #snapshot
+	end
+	return res
+end
+
+ops.delete_markers = function(a, calls)
+	if a.prefix ~= nil then
+		return delete_by_prefix(a, calls)
+	end
+	return delete_by_custom(a, calls)
+end
+
+-- 표시 여러 개 넣기 (자동화 버튼의 카드에서 [리졸브에 넣기]를 누른 뒤에만 불린다).
+-- markers: {frame(타임라인 시작부터 센 프레임), dur, color, name, note, custom} 목록, 100개까지.
+-- 모두 먼저 검사하고(하나라도 틀리면 아무것도 넣지 않음), GetMarkers는 넣기 전에 한 번만 읽는다.
+-- 같은 꼬리표가 이미 있으면 넣지 않는다 (답을 못 받아 다시 보내도 두 번 들어가지 않게).
+-- 그 프레임에 표시가 있으면 +1..+5 프레임으로 옮긴다 (끝은 그대로 두고 길이를 줄인다).
+-- 길이 있는 표시(dur>1)를 리졸브가 거절하면 길이 1로 다시 넣고 point_fallback을 켠다 (그 뒤는 모두 1).
+ops.add_markers = function(a, calls)
+	local list = list_arg(a.markers, "markers", AIH.MAX_ADD)
+	if #list == 0 then
+		fail("bad_args", "markers")
+	end
+	local rows, seen = {}, {}
+	for i = 1, #list do
+		local m = list[i]
+		if type(m) ~= "table" then
+			fail("bad_args", "markers")
+		end
+		local row = {
+			frame = int_arg(m.frame, "frame", 0),
+			dur = m.dur == nil and 1 or int_arg(m.dur, "dur", 1),
+			color = str_arg(m.color, "color"),
+			name = str_arg(m.name, "name", ""),
+			note = str_arg(m.note, "note", ""),
+			custom = m.custom,
+		}
+		if not AIH.MARKER_COLORS[row.color] then
+			fail("bad_args", "color")
+		end
+		if char_count(row.name) > AIH.MAX_NAME then
+			fail("bad_args", "name")
+		end
+		if char_count(row.note) > AIH.MAX_NOTE then
+			fail("bad_args", "note")
+		end
+		if not tag_ok(row.custom) or seen[row.custom] then
+			fail("bad_args", "custom")
+		end
+		seen[row.custom] = true
+		rows[i] = row
+	end
+	local _, tl = need_timeline(calls)
+	local first = call(calls, "Timeline.GetStartFrame", tl, "GetStartFrame")
+	local last = call(calls, "Timeline.GetEndFrame", tl, "GetEndFrame")
+	if type(first) ~= "number" or type(last) ~= "number" or last <= first then
+		fail("timeline_length_unknown", "Timeline.GetEndFrame")
+	end
+	local length = last - first
+	for i = 1, #rows do
+		if rows[i].frame + rows[i].dur > length then
+			fail("bad_args", "frame")
+		end
+	end
+	local existing = call(calls, "Timeline.GetMarkers", tl, "GetMarkers")
+	if type(existing) ~= "table" then
+		fail("markers_unreadable", "Timeline.GetMarkers")
+	end
+	local taken, have = {}, {}
+	for f, m in pairs(existing) do
+		if type(f) == "number" then
+			taken[f] = true
+			if type(m) == "table" and type(m.customData) == "string" then
+				have[m.customData] = f
+			end
+		end
+	end
+	local placed, failed, skipped = array(), array(), array()
+	local point_fallback = a.point_only == true
+	for i = 1, #rows do
+		local r = rows[i]
+		if have[r.custom] ~= nil then
+			skipped[#skipped + 1] = i
+		else
+			local err, done = "taken", false
+			for k = 0, AIH.MARKER_SHIFT do
+				local f = r.frame + k
+				local dur = r.dur > k and r.dur - k or 1
+				if point_fallback then
+					dur = 1
+				end
+				if f + dur > length then
+					err = "outside"
+					break
+				end
+				if not taken[f] then
+					local added, ok = call(calls, "Timeline.AddMarker", tl, "AddMarker", f, r.color, r.name, r.note, dur, r.custom)
+					if ok and not added and dur > 1 then
+						added, ok = call(calls, "Timeline.AddMarker.point", tl, "AddMarker", f, r.color, r.name, r.note, 1, r.custom)
+						if added then
+							point_fallback = true
+							dur = 1
+						end
+					end
+					if not ok then
+						err = "error"
+						break
+					end
+					taken[f] = true
+					if added then
+						have[r.custom] = f
+						placed[#placed + 1] = { i = i, frame = f, dur = dur, custom = r.custom, shifted = k }
+						done = true
+						break
+					end
+					err = "refused"
+				end
+			end
+			if not done then
+				failed[#failed + 1] = { i = i, err = err }
+			end
+		end
+	end
+	-- 넣은 뒤 다시 읽어 실제로 들어갔는지와 길이를 본다 (영수증은 이 값으로 만든다)
+	local after = call(calls, "Timeline.GetMarkers.after", tl, "GetMarkers")
+	for j = 1, #placed do
+		local p = placed[j]
+		local m = type(after) == "table" and after[p.frame] or nil
+		if type(after) ~= "table" then
+			p.found, p.dur_readback = NULL, NULL
+		elseif type(m) == "table" and m.customData == p.custom then
+			p.found = true
+			p.dur_readback = type(m.duration) == "number" and m.duration or NULL
+		else
+			p.found, p.dur_readback = false, NULL
+		end
+	end
+	return {
+		placed = placed, failed = failed, skipped_existing = skipped, point_fallback = point_fallback,
+		requested = #rows, length = length, calls = calls,
+	}
 end
 
 -- 미디어 풀 맨 위 폴더 아래의 "AI 도우미" 저장소를 찾고, 없으면 만든다 (no_create면 nil)
@@ -1448,16 +1722,55 @@ ops.place_audio = function(a, calls)
 	return res
 end
 
+-- 편집(Edit) 화면이 아니면 잠깐 바꾼다. 돌려주는 값: 원래 화면(바꿨을 때만)
+local function edit_page(calls)
+	local page = current_page(calls)
+	if page ~= nil and page ~= "edit" then
+		call(calls, "Resolve.OpenPage", st.R, "OpenPage", "edit")
+		return page
+	end
+	return nil
+end
+
+local function restore_page(calls, page)
+	if page ~= nil then
+		call(calls, "Resolve.OpenPage.restore", st.R, "OpenPage", page)
+	end
+end
+
+-- 우리 시험 트랙(track_name, 클립이 모두 우리 파일인 트랙)을 지운다.
+-- 클립 지우기(DeleteClips)는 편집(Edit) 화면 밖에서 실패한다는 보고가 있다: 편집 화면에서만 한다.
+-- switch_page=true면 (창에서 [바꿔서 빼기]를 누른 뒤) 편집 화면으로 바꿔서 하고 원래 화면으로 돌린다.
+local remove_tracks
 ops.remove_audio = function(a, calls)
 	local track_name = str_arg(a.track_name, "track_name")
 	if track_name == "" then
 		fail("bad_args", "track_name")
 	end
-	-- 클립 지우기(DeleteClips)는 편집(Edit) 화면 밖에서 실패한다는 보고가 있다: 편집 화면에서만 한다
 	local page = current_page(calls)
+	local switched = nil
 	if page ~= nil and page ~= "edit" then
-		fail("need_edit_page", "Resolve.GetCurrentPage")
+		if a.switch_page ~= true then
+			fail("need_edit_page", "Resolve.GetCurrentPage")
+		end
+		switched = edit_page(calls)
+		if current_page(calls) ~= "edit" then
+			restore_page(calls, switched)
+			fail("need_edit_page", "Resolve.OpenPage")
+		end
 	end
+	local ok, res = pcall(remove_tracks, calls, track_name)
+	restore_page(calls, switched)
+	if not ok then
+		error(res, 0)
+	end
+	res.page = nz(page)
+	res.switched_page = switched ~= nil
+	res.calls = calls
+	return res
+end
+
+remove_tracks = function(calls, track_name)
 	local _, tl = need_timeline(calls)
 	local count = call(calls, "Timeline.GetTrackCount", tl, "GetTrackCount", "audio")
 	local removed, skipped = 0, 0
@@ -1497,8 +1810,7 @@ ops.remove_audio = function(a, calls)
 		end
 	end
 	return {
-		removed_tracks = removed, skipped = skipped, page = nz(page),
-		delete_clips = clip_results, delete_track = track_results, calls = calls,
+		removed_tracks = removed, skipped = skipped, delete_clips = clip_results, delete_track = track_results,
 	}
 end
 
@@ -1705,22 +2017,6 @@ probe_stages.C5 = function(a, calls)
 		restored = nz(after), page = nz(page),
 	}
 	return stage_result("C5", readback == tc, detail, tl)
-end
-
--- 편집(Edit) 화면이 아니면 잠깐 바꾼다. 돌려주는 값: 원래 화면(바꿨을 때만)
-local function edit_page(calls)
-	local page = current_page(calls)
-	if page ~= nil and page ~= "edit" then
-		call(calls, "Resolve.OpenPage", st.R, "OpenPage", "edit")
-		return page
-	end
-	return nil
-end
-
-local function restore_page(calls, page)
-	if page ~= nil then
-		call(calls, "Resolve.OpenPage.restore", st.R, "OpenPage", page)
-	end
 end
 
 local function all_items(calls, tl)

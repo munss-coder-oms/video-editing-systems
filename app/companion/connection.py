@@ -54,7 +54,8 @@ def panel_connect_step(bridge, out: Dict[str, Any], ping_timeout: float = steps.
     out["ping"] = bridge.ping(timeout=ping_timeout)
     supports = getattr(bridge, "supports", None)
     known = supports("timeline_info") if callable(supports) else None
-    if known is False:
+    # 2.1a 때 켠 스크립트(같은 1.1.0이지만 표시를 한꺼번에 넣는 add_markers가 없음)도 한 번 더 눌러 달라고 한다
+    if known is False or (callable(supports) and supports("add_markers") is False):
         out["old_script"] = True
     try:
         if known:
@@ -171,6 +172,8 @@ class ConnectionController(QObject):
         self._auto_misses = 0
         self._unread = 0
         self.auto_stopped = False
+        # 자동화 일(JobRunner)이 리졸브 줄을 쓰는 중인지 (창이 넣어 준다). 그동안은 연결 전 자동 확인도 쉰다
+        self.job_busy: Callable[[], bool] = lambda: False
         self.auto_step: Callable = auto_step
         self.auto_note = ""
         self._last_auto_error = ""
@@ -247,7 +250,8 @@ class ConnectionController(QObject):
     @Slot()
     def auto_ping(self) -> None:
         # 이미 무언가 기다리는 중이면 건너뛴다 (우체통은 한 칸이라 쌓아 둘 필요가 없다).
-        if (self.status != NOT_CONNECTED or self.closing or self.queue.pending or self.auto_stopped):
+        if (self.status != NOT_CONNECTED or self.closing or self.queue.pending or self.auto_stopped
+                or self.job_busy()):
             return
         self.auto_attempts += 1
         if self.session is not None:

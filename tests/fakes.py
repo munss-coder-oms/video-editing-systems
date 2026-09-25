@@ -5,13 +5,14 @@ test_connection.py(연결 상태)와 test_panel.py(창)가 쓴다. 리졸브도 
 
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from app.companion import steps
 from engine.resolve_link import SCRIPT_VERSION
-from engine.resolve_link.bridge import BridgeCancelled, BridgeTimeout, OldScript
+from engine.resolve_link.bridge import BridgeCancelled, BridgeError, BridgeTimeout, OldScript
 from engine.resolve_link.protocol import LEGACY_OPS, OPS
 
 
@@ -30,6 +31,215 @@ def timeline_info(**changes) -> Dict[str, Any]:
     }
     info.update(changes)
     return info
+
+
+MARKER_COLORS = {"Blue", "Cyan", "Green", "Yellow", "Red", "Pink", "Purple", "Fuchsia", "Rose", "Lavender",
+                 "Sky", "Mint", "Lemon", "Sand", "Cocoa", "Cream"}
+TAG_RE = re.compile(r"^aih:[A-Za-z0-9:_\-]+$")
+PREFIX_RE = re.compile(r"^aih:[A-Za-z0-9:_\-]*$")
+RESOLVE_OPS = ("timeline_info", "timeline_items", "get_markers", "add_markers", "delete_markers", "remove_audio",
+               "probe_read", "scope")
+
+
+def audio_item(uid: str, track: int, start: int, length: int, path: str, *, src: int = 0, clip_fps: str = "60",
+               enabled: bool = True, speed: float = 1.0, left: Optional[int] = None) -> Dict[str, Any]:
+    """timeline_items 답 한 줄 (Lua item_row와 같은 모양)."""
+    return {"uid": uid, "track": track, "kind": "audio", "name": Path(path).name, "start": start,
+            "end": start + length, "duration": length, "left_offset": src if left is None else left,
+            "source_start": src, "source_end": src + int(round(length * speed)), "enabled": enabled, "path": path,
+            "clip_fps": clip_fps, "media_uid": "mpi-" + Path(path).stem, "linked_uids": []}
+
+
+def obs_items(path: str, start: int, length: int, *, streams: int = 4, src: int = 0, clip_fps: str = "60",
+              prefix: str = "a") -> List[Dict[str, Any]]:
+    """OBS 녹화 한 개를 A1..A4에 (서로 이어진 소리 클립)."""
+    rows = [audio_item(f"{prefix}{i}", i, start, length, path, src=src, clip_fps=clip_fps)
+            for i in range(1, streams + 1)]
+    for r in rows:
+        r["linked_uids"] = [o["uid"] for o in rows if o is not r]
+    return rows
+
+
+class FakeResolve:
+    """Lua 1.1.0 스크립트와 같은 규칙으로 답하는 가짜 리졸브 (표시·트랙). Transport 모양.
+
+    markers: {타임라인 시작부터 센 프레임: {color, name, note, duration, custom}}.
+    no_range_markers=True: 길이 있는 표시를 거절하는 판 흉내.
+    """
+
+    name = "fake"
+
+    def __init__(self, info: Optional[Dict[str, Any]] = None, items: Optional[List[Dict[str, Any]]] = None) -> None:
+        self.info = info if info is not None else timeline_info()
+        self.items: List[Dict[str, Any]] = list(items or [])
+        self.markers: Dict[int, Dict[str, Any]] = {}
+        self.no_range_markers = False
+        self.probe_read_result: Dict[str, Any] = {"exists": {}, "existence_reliable": True,
+                                                  "source_audio_mapping": [], "calls": {}}
+        self.in_out: Optional[Dict[str, Any]] = None
+        self.requests: List[str] = []
+        self.args: List[Any] = []
+        self.mutations: List[tuple] = []
+        self.timeout_once: set = set()  # 이 op는 한 번 (넣은 뒤) 답이 늦다
+        self.legacy_track_items_ours = True
+        self.opened_pages: List[str] = []
+
+    # Transport
+    def supports(self, op: str) -> Optional[bool]:
+        return True
+
+    @property
+    def length(self) -> int:
+        return self.info["end_frame"] - self.info["start_frame"]
+
+    def add_user_marker(self, frame: int, custom: str = "", color: str = "Green", name: str = "내 표시",
+                        duration: int = 1) -> None:
+        self.markers[frame] = {"color": color, "name": name, "note": "", "duration": duration, "custom": custom}
+
+    def request(self, op: str, args=None, *, timeout=None, cancel=None) -> Dict[str, Any]:
+        args = dict(args or {})
+        self.requests.append(op)
+        self.args.append(args)
+        if cancel is not None and cancel.is_set():
+            raise BridgeCancelled(op)
+        fn = getattr(self, "_op_" + op, None)
+        if fn is None:
+            return {"calls": {}}
+        result = fn(args)
+        if op in self.timeout_once:
+            self.timeout_once.discard(op)
+            raise BridgeTimeout(op)
+        return result
+
+    def _fail(self, op: str, error: str, func: str):
+        raise BridgeError(error, func, op, payload={"ok": False, "error": error, "func": func})
+
+    def _op_ping(self, a):
+        return {"script_version": "1.1.0", "ops": [], "page": self.info.get("page"), "calls": {}}
+
+    def _op_timeline_info(self, a):
+        return dict(self.info)
+
+    def _op_timeline_items(self, a):
+        offset = int(a.get("offset") or 0)
+        limit = int(a.get("limit") or 100)
+        rows = [dict(r) for r in self.items]
+        page = rows[offset:offset + limit]
+        nxt = offset + limit if offset + limit < len(rows) else None
+        return {"kind": "audio", "items": page, "offset": offset, "next": nxt, "calls": {}}
+
+    def _op_probe_read(self, a):
+        return dict(self.probe_read_result)
+
+    def _op_scope(self, a):
+        return {"page": self.info.get("page"), "in_out": self.in_out, "calls": {}}
+
+    def _match(self, m, prefix, colors=None):
+        c = m.get("custom")
+        return isinstance(c, str) and c.startswith(prefix) and (colors is None or m.get("color") in colors)
+
+    def _op_get_markers(self, a):
+        prefix = a.get("prefix")
+        limit = a.get("limit", 2000)
+        frames = sorted(f for f, m in self.markers.items() if prefix is None or self._match(m, prefix))
+        rows = [{"frame": f, **{k: self.markers[f][k] for k in ("color", "name", "note", "duration")},
+                 "custom": self.markers[f]["custom"]} for f in frames[:limit]]
+        return {"markers": rows, "total": len(frames), "calls": {}}
+
+    def _op_add_markers(self, a):
+        rows = a.get("markers")
+        if not isinstance(rows, list) or not rows or len(rows) > 100:
+            self._fail("add_markers", "bad_args", "markers")
+        seen = set()
+        for m in rows:
+            if m.get("color") not in MARKER_COLORS:
+                self._fail("add_markers", "bad_args", "color")
+            c = m.get("custom")
+            if not isinstance(c, str) or not TAG_RE.match(c) or c in seen:
+                self._fail("add_markers", "bad_args", "custom")
+            seen.add(c)
+            if m["frame"] < 0 or m.get("dur", 1) < 1 or m["frame"] + m.get("dur", 1) > self.length:
+                self._fail("add_markers", "bad_args", "frame")
+        have = {m.get("custom") for m in self.markers.values()}
+        placed, failed, skipped = [], [], []
+        point = a.get("point_only") is True
+        for i, m in enumerate(rows, start=1):
+            if m["custom"] in have:
+                skipped.append(i)
+                continue
+            done = False
+            for k in range(6):
+                f = m["frame"] + k
+                dur = 1 if point else max(1, m.get("dur", 1) - k)
+                if f + dur > self.length:
+                    break
+                if f in self.markers:
+                    continue
+                if dur > 1 and self.no_range_markers:
+                    point, dur = True, 1
+                self.markers[f] = {"color": m["color"], "name": m.get("name", ""), "note": m.get("note", ""),
+                                   "duration": dur, "custom": m["custom"]}
+                self.mutations.append(("AddMarker", f, m["custom"]))
+                have.add(m["custom"])
+                placed.append({"i": i, "frame": f, "dur": dur, "custom": m["custom"], "shifted": k, "found": True,
+                               "dur_readback": dur})
+                done = True
+                break
+            if not done:
+                failed.append({"i": i, "err": "taken"})
+        return {"placed": placed, "failed": failed, "skipped_existing": skipped, "point_fallback": point,
+                "requested": len(rows), "length": self.length, "calls": {"Timeline.AddMarker": "ok"}}
+
+    def _op_delete_markers(self, a):
+        if "prefix" in a:
+            prefix = a["prefix"]
+            if "custom" in a or not isinstance(prefix, str) or not PREFIX_RE.match(prefix):
+                self._fail("delete_markers", "bad_args", "prefix")
+            colors = set(a["colors"]) if a.get("colors") is not None else None
+            frames = [f for f, m in sorted(self.markers.items()) if self._match(m, prefix, colors)]
+        else:
+            custom = a.get("custom")
+            if not (isinstance(custom, str) and (custom.startswith("aih:") or custom == "aih_test")):
+                self._fail("delete_markers", "bad_args", "custom")
+            frames = [f for f, m in sorted(self.markers.items()) if m.get("custom") == custom]
+        for f in frames:
+            self.mutations.append(("DeleteMarkerAtFrame", f, self.markers[f].get("custom")))
+            del self.markers[f]
+        ours = sum(1 for m in self.markers.values()
+                   if isinstance(m.get("custom"), str) and (m["custom"].startswith("aih:") or m["custom"] == "aih_test"))
+        return {"deleted": bool(frames), "deleted_count": len(frames), "matched": len(frames), "remaining": 0,
+                "remaining_ours": ours, "calls": {}}
+
+    def _op_remove_audio(self, a):
+        name = a.get("track_name")
+        page = self.info.get("page")
+        switched = False
+        if page != "edit":
+            if a.get("switch_page") is not True:
+                self._fail("remove_audio", "need_edit_page", "Resolve.GetCurrentPage")
+            self.opened_pages += ["edit", page]
+            switched = True
+        tracks = self.info["tracks"]["audio"]
+        clips, results, removed, skipped = [], [], 0, 0
+        for t in reversed(list(tracks)):
+            if t.get("name") != name:
+                continue
+            if not self.legacy_track_items_ours:
+                skipped += 1
+                continue
+            idx = t["index"]
+            n = sum(1 for it in self.items if it["track"] == idx)
+            if n:
+                clips.append({"track": idx, "count": n, "result": True})
+                self.items = [it for it in self.items if it["track"] != idx]
+            results.append({"track": idx, "result": True})
+            tracks.remove(t)
+            removed += 1
+            self.mutations.append(("DeleteTrack", idx, name))
+        for i, t in enumerate(tracks, start=1):
+            t["index"] = i
+        return {"removed_tracks": removed, "skipped": skipped, "delete_clips": clips, "delete_track": results,
+                "page": page, "switched_page": switched, "calls": {}}
 
 
 class FakeLuaBridge:
@@ -57,6 +267,7 @@ class FakeLuaBridge:
         ]
         self.markers: List[Dict[str, Any]] = []
         self.handlers: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {}
+        self.resolve: Optional[FakeResolve] = None  # 있으면 표시·트랙 작업은 이 가짜 리졸브가 답한다
         self.late_answers: list = []
         self.closed = False
         self.delay = 0.0
@@ -110,6 +321,8 @@ class FakeLuaBridge:
         self.prefs_path = self.prefs
         if op in self.handlers:
             return self.handlers[op](args or {})
+        if self.resolve is not None and op in RESOLVE_OPS:
+            return self.resolve.request(op, args, timeout=timeout, cancel=cancel)
         if op == "ping":
             if self.old_script:
                 self.known_ops, self.script_version = frozenset(LEGACY_OPS), "1.0.0"

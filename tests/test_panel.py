@@ -25,7 +25,8 @@ from app.companion import strings_ko as S  # noqa: E402
 from tests.fakes import FakeLuaBridge, timeline_info  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-UI_MODULES = ("window", "header_view", "automation_view", "chat_view", "undo_view", "check_page", "connection")
+UI_MODULES = ("window", "header_view", "automation_view", "chat_view", "undo_view", "check_page", "connection",
+              "cards", "voice_picker", "slot_settings", "runs", "fmt", "jobs", "listen")
 HANGUL = re.compile(r"[ㄱ-ㆎ가-힣]")
 
 
@@ -279,14 +280,16 @@ def test_slots_before_and_after_connect(qapp, make_window, fake):
     assert "1.5초" in one.summary.text() and "파란" in one.summary.text()
 
 
-def test_slot_press_pings_first_then_says_soon(qapp, make_window, fake):
+def test_slot_press_pings_first_and_changes_nothing(qapp, make_window, fake):
+    """누르면 먼저 연결 확인(ping), 그다음 읽기만 한다. 원본 파일이 이 PC에 없으면 그렇다고 말한다."""
     w = connected_window(qapp, make_window, fake)
     before = len(fake.requests)
     w.automation.buttons[0].click()
-    wait_until(qapp, lambda: w.action is None and w.pending == 0)
+    wait_until(qapp, lambda: not w.busy and w.pending == 0)
     assert fake.requests[before] == "ping"
-    assert S.SLOT_SOON.format(name="쉬는 곳 표시") in w.chat.log.toPlainText()
-    assert set(fake.requests[before:]) <= {"ping", "timeline_info"}  # 리졸브에서 바뀌는 것은 없다
+    assert set(fake.requests[before:]) <= {"ping", "timeline_info", "timeline_items"}  # 리졸브에서 바뀌는 것은 없다
+    assert S.PLAN_REFUSED["files_missing"] in w.chat.log.toPlainText()
+    assert w.automation.buttons[0].isEnabled()
 
 
 def test_more_menu_and_check_page(qapp, make_window, fake):
@@ -440,3 +443,22 @@ def test_old_script_is_shown_and_blocks_slots(qapp, make_window, fake):
     assert w.automation.buttons[0].receipt.text() == S.SLOT_DISABLED_OLD_SCRIPT
     assert not w.probe_btn.isEnabled()
     assert "1.0.0" in w.log_view.toPlainText()
+
+
+def test_script_without_add_markers_asks_for_one_more_click(qapp, make_window, fake):
+    """2.1a 때 켠 스크립트(1.1.0이지만 add_markers가 없음): 버튼을 꺼 두고 스크립트를 한 번 더 누르라고 한다."""
+    from engine.resolve_link.protocol import OPS
+
+    real = fake.request
+
+    def request(op, args=None, timeout=None, cancel=None, retry=None):
+        out = real(op, args, timeout=timeout, cancel=cancel, retry=retry)
+        if op == "ping":
+            fake.known_ops = frozenset(o for o in OPS if o != "add_markers")
+        return out
+
+    fake.request = request
+    w = connected_window(qapp, make_window, fake)
+    assert w.status.text() == S.STATUS_OLD_SCRIPT
+    assert w.automation.buttons[0].receipt.text() == S.SLOT_DISABLED_OLD_SCRIPT
+    assert not w.automation.buttons[0].isEnabled()

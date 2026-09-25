@@ -29,6 +29,7 @@ FONT_FAMILIES = ("Pretendard", "Malgun Gothic", "Apple SD Gothic Neo", "Noto San
 
 BODY_PX = 14
 SLOT_TITLE_PX = 16
+CARD_TITLE_PX = 15
 MIN_PX = 12
 
 # 크기 (논리 픽셀)
@@ -49,8 +50,9 @@ def px(size: int, scale: int = 100) -> int:
 def stylesheet(scale: int = 100, t: Tokens = TOKENS) -> str:
     families = ", ".join(f'"{f}"' if " " in f else f for f in FONT_FAMILIES)
     body, title, small = px(BODY_PX, scale), px(SLOT_TITLE_PX, scale), px(MIN_PX, scale)
+    card = px(CARD_TITLE_PX, scale)
     return f"""
-QMainWindow, QWidget#panel, QWidget#checkPage, QStackedWidget {{ background: {t.bg}; }}
+QMainWindow, QWidget#panel, QWidget#checkPage, QWidget#settingsPage, QStackedWidget {{ background: {t.bg}; }}
 QWidget {{ color: {t.text}; font-family: {families}; font-size: {body}px; }}
 QLabel[role="secondary"] {{ color: {t.secondary}; font-size: {small}px; }}
 QLabel[role="status-ok"] {{ color: {t.ok}; font-weight: 600; }}
@@ -70,6 +72,18 @@ QPushButton[kind="slot"] {{ text-align: left; padding: 6px 10px; }}
 QLabel[role="slot-title"] {{ font-size: {title}px; font-weight: 600; }}
 QLabel[role="tile-title"] {{ font-size: {body}px; font-weight: 600; }}
 QFrame#card, QGroupBox {{ background: {t.card}; border: 1px solid {t.border}; border-radius: 8px; }}
+QFrame#card QLabel {{ background: transparent; }}
+QLabel[role="card-title"] {{ font-size: {card}px; font-weight: 600; }}
+QScrollArea#chatLog {{ background: {t.bg}; border: 1px solid {t.border}; border-radius: 6px; }}
+QWidget#messages, QWidget#settingsInner {{ background: {t.bg}; }}
+QWidget#progressRow {{ background: {t.card}; border: 1px solid {t.border}; border-radius: 6px; }}
+QProgressBar {{ background: {t.card_pressed}; border: none; border-radius: 3px; }}
+QProgressBar::chunk {{ background: {t.primary}; border-radius: 3px; }}
+QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {{
+    background: {t.card}; color: {t.text}; border: 1px solid {t.border}; border-radius: 6px; min-height: 32px;
+    padding: 0 6px;
+}}
+QWidget#settingsPage {{ background: {t.bg}; }}
 QPlainTextEdit, QTextEdit, QListWidget {{
     background: {t.card}; color: {t.text}; border: 1px solid {t.border}; border-radius: 6px;
 }}

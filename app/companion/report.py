@@ -41,7 +41,9 @@ STEPS = (
 )
 # 그 밖의 일 (한 일 목록과 리졸브의 답 제목)
 TITLES = dict(STEPS, probe="기능 점검", switch="원래 타임라인으로", leftover="점검용 복사본 지우기",
-              slot="자동화 버튼")
+              slot="자동화 버튼", plan="자동화 버튼 계산", apply="리졸브에 넣기", undo="되돌리기",
+              remove_all="도우미가 넣은 것 모두 빼기")
+MANUAL_TITLES = {"M3": "Ctrl+Z 시험 (M3)", "M2": "자르기 시험 (M2)"}
 
 
 def report_name(now: Optional[datetime.datetime] = None) -> str:
@@ -78,6 +80,9 @@ class TestSession:
         self.install: Dict[str, Any] = {}  # 스크립트 설치 결과
         self.probe_runs: List[Dict[str, Any]] = []  # 기능 점검 (ProbeRun.to_dict)
         self.timings: List[Tuple[str, float]] = []  # 버튼 작업마다 걸린 시간 (이름, 초)
+        self.runs: List[Dict[str, Any]] = []  # 자동화 버튼: 계산·넣기·되돌리기·모두 빼기마다 한 줄
+        self.voice: List[Dict[str, Any]] = []  # 목소리 고르기 (물음과 답)
+        self.manual: Dict[str, Dict[str, Any]] = {}  # 확인 질문 M2, M3의 답 (M3은 다시 읽은 표시 수도)
 
     def record(self, name: str, ok: bool, summary: str, data: Dict[str, Any],
                error: Optional[Dict[str, Any]] = None) -> StepRecord:
@@ -553,6 +558,20 @@ def build_report(session: TestSession, link: Dict[str, Any], env: Dict[str, Any]
         for s in link["slots"]:
             lines.append(f"{s.get('slot')}번 {s.get('name')} ({s.get('kind')}): {_json1(s.get('params'))}"
                          f"{' / 이전 설정 있음' if s.get('previous') else ''}")
+    lines += ["", "[자동화 버튼 실행]"]
+    lines += [_json1(row) for row in session.runs] or ["이번에는 하지 않았습니다."]
+    lines += ["", "[목소리 고르기]"]
+    lines += [_json1(row) for row in session.voice] or ["이번에는 묻지 않았습니다."]
+    if link.get("voice"):
+        lines.append(f"저장된 목소리: {_json1(link['voice'])}")
+    if link.get("perf"):
+        lines.append(f"걸린 시간 어림 (1분에 몇 초): {_json1(link['perf'])}")
+    if link.get("analysis_cache"):
+        lines.append(f"음량 분석 저장소: {_json1(link['analysis_cache'])}")
+    lines += ["", "[확인 질문]"]
+    for key, title in MANUAL_TITLES.items():
+        rec = session.manual.get(key)
+        lines.append(f"{title}: {_json1(rec) if rec else '답 없음'}")
     lines += ["", "[되돌리기 기록 (최근 20개)]"]
     lines += [_json1(row) for row in env.get("journals") or []] or ["없음"]
     if env.get("records_error"):

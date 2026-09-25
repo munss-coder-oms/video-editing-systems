@@ -208,6 +208,18 @@ class Settings:
         self.save()
         return s
 
+    def configure_slot(self, number: int, kind: str, name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """⚙ [저장]: 할 일·이름·설정을 통째로 바꾼다. 달라진 것이 있을 때만 전 설정을 previous에 남긴다."""
+        s = self.slot(number)
+        before = {k: copy.deepcopy(v) for k, v in s.items() if k not in ("previous", "slot")}
+        new = {"kind": kind, "name": name, "params": dict(params)}
+        if all(s.get(k) == v for k, v in new.items()):
+            return s
+        s.update(copy.deepcopy(new))
+        s["previous"] = before
+        self.save()
+        return s
+
     def restore_previous(self, number: int) -> bool:
         """[이전 설정으로 되돌리기]. 되돌린 뒤에는 previous가 비어 있다 (한 단계만)."""
         s = self.slot(number)
@@ -219,6 +231,47 @@ class Settings:
         s["previous"] = None
         self.save()
         return True
+
+    # --- 목소리 (녹화 모양마다) ---
+
+    @property
+    def voice(self) -> Dict[str, Any]:
+        v = self.data.get("voice")
+        if not isinstance(v, dict):
+            v = self.data["voice"] = {"by_layout": {}, "profiles": {}, "ask_again": True}
+        v.setdefault("by_layout", {})
+        v.setdefault("profiles", {})
+        return v
+
+    def voice_choice(self, signature: str) -> Optional[Dict[str, Any]]:
+        """이 녹화 모양에서 고른 목소리 {"stream", "mix", "at"} (없으면 None)."""
+        c = self.voice["by_layout"].get(signature)
+        return c if isinstance(c, dict) and isinstance(c.get("stream"), int) else None
+
+    def voice_profile(self, signature: str) -> Optional[Dict[str, Any]]:
+        p = self.voice["profiles"].get(signature)
+        return p if isinstance(p, dict) else None
+
+    def set_voice(self, signature: str, stream: int, *, mix: Optional[int] = None,
+                  profile: Optional[Dict[str, Any]] = None) -> None:
+        at = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(self._clock()))
+        self.voice["by_layout"][signature] = {"stream": int(stream), "mix": mix, "at": at}
+        if profile is not None:
+            self.voice["profiles"][signature] = dict(profile)
+        self.save()
+
+    # --- 걸린 시간 (남은 시간 어림) ---
+
+    def sec_per_min(self, kind: str) -> Optional[float]:
+        v = self.data.get("perf", {}).get("sec_per_min", {}).get(kind)
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+
+    def record_perf(self, kind: str, sec_per_min: float) -> None:
+        if not sec_per_min > 0:
+            return
+        perf = self.data.setdefault("perf", {}).setdefault("sec_per_min", {})
+        perf[kind] = round(float(sec_per_min), 3)
+        self.save()
 
     # --- 화면 ---
 

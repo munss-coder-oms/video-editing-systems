@@ -84,6 +84,7 @@ class Rig:
         self.stop_flag = threading.Event()
         self.thread: threading.Thread | None = None
         self.error: BaseException | None = None
+        self.in_loop_calls: list = []
 
     # --- 가짜 리졸브가 부르는 것 (스크립트 반복 스레드에서) ---
     def _save_prefs(self, prefs) -> None:
@@ -104,7 +105,17 @@ class Rig:
     def _wait(self, seconds) -> None:
         if self.stop_flag.is_set():
             raise LoopStopped("시험 끝")
+        while self.in_loop_calls:
+            fn, done = self.in_loop_calls.pop(0)
+            fn()
+            done.set()
         time.sleep(TICK)
+
+    def in_loop(self, fn) -> None:
+        """스크립트가 도는 동안 가짜 리졸브를 바꾼다: Lua는 한 스레드에서만 만질 수 있어 반복 스레드에 맡긴다."""
+        done = threading.Event()
+        self.in_loop_calls.append((fn, done))
+        assert done.wait(10), "스크립트 반복이 가짜 리졸브를 바꾸지 못함"
 
     # --- 스크립트 메뉴 누르기 / 멈추기 ---
     def start(self) -> None:
@@ -400,3 +411,105 @@ def test_panel_connect_and_probe_against_the_real_script(rig, tmp_path):
     assert out["state"]["timeline"] == "타임라인 1"  # 원래 타임라인으로 돌아왔다
     caps = out["caps"]
     assert caps.has("fresh_import") is True and caps.has("exact_placement") is True
+
+
+# ── 2.1b 자동화 버튼: 실제 스크립트에 대고 ─────────────────────────────
+
+OBS_MAPPING = '{"track_mapping":{"1":{"channel_idx":[%d,%d],"mute":false,"type":"Stereo"}}}'
+
+
+def _ops(rig):
+    from engine.resolve_link.ops import ResolveOps
+    from engine.resolve_link.transport import LuaTransport
+
+    return ResolveOps(LuaTransport(rig.bridge))
+
+
+def _user_marker(rig, frame: int, custom: str = "") -> None:
+    rig.bridge.request("add_marker", {"frame": frame, "color": "Green", "name": "내 표시", "custom": custom})
+
+
+@pytest.mark.usefixtures("obs_video")
+def test_slot_one_end_to_end_and_undo(rig, tmp_path, obs_video):
+    """OBS 녹화(4스트림)를 A1..A4에: 계산(읽기만) → 넣기 → 다시 읽기 → 되돌리기. 사용자 표시는 그대로."""
+    from engine.analysis_cache import AnalysisCache
+    from engine.automation.plan import PlanEnv, SlotRequest, VoiceMemory, VoiceOverride, VoiceQuestion, plan_slot
+    from engine.edits.apply import apply_markers, undo_proposal
+    from engine.edits.journal import key_for
+
+    rig.lua.execute(
+        "local S, path, fmt = ...\n"
+        "for k = 1, 4 do\n"
+        "  local it = S.add_clip('audio', k, 'obs.mp4', 86400, 899, path)\n"
+        "  it.left, it.src = 0, 0\n"
+        "  local text = string.format(fmt, 2 * k - 1, 2 * k)\n"
+        "  it.GetSourceAudioChannelMapping = function() return text end\n"
+        "end", rig.fake, str(obs_video), OBS_MAPPING)
+    rig.start()
+    rig.bridge.ping(timeout=10)
+    _user_marker(rig, 5)
+    _user_marker(rig, 330, "user")  # 쉬는 곳 한가운데에 사용자 표시
+    ops = _ops(rig)
+    env = PlanEnv(ops=ops, cache=AnalysisCache(tmp_path / "analysis"))
+    req = SlotRequest(slot=1, kind="mark_pauses", name="쉬는 곳 표시", params={})
+    marks: list = []
+    rig.in_loop(lambda: marks.append(len(rig.fake.log)))
+    q = plan_slot(req, env, VoiceMemory())
+    assert isinstance(q, VoiceQuestion) and q.mix == 0
+    p = plan_slot(req, env, VoiceMemory(), override=VoiceOverride(q.signature, 1))
+    assert p.debug["mapping_methods"] == {"mapping": 4} and p.debug["mapping_conflicts"] == 0
+    assert p.count == 2 and p.tl_start == 86400 and p.timeline["timeline"] == "타임라인 1"
+    rig.in_loop(lambda: marks.append(len(rig.fake.log)))
+
+    out = apply_markers(ops, p, root=tmp_path)
+    assert out.status == "applied" and out.placed == 2 and out.dur_ok is True and out.receipt["readback"] is True
+    ours = ops.get_markers(p.prefix)
+    assert [m["frame"] for m in ours] == [s.frame for s in p.specs]
+    assert [m["duration"] for m in ours] == [s.dur for s in p.specs]
+    assert all(m["name"].startswith("쉼 ") and m["color"] == "Blue" for m in ours)
+
+    key = key_for(ops.timeline_info())
+    undo = undo_proposal(ops, p.id, root=tmp_path, journal_key=key)
+    assert undo.status == "undone" and undo.deleted == 2
+    left = ops.get_markers()
+    assert sorted((m["frame"], m["custom"]) for m in left) == [(5, ""), (330, "user")]
+    rig.bridge.stop()
+    rig.join()
+    # 계산하는 동안에는 리졸브에서 바꾸는 함수를 하나도 부르지 않았다 (가짜의 기록은 바꾸는 함수만 남긴다)
+    log = rig.fake.log
+    names = {log[i].name for i in range(marks[0] + 1, marks[1] + 1)}
+    assert not names & {"AddMarker", "DeleteMarkerAtFrame", "DeleteMarkerByCustomData", "DeleteTrack",
+                        "DeleteClips", "SetClipEnabled", "SetTrackEnable", "OpenPage", "SetCurrentTimecode"}
+    assert [a[5] for a in rig.logged("AddMarker")][-2:] == [s.custom for s in p.specs]
+
+
+def test_remove_all_ours_with_legacy_traces_on_the_color_page(rig, tmp_path):
+    """1차 시험판 흔적(aih_test 표시 둘, "AI 도우미 시험" 트랙) + aih: 표시. 색 보정 화면에서 [바꿔서 빼기]."""
+    from engine.edits.apply import LEGACY_TEST_TRACK, remove_all_ours, scan_ours
+    from engine.resolve_link.ops import MarkerSpec
+
+    rig.start()
+    rig.bridge.ping(timeout=10)
+    ops = _ops(rig)
+    _user_marker(rig, 5)
+    rig.bridge.add_marker(300, name="AI 도우미 시험", custom="aih_test")
+    rig.bridge.add_marker(310, name="AI 도우미 시험", custom="aih_test")
+    ops.add_markers([MarkerSpec(frame=600, dur=30, color="Blue", name="쉼", note="", custom="aih:Pold:1")])
+    tone = make_test_tone(seconds=steps.TONE_FILE_SECONDS)
+    rig.bridge.place_audio(tone, LEGACY_TEST_TRACK, 86400 + 300, 89)
+    rig.in_loop(lambda: setattr(rig.fake, "page", "color"))
+
+    scan = scan_ours(ops)
+    assert (scan.markers, scan.legacy_markers, len(scan.legacy_tracks), scan.page) == (1, 2, 1, "color")
+    assert scan.needs_edit_page
+    # 편집 화면이 아니면 트랙은 묻지 않고는 빼지 않는다
+    out = remove_all_ours(ops, scan, root=tmp_path)
+    assert (out.markers_deleted, out.legacy_deleted, out.track_skipped) == (1, 2, "need_edit_page")
+    assert rig.bridge.state()["tracks"]["audio"] == 1
+    out = remove_all_ours(ops, scan_ours(ops), root=tmp_path, switch_page=True)
+    assert out.track["removed_tracks"] == 1 and out.track["switched_page"] is True
+    assert rig.bridge.state()["tracks"]["audio"] == 0
+    assert [(m["frame"], m["custom"]) for m in ops.get_markers()] == [(5, "")]
+    rig.bridge.stop()
+    rig.join()
+    assert [x[0] for x in rig.logged("OpenPage")] == ["edit", "color"]

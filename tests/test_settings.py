@@ -89,3 +89,53 @@ def test_save_slot_drops_range_and_restore_brings_back_kind(tmp_path):
     assert slot["previous"]["kind"] == "balance_voice"
     s.restore_previous(3)
     assert s.slot(3)["kind"] == "balance_voice" and s.slot(3)["name"] == "소리 고르게"
+
+
+def test_configure_slot_keeps_one_previous_step(tmp_path):
+    s = Settings(tmp_path / "settings.json")
+    same = s.slot(1)
+    s.configure_slot(1, same["kind"], same["name"], dict(same["params"]))
+    assert s.slot(1).get("previous") is None and not (tmp_path / "settings.json").exists()  # 달라진 것 없음
+    s.configure_slot(1, "mark_pauses", "쉬는 곳 표시", dict(same["params"], min_s=2.0))
+    assert s.slot(1)["params"]["min_s"] == 2.0 and s.slot(1)["previous"]["params"]["min_s"] == 1.5
+    s.configure_slot(1, "mark_spikes", "튀는 소리", {"above_lu": 10.0})
+    assert s.slot(1)["previous"]["kind"] == "mark_pauses" and s.slot(1)["previous"]["params"]["min_s"] == 2.0
+    again = Settings(tmp_path / "settings.json")
+    assert again.slot(1)["kind"] == "mark_spikes"
+    assert again.restore_previous(1) is True and again.slot(1)["params"]["min_s"] == 2.0
+    assert again.restore_previous(1) is False  # 한 단계만
+
+
+def test_voice_choice_by_layout_and_perf(tmp_path):
+    s = Settings(tmp_path / "settings.json", clock=lambda: 1_800_000_000.0)
+    assert s.voice_choice("a4:2,2,2,2:|||") is None and s.voice_profile("a4:2,2,2,2:|||") is None
+    s.set_voice("a4:2,2,2,2:|||", 1, mix=0, profile={"typical": -24.0})
+    s.set_voice("a2:2,1:|", 0)
+    again = Settings(tmp_path / "settings.json")
+    c = again.voice_choice("a4:2,2,2,2:|||")
+    assert (c["stream"], c["mix"]) == (1, 0) and c["at"].startswith("20")
+    assert again.voice_profile("a4:2,2,2,2:|||") == {"typical": -24.0}
+    assert again.voice_choice("a2:2,1:|")["stream"] == 0 and again.voice_profile("a2:2,1:|") is None
+    assert again.sec_per_min("mark_pauses") is None
+    again.record_perf("mark_pauses", 4.25)
+    again.record_perf("mark_spikes", 0.0)  # 0초는 적지 않는다
+    third = Settings(tmp_path / "settings.json")
+    assert third.sec_per_min("mark_pauses") == 4.25 and third.sec_per_min("mark_spikes") is None
+
+
+def test_broken_voice_section_is_rebuilt(tmp_path):
+    path = tmp_path / "settings.json"
+    data = default_settings()
+    data["voice"] = "깨짐"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    s = Settings(path)
+    assert s.voice_choice("x") is None
+    s.set_voice("x", 2)
+    assert Settings(path).voice_choice("x")["stream"] == 2
+
+
+def test_legacy_test_track_name_is_shared():
+    from app.companion import steps
+    from engine.edits.apply import LEGACY_TEST_TRACK
+
+    assert steps.TEST_NAME == LEGACY_TEST_TRACK
