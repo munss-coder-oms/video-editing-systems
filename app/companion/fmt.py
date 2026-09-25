@@ -56,3 +56,19 @@ def tc(frame: int, fps: Any, drop_frame: Any = False) -> str:
 
 def color_word(color: Optional[str]) -> str:
     return S.COLOR_WORDS.get(color or "", color or "")
+
+
+def spoken(seconds: Optional[float]) -> str:
+    """말하듯 쓴 시간: 3800 → "1시간 3분 20초", 200.5 → "3분 20.5초" (입력 칸에 다시 채울 때)."""
+    if seconds is None:
+        return ""
+    tenths = int(round(max(0.0, float(seconds)) * 10))
+    whole, frac = divmod(tenths, 10)
+    h, rest = divmod(whole, 3600)
+    m, s = divmod(rest, 60)
+    sec = f"{s}.{frac}" if frac else str(s)
+    if h:
+        return S.SPOKEN_HMS.format(h=h, m=m, s=sec)
+    if m:
+        return S.SPOKEN_MS.format(m=m, s=sec)
+    return S.SPOKEN_S.format(s=sec)

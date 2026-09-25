@@ -1,14 +1,16 @@
-"""대화 칸 (설계 B1.1, B1.5). 적어 보내면 아직은 "대화는 곧 열려요"라고 답한다 (대화는 2.1c).
-대화는 리졸브에 아무것도 묻지 않는다. 자동화 버튼의 카드(목소리 고르기, 확인 카드, 영수증)도 여기에 뜬다.
+"""대화 칸 (설계 B1.1, B1.5, B4). 적어 보내면 기본 도우미(chat_flow.py)가 답하고 카드를 띄운다.
+자동화 버튼의 카드(목소리 고르기, 확인 카드, 영수증)도 여기에 뜬다.
 
 - Enter 보내기, Shift+Enter 줄 바꿈, Esc 지우기.
 - 한글 입력 중(IME 조합 글자가 있을 때) Enter는 글자만 확정하고 보내지 않는다.
 - 입력 칸은 44에서 세 줄까지 커진다. 대화 목록은 접을 수 있다 (입력 칸은 늘 보인다).
+- 도우미 답 아래의 예문(칩)은 누르면 입력 칸을 채우기만 한다. 보내지 않는다 (고친 뒤 [보내기]).
+- 맨 아래에 늘 "답하는 쪽: 기본 도우미 (AI 아님) · 무료".
 """
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QInputMethodEvent, QKeyEvent
@@ -82,6 +84,57 @@ class MessageList(QScrollArea):
             if text:
                 out.append(text)
         return "\n".join(out)
+
+
+class ChipLabel(QLabel):
+    """예문 칩 하나 (좁은 창에서도 줄을 바꿔 다 보이게 QLabel로). 누르면 pressed(채울 글)."""
+
+    pressed = Signal(str)
+
+    def __init__(self, label: str, fill: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(label, parent)
+        self.fill = fill
+        self.setWordWrap(True)
+        self.setProperty("role", "chip")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setFocusPolicy(Qt.TabFocus)
+        self.setAccessibleName(label)
+
+    def click(self) -> None:
+        self.pressed.emit(self.fill)
+
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.LeftButton:
+            self.click()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.click()
+            return
+        super().keyPressEvent(event)
+
+
+class ChipRow(QWidget):
+    """도우미 답 아래의 예문들 (세로로, 한 줄에 하나)."""
+
+    pressed = Signal(str)
+
+    def __init__(self, chips: List[Tuple[str, str]], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(12, 0, 0, 0)
+        box.setSpacing(4)
+        self.chips: List[ChipLabel] = []
+        for label, fill in chips:
+            chip = ChipLabel(label, fill)
+            chip.pressed.connect(self.pressed.emit)
+            box.addWidget(chip)
+            self.chips.append(chip)
+
+    def plain_text(self) -> str:
+        return "\n".join(f"[{c.text()}]" for c in self.chips)
 
 
 class ChatInput(QPlainTextEdit):
@@ -160,6 +213,7 @@ class ChatView(QWidget):
         row.addWidget(self.send_btn, 0, Qt.AlignBottom)
         root.addLayout(row)
 
+        self.last_chips: Optional[ChipRow] = None
         self.brain = QLabel(S.CHAT_BRAIN_LINE)
         self.brain.setProperty("role", "secondary")
         root.addWidget(self.brain)
@@ -184,8 +238,24 @@ class ChatView(QWidget):
     def add_line(self, who: str, text: str) -> None:
         self.log.appendPlainText(f"{who}: {text}")
 
-    def add_helper(self, text: str) -> None:
+    def add_helper(self, text: str, chips: Optional[Sequence[Tuple[str, str]]] = None) -> Optional[ChipRow]:
+        """도우미 한 줄. chips: (보이는 글, 입력 칸에 채울 글) 목록."""
         self.add_line(S.CHAT_HELPER, text)
+        if not chips:
+            return None
+        row = ChipRow(list(chips))
+        row.pressed.connect(self.fill)
+        self.log.add_widget(row)
+        self.last_chips = row
+        if self.collapsed:
+            self.set_collapsed(False)
+        return row
+
+    def fill(self, text: str) -> None:
+        """칩을 누름: 입력 칸만 채운다 (보내지 않는다)."""
+        self.input.setPlainText(text)
+        self.input.moveCursor(self.input.textCursor().MoveOperation.End)
+        self.input.setFocus()
 
     def add_card(self, card: QWidget) -> QWidget:
         """카드를 목록 아래에 붙인다. 대화를 접어 두었으면 편다 (카드는 답을 기다리므로)."""

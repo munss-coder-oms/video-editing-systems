@@ -68,7 +68,7 @@ local KEY_RESPONSE = "Global.AIHelper.Response"
 local OPS_ALLOWED = {
 	ping = true, state = true, timeline_info = true, timeline_items = true, scope = true,
 	probe_read = true, probe_copy = true, switch_timeline = true,
-	add_marker = true, add_markers = true, get_markers = true, delete_markers = true,
+	add_marker = true, add_markers = true, get_markers = true, delete_markers = true, jump_to = true,
 	place_audio = true, remove_audio = true, stop = true,
 }
 
@@ -1335,13 +1335,35 @@ local function colors_arg(v)
 	return out
 end
 
--- 표시 m이 prefix(와 색)에 맞는지
-local function marker_matches(m, prefix, colors)
+-- 꼬리표 목록 인자 (대화의 지우기: 카드에 보인 표시만). 모두 우리 꼬리표이고 prefix로 시작해야 한다.
+-- 없으면 nil = prefix(와 색)에 맞는 모든 표시
+local function customs_arg(v, prefix)
+	if v == nil then
+		return nil
+	end
+	local list = list_arg(v, "customs", AIH.MAX_SNAPSHOT)
+	if #list == 0 then
+		fail("bad_args", "customs")
+	end
+	local out = {}
+	for i = 1, #list do
+		local c = list[i]
+		if not tag_ok(c) or string.sub(c, 1, #prefix) ~= prefix then
+			fail("bad_args", "customs")
+		end
+		out[c] = true
+	end
+	return out
+end
+
+-- 표시 m이 prefix(와 색, 꼬리표 목록)에 맞는지
+local function marker_matches(m, prefix, colors, wanted)
 	if type(m) ~= "table" then
 		return false
 	end
 	local c = m.customData
 	return type(c) == "string" and string.sub(c, 1, #prefix) == prefix and (colors == nil or colors[m.color] == true)
+		and (wanted == nil or wanted[c] == true)
 end
 
 -- 꼬리표 앞부분(prefix, "aih:"로 시작)으로 지우기. GetMarkers로 찾아 맞는 프레임만 DeleteMarkerAtFrame
@@ -1354,6 +1376,7 @@ local function delete_by_prefix(a, calls)
 		fail("bad_args", "prefix")
 	end
 	local colors = colors_arg(a.colors)
+	local wanted = customs_arg(a.customs, prefix)
 	local want_snapshot = a.snapshot == true
 	local _, tl = need_timeline(calls)
 	local markers = call(calls, "Timeline.GetMarkers", tl, "GetMarkers")
@@ -1362,7 +1385,7 @@ local function delete_by_prefix(a, calls)
 	end
 	local frames = {}
 	for f, m in pairs(markers) do
-		if type(f) == "number" and marker_matches(m, prefix, colors) then
+		if type(f) == "number" and marker_matches(m, prefix, colors, wanted) then
 			frames[#frames + 1] = f
 		end
 	end
@@ -1389,7 +1412,7 @@ local function delete_by_prefix(a, calls)
 		for f, m in pairs(after) do
 			if type(f) == "number" and type(m) == "table" and our_custom(m.customData) then
 				remaining_ours = remaining_ours + 1
-				if marker_matches(m, prefix, colors) then
+				if marker_matches(m, prefix, colors, wanted) then
 					remaining = remaining + 1
 				end
 			end
@@ -1412,6 +1435,33 @@ ops.delete_markers = function(a, calls)
 		return delete_by_prefix(a, calls)
 	end
 	return delete_by_custom(a, calls)
+end
+
+-- 재생 위치 옮기기 (대화의 "3분 20초로 가줘", 카드의 [리졸브에서 보기]). 편집이 아니라서 확인 없이 한다.
+-- frame: 절대 프레임 (타임라인 시작 이상, 끝 미만인지 본다). tc: 그 프레임의 타임코드 (앱이 드롭 프레임까지 계산).
+-- 재생 위치는 cut/edit/color/fairlight/deliver 화면에서만 옮길 수 있다: 그 밖이면 옮기지 않고 reason = "page".
+ops.jump_to = function(a, calls)
+	local frame = int_arg(a.frame, "frame")
+	local tc = str_arg(a.tc, "tc")
+	if not string.match(tc, "^%d%d:%d%d:%d%d[:;]%d%d$") then
+		fail("bad_args", "tc")
+	end
+	local _, tl = need_timeline(calls)
+	local page = current_page(calls)
+	if page ~= nil and not PLAYHEAD_PAGES[page] then
+		return { ok = false, reason = "page", page = page, calls = calls }
+	end
+	local start = call(calls, "Timeline.GetStartFrame", tl, "GetStartFrame")
+	local fin = call(calls, "Timeline.GetEndFrame", tl, "GetEndFrame")
+	if type(start) == "number" and type(fin) == "number" and (frame < start or frame >= fin) then
+		return { ok = false, reason = "outside", start_frame = start, end_frame = fin, calls = calls }
+	end
+	local set, set_ok = call(calls, "Timeline.SetCurrentTimecode", tl, "SetCurrentTimecode", tc)
+	local readback = readable_tc(calls, tl)
+	return {
+		ok = set_ok and readback == tc, set_result = call_result(set, set_ok), requested_tc = tc,
+		readback_tc = readback, frame = frame, page = nz(page), calls = calls,
+	}
 end
 
 -- 표시 여러 개 넣기 (자동화 버튼의 카드에서 [리졸브에 넣기]를 누른 뒤에만 불린다).

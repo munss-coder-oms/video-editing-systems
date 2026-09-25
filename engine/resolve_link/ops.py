@@ -23,6 +23,8 @@ PROBE_PREFIX = "AI 도우미 점검용"
 PROBE_STAGES = ("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8")
 MAX_ITEM_PAGES = 200  # timeline_items를 이보다 많이 나눠 받지 않는다 (2만 개)
 MAX_ADD_MARKERS = 100  # add_markers 한 번에 보내는 표시 수 (Lua AIH.MAX_ADD)
+MAX_DELETE_CUSTOMS = 200  # delete_markers{customs} 한 번에 (Lua AIH.MAX_SNAPSHOT과 같다)
+TC_RE = re.compile(r"^\d\d:\d\d:\d\d[:;]\d\d$")
 MAX_MARKER_NAME = 40
 MAX_MARKER_NOTE = 200
 # 리졸브 표시 색 이름 16개 (Lua AIH.MARKER_COLORS와 같다)
@@ -477,8 +479,12 @@ class ResolveOps:
     # --- 고치기 (연결 점검 쪽 시험 도구) ---
 
     def delete_markers(self, custom: Optional[str] = None, *, prefix: Optional[str] = None,
-                       colors: Optional[Iterable[str]] = None, snapshot: bool = False, cancel=None) -> Dict[str, Any]:
-        """우리 표시 지우기: custom(꼬리표 하나와 똑같은 것) 또는 prefix("aih:"로 시작하는 앞부분)."""
+                       colors: Optional[Iterable[str]] = None, customs: Optional[Sequence[str]] = None,
+                       snapshot: bool = False, cancel=None) -> Dict[str, Any]:
+        """우리 표시 지우기: custom(꼬리표 하나와 똑같은 것) 또는 prefix("aih:"로 시작하는 앞부분).
+
+        customs: prefix와 함께, 이 꼬리표 목록에 있는 표시만 (대화의 "파란 표시 지워줘": 카드에 보인 것만 지운다).
+        """
         if (custom is None) == (prefix is None):
             raise ValueError("custom과 prefix 가운데 하나만 주세요")
         if custom is not None:
@@ -493,9 +499,27 @@ class ResolveOps:
             if any(c not in MARKER_COLORS for c in cl):
                 raise ValueError(f"리졸브 표시 색이 아닙니다: {cl!r}")
             args["colors"] = cl
+        if customs is not None:
+            cl = list(customs)
+            if not cl or len(cl) > MAX_DELETE_CUSTOMS or any(not is_tag(c) or not c.startswith(prefix) for c in cl):
+                raise ValueError(f"지울 꼬리표 목록이 잘못됐습니다: {len(cl)}개")
+            args["customs"] = cl
         if snapshot:
             args["snapshot"] = True
         return self._req("delete_markers", args, cancel=cancel)
+
+    # --- 보기 (편집이 아님: 확인 없이) ---
+
+    def jump_to(self, frame: int, tc: str, *, cancel=None) -> Dict[str, Any]:
+        """재생 위치 옮기기. frame: 절대 프레임 (확인용), tc: 그 프레임의 리졸브 타임코드.
+
+        미디어·퓨전 화면이면 Lua가 옮기지 않고 {ok: false, reason: "page"}를 준다.
+        """
+        if isinstance(frame, bool) or not isinstance(frame, int) or frame < 0:
+            raise ValueError(f"재생 위치가 잘못됐습니다: {frame!r}")
+        if not isinstance(tc, str) or not TC_RE.match(tc):
+            raise ValueError(f"타임코드가 잘못됐습니다: {tc!r}")
+        return self._req("jump_to", {"frame": int(frame), "tc": tc}, cancel=cancel)
 
     def add_markers(self, specs: Sequence[MarkerSpec], *, point_only: bool = False, cancel=None,
                     timeout: Optional[float] = None) -> MarkerResult:

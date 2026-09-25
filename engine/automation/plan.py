@@ -98,11 +98,20 @@ class VoiceMemory:
 
 @dataclass
 class SlotRequest:
+    """버튼 한 번 (또는 대화의 "5분~6분에서 쉬는 곳 표시").
+
+    range: 대화에서 말한 범위 (절대 프레임 [lo, hi)). 찾은 곳을 이 안쪽으로 자른다 (설계 B2.4 5).
+    count: "3개만"처럼 말한 수 (큰 것부터 그 수만).
+    """
+
     slot: Optional[int]
     kind: str
     name: str
     params: Dict[str, Any]
     origin: str = ""
+    range: Optional[Tuple[int, int]] = None
+    range_src: str = ""
+    count: Optional[int] = None
 
 
 @dataclass
@@ -292,7 +301,12 @@ def _plan_slot(req: SlotRequest, env: PlanEnv, voice: VoiceMemory, *, override: 
 
     lo, hi = tl_start, tl_end
     scope = {"kind": "whole", "lo": None, "hi": None}
-    if params.get("scope") == "in_out":
+    if req.range is not None:
+        lo, hi = max(tl_start, int(req.range[0])), min(tl_end, int(req.range[1]))
+        if hi <= lo:
+            raise PlanRefused("range_outside")
+        scope = {"kind": "range", "lo": lo, "hi": hi, "src": req.range_src or "said"}
+    elif params.get("scope") == "in_out":
         if _allowed(env.caps, "in_out") is not True:
             warnings["in_out_off"] = 1
             params["scope"] = "whole"
@@ -427,6 +441,11 @@ def _plan_slot(req: SlotRequest, env: PlanEnv, voice: VoiceMemory, *, override: 
     else:
         rows, found = _spike_rows(params, analyses, by_path, fps, lo, hi)
     cap = min(int(params.get("max") or MAX_MARKERS_PER_PROPOSAL), MAX_MARKERS_PER_PROPOSAL)
+    if req.count is not None and 0 < int(req.count) < cap:
+        cap = int(req.count)  # "3개만": 말한 수만 (경고 없이)
+        if len(rows) > cap:
+            debug["count_kept"] = {"found": len(rows), "kept": cap}
+            rows = sorted(sorted(rows, key=lambda r: -r.value)[:cap], key=lambda r: r.start)
     if len(rows) > cap:
         warnings["too_many"] = len(rows)
         keep = sorted(rows, key=lambda r: -r.value)[:cap]

@@ -61,6 +61,7 @@ OP_TIMEOUTS: Dict[str, float] = {
     "add_marker": 15.0,
     "add_markers": 30.0,  # 100개씩 나눠 보내는 한 번
     "delete_markers": 30.0,
+    "jump_to": 15.0,
     "place_audio": 30.0,
     "remove_audio": 30.0,
     "probe_copy": 120.0,

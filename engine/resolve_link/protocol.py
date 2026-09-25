@@ -36,6 +36,7 @@ OPS = (
     "add_markers",
     "get_markers",
     "delete_markers",
+    "jump_to",
     "place_audio",
     "remove_audio",
     "stop",

@@ -38,7 +38,8 @@ MARKER_COLORS = {"Blue", "Cyan", "Green", "Yellow", "Red", "Pink", "Purple", "Fu
 TAG_RE = re.compile(r"^aih:[A-Za-z0-9:_\-]+$")
 PREFIX_RE = re.compile(r"^aih:[A-Za-z0-9:_\-]*$")
 RESOLVE_OPS = ("timeline_info", "timeline_items", "get_markers", "add_markers", "delete_markers", "remove_audio",
-               "probe_read", "scope")
+               "probe_read", "scope", "jump_to")
+PLAYHEAD_PAGES = ("cut", "edit", "color", "fairlight", "deliver")
 
 
 def audio_item(uid: str, track: int, start: int, length: int, path: str, *, src: int = 0, clip_fps: str = "60",
@@ -83,6 +84,7 @@ class FakeResolve:
         self.timeout_once: set = set()  # 이 op는 한 번 (넣은 뒤) 답이 늦다
         self.legacy_track_items_ours = True
         self.opened_pages: List[str] = []
+        self.jumps: List[tuple] = []  # jump_to로 옮긴 재생 위치 (프레임, 타임코드)
 
     # Transport
     def supports(self, op: str) -> Optional[bool]:
@@ -191,12 +193,23 @@ class FakeResolve:
                 "requested": len(rows), "length": self.length, "calls": {"Timeline.AddMarker": "ok"}}
 
     def _op_delete_markers(self, a):
+        snapshot = []
         if "prefix" in a:
             prefix = a["prefix"]
             if "custom" in a or not isinstance(prefix, str) or not PREFIX_RE.match(prefix):
                 self._fail("delete_markers", "bad_args", "prefix")
             colors = set(a["colors"]) if a.get("colors") is not None else None
-            frames = [f for f, m in sorted(self.markers.items()) if self._match(m, prefix, colors)]
+            wanted = a.get("customs")
+            if wanted is not None:
+                if not isinstance(wanted, list) or not wanted or len(wanted) > 200 or any(
+                        not isinstance(c, str) or not TAG_RE.match(c) or not c.startswith(prefix) for c in wanted):
+                    self._fail("delete_markers", "bad_args", "customs")
+                wanted = set(wanted)
+            frames = [f for f, m in sorted(self.markers.items())
+                      if self._match(m, prefix, colors) and (wanted is None or m.get("custom") in wanted)]
+            if a.get("snapshot") is True:
+                snapshot = [{"frame": f, **{k: self.markers[f][k] for k in ("color", "name", "note", "duration")},
+                             "custom": self.markers[f]["custom"]} for f in frames]
         else:
             custom = a.get("custom")
             if not (isinstance(custom, str) and (custom.startswith("aih:") or custom == "aih_test")):
@@ -207,8 +220,29 @@ class FakeResolve:
             del self.markers[f]
         ours = sum(1 for m in self.markers.values()
                    if isinstance(m.get("custom"), str) and (m["custom"].startswith("aih:") or m["custom"] == "aih_test"))
-        return {"deleted": bool(frames), "deleted_count": len(frames), "matched": len(frames), "remaining": 0,
-                "remaining_ours": ours, "calls": {}}
+        out = {"deleted": bool(frames), "deleted_count": len(frames), "matched": len(frames), "remaining": 0,
+               "remaining_ours": ours, "calls": {}}
+        if a.get("snapshot") is True and "prefix" in a:
+            out["snapshot"], out["snapshot_truncated"] = snapshot, False
+        return out
+
+    def _op_jump_to(self, a):
+        """Lua ops.jump_to와 같은 규칙: 화면 확인, 타임라인 안인지, 타임코드 모양."""
+        frame, tc = a.get("frame"), a.get("tc")
+        if not isinstance(frame, int) or isinstance(frame, bool) or frame < 0:
+            self._fail("jump_to", "bad_args", "frame")
+        if not isinstance(tc, str) or not re.match(r"^\d\d:\d\d:\d\d[:;]\d\d$", tc):
+            self._fail("jump_to", "bad_args", "tc")
+        page = self.info.get("page")
+        if page is not None and page not in PLAYHEAD_PAGES:
+            return {"ok": False, "reason": "page", "page": page, "calls": {}}
+        if not (self.info["start_frame"] <= frame < self.info["end_frame"]):
+            return {"ok": False, "reason": "outside", "start_frame": self.info["start_frame"],
+                    "end_frame": self.info["end_frame"], "calls": {}}
+        self.info["current_tc"] = tc
+        self.jumps.append((frame, tc))
+        return {"ok": True, "set_result": True, "requested_tc": tc, "readback_tc": tc, "frame": frame, "page": page,
+                "calls": {"Timeline.SetCurrentTimecode": "ok"}}
 
     def _op_remove_audio(self, a):
         name = a.get("track_name")

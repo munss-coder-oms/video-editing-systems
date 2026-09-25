@@ -57,6 +57,20 @@ def marker_prefix(proposal_id: str) -> str:
     return f"aih:{proposal_id}:"
 
 
+def entry_op(entry: Dict[str, Any]) -> Optional[str]:
+    """일지 한 줄의 일 이름 (mark_pauses, mark, clear_marks ...)."""
+    cmds = entry.get("commands") or []
+    return cmds[0].get("op") if cmds and isinstance(cmds[0], dict) else None
+
+
+def proposal_of(custom: Any) -> Optional[str]:
+    """꼬리표 "aih:<P>:<n>"의 제안 번호 P."""
+    if not isinstance(custom, str) or not custom.startswith("aih:"):
+        return None
+    parts = custom.split(":")
+    return parts[1] if len(parts) >= 3 and parts[1] else None
+
+
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
@@ -200,6 +214,46 @@ class Journal:
         self.save()
         return e
 
+    # --- 지우기 (clear_marks): 넣은 것이 아니라 지운 것을 적는다 ---
+
+    def begin_clear(self, proposal_id: str, *, origin: str, request: str, commands: List[Dict[str, Any]],
+                    expected_deleted: Iterable[str], snapshot: Iterable[Dict[str, Any]] = (),
+                    plan_digest: Optional[str] = None) -> Dict[str, Any]:
+        """지우기 전에 적는다. expected_deleted: 지울 표시의 꼬리표 (모두 aih:로 시작).
+
+        snapshot: 계산할 때 읽은 그 표시들 (지우다 앱이 꺼져도 되돌릴 수 있게 먼저 적어 둔다).
+        """
+        customs = [str(c) for c in expected_deleted]
+        if any(not c.startswith("aih:") for c in customs):
+            raise ValueError("도우미 꼬리표가 아닌 표시는 지우지 않습니다")
+        e = self.begin(proposal_id, origin=origin, request=request, commands=commands, plan_digest=plan_digest)
+        e["expected_deleted"] = customs
+        e["deleted"] = []
+        e["deleted_snapshot"] = [dict(r) for r in snapshot if str(r.get("custom", "")) in set(customs)]
+        self.save()
+        return e
+
+    def finish_clear(self, proposal_id: str, *, gone: Iterable[str], snapshot: Iterable[Dict[str, Any]] = (),
+                     receipt: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """지운 뒤: 다시 읽어 없어진 꼬리표(gone)와 되돌리기용 스냅숏(deleted_snapshot).
+
+        snapshot은 리졸브가 지우면서 돌려준 줄. 거기 없는 꼬리표는 계산할 때 적어 둔 줄을 그대로 쓴다.
+        """
+        e = self.entry(proposal_id)
+        if e is None:
+            raise KeyError(proposal_id)
+        gone = [str(c) for c in gone]
+        expected = len(e.get("expected_deleted") or [])
+        rows = {str(r.get("custom")): dict(r) for r in e.get("deleted_snapshot") or []}
+        for r in snapshot:
+            rows[str(r.get("custom"))] = dict(r)
+        e["deleted"] = gone
+        e["deleted_snapshot"] = [rows[c] for c in gone if c in rows]
+        e["status"] = "applied" if len(gone) >= expected else ("partial" if gone else "undone")
+        e["receipt"] = receipt
+        self.save()
+        return e
+
     def mark(self, proposal_id: str, status: str) -> None:
         if status not in STATUSES:
             raise ValueError(status)
@@ -224,6 +278,17 @@ class Journal:
         out: List[Reconciled] = []
         for e in self.pending():
             pid = e["proposal_id"]
+            if entry_op(e) == "clear_marks":
+                # 지우다 멈춤: 지울 꼬리표 가운데 없어진 것을 센다
+                want = [str(c) for c in e.get("expected_deleted") or []]
+                gone = [c for c in want if c not in present]
+                status = "applied" if want and len(gone) >= len(want) else ("partial" if gone else "undone")
+                e["status"] = status
+                e["deleted"] = gone
+                e["reconciled_at"] = _now()
+                out.append(Reconciled(pid, status, len(want), len(gone),
+                                      RECONCILED_UNDONE_MESSAGE if status == "undone" else None))
+                continue
             expected = [m.get("custom") for m in e["expected"]["markers"]]
             prefix = marker_prefix(pid)
             found_customs = [c for c in present if c.startswith(prefix)]
@@ -270,8 +335,9 @@ class Journal:
             receipt = e.get("receipt") or {}
             out.append({
                 "proposal_id": e.get("proposal_id"), "at": e.get("at"), "origin": e.get("origin"),
-                "request": e.get("request"), "status": e.get("status"),
+                "request": e.get("request"), "status": e.get("status"), "op": entry_op(e),
                 "markers": len(e.get("created", {}).get("markers", [])),
+                "deleted": len(e.get("deleted") or []),
                 "calls": receipt.get("calls") if isinstance(receipt, dict) else None,
             })
         return out

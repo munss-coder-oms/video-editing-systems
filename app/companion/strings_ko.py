@@ -255,6 +255,7 @@ PLAN_REFUSED = {
     "no_voice_items": "고른 목소리(소리 {n})가 타임라인의 켜진 트랙에 없어요. 카드의 [바꾸기]로 다시 골라 주세요",
     "no_in_out": "리졸브에서 In~Out 구간을 정해 주세요 (I/O 키). 또는 ⚙에서 적용 범위를 '전체'로 바꿔 주세요",
     "not_ready": "이 일은 아직 준비 중이에요",
+    "range_outside": "말씀하신 구간이 타임라인 밖이에요",
 }
 BTN_PICK_AGAIN = "목소리 다시 고르기"
 
@@ -301,10 +302,187 @@ CHAT_GREETING = "버튼을 누르거나 할 일을 적어 주세요. 리졸브�
 CHAT_PLACEHOLDER = "예: 3분 20초에 표시해줘"
 CHAT_SEND = "보내기"
 CHAT_SOON = "대화는 곧 열려요. 지금은 위의 자동화 버튼과 ⋯ > 연결 점검을 쓸 수 있어요."
+CHAT_BUSY = "지금 하는 일이 끝나면 이어서 할게요"
+CHAT_CHECKING = "리졸브에서 타임라인을 확인하는 중…"
+CHAT_NO_TIMELINE = "리졸브에서 타임라인을 열어 주세요"
+CHAT_NO_TIMELINE_INFO = "타임라인의 시작·끝·속도를 읽지 못했어요. [연결 확인] 뒤 다시 보내 주세요"
+CHAT_OLD_SCRIPT = OLD_SCRIPT_HINT
+CHAT_PROBE_COPY = "지금 열린 타임라인은 점검용 복사본이에요. 원래 타임라인으로 돌아간 뒤 보내 주세요"
+CHAT_NO_MATCH = "이 말은 아직 못 알아들어요. 이렇게 말해 보세요:"
+CHAT_CHIPS_HINT = "누르면 입력 칸에 채워요. 고친 뒤 [보내기]를 눌러 주세요"
 CHAT_NOT_CONNECTED = "먼저 리졸브와 연결해 주세요 [연결 확인]"
 CHAT_BRAIN_LINE = "답하는 쪽: 기본 도우미 (AI 아님) · 무료"
 CHAT_ME = "나"
 CHAT_HELPER = "도우미"
+
+# ── 대화: 기본 도우미의 답 (설계 B4.2, 부록 A Refusals) ─────────────
+# 두뇌(engine/chat/rules.py)는 code와 값만 돌려주고, 글은 여기서 고른다.
+CHAT_REPLIES = {
+    "studio": "유료판(Studio) 기능이라 무료판에서는 부를 수 없어요. 부르면 리졸브에 창이 떠서 연결이 멈춰요",
+    "keyframe": ("리졸브의 키프레임·EQ·컴프레서는 스크립트로 바꿀 수 없어요. "
+                 "서서히 줄인 새 소리를 'AI 소리' 트랙에 넣는 방법은 나중 판에서 될 수 있어요"),
+    "needs_ai": "웃음소리처럼 어떤 소리인지 가려 듣는 일은 기본 도우미가 못 해요. 큰 소리가 난 곳은 튀는 소리 표시로 찾을 수 있어요:",
+    "cut_no_place": ("무료판 리졸브에서는 도우미가 클립을 직접 자르거나 옮길 수 없어요. "
+                     "쉬는 곳에 표시를 해 두면 보면서 자르실 수 있어요:"),
+    "out_of_scope": ("이건 도우미가 하지 않아요. 할 수 있는 일: 표시 넣기 · 쉬는 곳/튀는 소리 표시 · "
+                     "도우미 표시 지우기 · 재생 위치 옮기기 · 되돌리기 · 자동화 버튼에 저장"),
+    "not_ready": "원래 클립을 켜고 끄는 일은 아직 안 돼요. '소리 고르게'가 준비되면 같이 해 드릴게요",
+    "subtitles_later": "자막 만들기는 아직 준비 중이에요",
+    "audio_not_ready": "소리 조절은 아직 안 돼요. 시간을 같이 말씀해 주시면 그 자리에 노란 표시를 해 둘 수 있어요",
+    "balance_not_ready": "소리 고르게는 아직 준비 중이에요 (자동화 3)",
+    "time_outside": "그 시간은 타임라인 밖이에요 (타임라인 길이 {length})",
+    "time_no_playhead": "리졸브의 재생 위치를 읽지 못했어요. [연결 확인] 뒤 다시 보내 주세요",
+    "time_bad_tc": "리졸브 시간 '{raw}'을 읽지 못했어요",
+    "time_reversed": "끝이 시작보다 앞이에요. 앞의 시간부터 말씀해 주세요",
+    "time_in_out": "In~Out 구간은 기능 점검에서 읽을 수 있다고 확인된 뒤에, 쉬는 곳·튀는 소리 찾기에만 써요. 시간으로 말씀해 주세요",
+    "time_empty": "시간을 알아듣지 못했어요",
+    "time_ambiguous": "시간을 두 가지로 읽을 수 있어요",
+}
+CHAT_STUDIO_SUBTITLES = "도우미의 '자막 만들기'가 준비되면 그걸로 해 드릴게요"
+CHAT_QUESTIONS = {
+    "negation": "'{word}'처럼 빼는 말은 아직 알아듣지 못해요. 할 일만 말씀해 주세요:",
+    "what_to_do": "무엇을 할까요? 이렇게 말해 보세요:",
+    "what_to_do_time": "{time}에 무엇을 할까요?",
+    "verb_only": "'{clause}'가 무엇을 가리키는지 모르겠어요. 한 번에 하나씩 다시 말씀해 주세요:",
+    "clear_what": "무엇을 지울까요? 도우미가 넣은 표시만 지울 수 있어요:",
+    "mark_where": "어디에 표시할까요? 시간이나 '여기'를 같이 말씀해 주세요:",
+    "tc_ambiguous": "'{raw}'을 영상 시간({elapsed})과 리졸브 시간({tc})으로 둘 다 읽을 수 있어요. 어느 쪽인가요?",
+    "over_gain": "한 번에 키울 수 있는 건 12dB까지예요. 12dB로 할까요?",
+}
+BTN_OVER_GAIN_YES = "12dB로"
+CHAT_HELP = (
+    "기본 도우미(AI 아님, 무료)가 알아듣는 말이에요. 리졸브에 넣기 전에 꼭 카드로 먼저 보여 드려요.\n"
+    "· 표시: 3분 20초에 빨간 표시해줘 / 여기 표시해줘 (메모는 '자막 확인')\n"
+    "· 쉬는 곳: 5분~6분에서 2초 넘게 쉰 곳 표시해줘\n"
+    "· 튀는 소리: 3분쯤 튀는 소리 표시해줘\n"
+    "· 지우기: 도우미가 넣은 파란 표시 지워줘 (내가 찍은 표시는 그대로)\n"
+    "· 재생 위치: 3분 20초로 가줘\n"
+    "· 되돌리기: 방금 거 취소\n"
+    "· 버튼에 저장: 이대로 자동화 3에 저장해줘\n"
+    "· 상태: 지금 타임라인 몇 분이야?"
+)
+CHAT_STATUS = "{timeline} · 길이 {length} · {fps}fps · 재생 위치 {playhead} ({tc})"
+CHAT_STATUS_NO_PLAYHEAD = "{timeline} · 길이 {length} · {fps}fps"
+CHAT_JUMP_DONE = "재생 위치를 {at}로 옮겼어요 ({tc})"
+CHAT_JUMP_PAGE = "리졸브가 미디어나 퓨전 화면이면 재생 위치를 옮길 수 없어요. 편집 화면 등으로 바꿔 주세요"
+CHAT_JUMP_OUTSIDE = "그 시간은 타임라인 밖이라 옮기지 않았어요"
+CHAT_JUMP_UNCONFIRMED = "옮기라고 했는데 다시 읽어 보니 재생 위치가 {readback}이에요. 리졸브에서 {tc}를 직접 입력해 주세요"
+CHAT_JUMP_FAILED = "재생 위치를 옮기지 못했어요: {reason}"
+CHAT_UNDO_NONE = "이 타임라인에는 뺄 것이 없어요"
+CHAT_OFFER_DECLINED = "알겠어요. 리졸브는 그대로예요"
+CHAT_REFUSED_ALSO = "함께 말씀하신 것 가운데: {text}"
+# 입력 칸을 채우는 말 (누르면 채우기만 하고 보내지 않는다)
+CHIPS = {
+    "example:mark_time": "{time}에 빨간 표시해줘",
+    "example:mark_here": "여기 표시해줘",
+    "example:range_pauses": "5분~6분에서 2초 넘게 쉰 곳 표시해줘",
+    "example:undo": "방금 거 취소",
+    "example:pauses": "쉬는 곳 표시해줘",
+    "example:spikes": "튀는 소리 표시해줘",
+    "example:spikes_at": "{time}쯤 튀는 소리 표시해줘",
+    "example:clear_at": "{time}에 있는 도우미 표시 지워줘",
+    "example:clear_ours": "도우미가 넣은 파란 표시 지워줘",
+    "example:jump_time": "{time}로 가줘",
+}
+CHIP_LEFTOVER = "나머지도 다시 말하기"
+CHIP_TC_ELAPSED = "영상 {time}"
+CHIP_TC_RESOLVE = "리졸브 시간 {tc}"
+SPOKEN_HMS = "{h}시간 {m}분 {s}초"
+SPOKEN_MS = "{m}분 {s}초"
+SPOKEN_S = "{s}초"
+
+# ── 대화 카드: 값의 출처, 범위 지킴이, 고치기 (설계 B4.3~B4.5) ─────────
+PROVENANCE = {"said": "말씀하신 값", "default": "기본값", "setting": "설정값", "found": "도우미가 찾음"}
+PROVENANCE_SLOT = "설정값 ({name})"
+TAGGED = "{value} · {source}"
+GUARD = {
+    "outside_range": "요청하신 범위 밖이 바뀌어서 넣을 수 없어요",
+    "outside_tracks": "말씀하지 않은 트랙({tracks})이 바뀌어서 넣을 수 없어요",
+    "more_than_asked": "요청보다 많아요: {n}곳",
+    "whole": "전체 {length}에 적용돼요",
+    "half": "타임라인의 {percent}%에 적용돼요",
+    "leftover": "못 알아들은 부분: \"{text}\"",
+}
+CARD_NOTES = {
+    "tc_read": "리졸브 시간 {tc} → 영상 {at}로 봤어요",
+    "clipped_end": "타임라인 끝까지만 봤어요",
+    "around": "말씀하신 시각 앞뒤 {seconds}초 안에서 찾아요",
+    "gain_clamped": "한 번에 줄일 수 있는 건 {max}dB까지라 {max}dB로 적었어요",
+    "too_many_marks": "표시는 한 번에 {cap}개까지만 넣어요 ({n}개 가운데)",
+    "count_kept": "말씀하신 대로 큰 것부터 {kept}곳만 넣어요 ({found}곳 가운데)",
+}
+CARD_TITLE_PROPOSE = "이렇게 넣을까요?"
+CARD_TITLE_CLEAR = "이렇게 지울까요?"
+CARD_TITLE_CLEAR_NONE = "지울 도우미 표시가 없어요"
+CARD_TITLE_UNDO = "이걸 뺄까요?"
+CARD_TITLE_SAVE = "자동화 버튼에 저장할까요?"
+WHAT_MARK = "{color_word} 표시 '{name}'"
+WHAT_MARKS = "표시 {n}개 넣기"
+WHEN_POINT = "{at}"
+WHEN_SPAN = "{a}~{b}"
+WHEN_ITEMS = "{a}부터 {b}까지 {n}곳"
+WHEN_AROUND = "{a}~{b} (앞뒤 5초)"
+HOW_POINT = "점 표시 (길이 없음)"
+HOW_SPAN = "구간 표시, 길이 {length}"
+HOW_MIXED = "점 {points}개 · 구간 {spans}개"
+TRACK_NONE = "트랙과 상관없는 타임라인 표시"
+RESOLVE_MARKS = "{colors} 표시 {n}개"
+COLOR_JOIN = "·"
+ITEM_LINE = "{at}  {color_word} '{name}'  {tc}"
+ITEM_SOURCE = "시각 {at} · 색 {color} · 이름 {name}"
+FOUND_BY_HELPER = "도우미가 찾음"
+EDIT_TIME = "시각"
+EDIT_MIN_S = "쉰 길이"
+EDIT_ABOVE = "튀는 정도"
+EDIT_DB = "적을 크기"
+EDIT_VALUE_S = "{v}초"
+EDIT_VALUE_DB = "{v}dB"
+BTN_MINUS = "−"
+BTN_PLUS = "+"
+TIP_MINUS_TIME = "0.1초 앞으로"
+TIP_PLUS_TIME = "0.1초 뒤로"
+TIP_MINUS_VALUE = "하나 줄이기 (다시 계산해요. 리졸브는 그대로예요)"
+TIP_PLUS_VALUE = "하나 늘리기 (다시 계산해요. 리졸브는 그대로예요)"
+BTN_VIEW = "리졸브에서 보기"
+BTN_VIEW_SHORT = "보기"
+TIP_VIEW = "리졸브의 재생 위치만 이곳으로 옮겨요 (편집이 아니에요)"
+EDITED = "고침"
+SAVE_ROW = "이대로 자동화 버튼에 저장 ▸"
+SAVE_SLOT_CHOICE = "자동화 {n} ({name})"
+SAVE_DONE = "자동화 {n}을 바꿨어요"
+SAVE_RANGE_DROPPED = "구간({a}~{b})은 저장하지 않아요. 버튼은 전체(또는 In~Out)에 적용돼요"
+SAVE_NOTHING = "저장할 카드가 없어요. 쉬는 곳이나 튀는 소리 카드가 나온 뒤에 말씀해 주세요"
+SAVE_CONFIRM = "자동화 {n}을 '{what}'으로 바꿔요. 지금 설정: {now}"
+SAVE_CHOOSE = "어느 버튼에 저장할까요?"
+SAVE_KIND_NAME = "{name} ({summary})"
+OFFER_TITLES = {
+    "cut": "무료판 리졸브에서는 도우미가 클립을 직접 자르거나 옮길 수 없어요. 그 자리에 보라 표시를 해 둘까요?",
+    "audio": "구간 소리 조절은 아직 안 돼요. 그 자리에 노란 표시를 해 둘까요?",
+}
+BTN_OFFER_YES = "표시해 두기"
+BTN_OFFER_NO = "괜찮아요"
+CLEAR_WHAT_ALL = "도우미가 넣은 표시 지우기"
+CLEAR_WHAT_FILTER = "도우미가 넣은 {what} 지우기"
+CLEAR_COLORS = "{colors} 표시"
+CLEAR_KINDS = {"mark_pauses": "쉬는 곳 표시", "mark_spikes": "튀는 소리 표시", "mark": "대화로 넣은 표시"}
+CLEAR_RESOLVE = "도우미 표시 {n}개를 지워요"
+CLEAR_KEEP = "내가 찍은 표시와 고르지 않은 도우미 표시는 그대로예요"
+CLEAR_STRADDLE = "구간에 걸친 도우미 표시 {n}개는 그대로 둬요"
+CLEAR_NONE = "말씀하신 도우미 표시가 없어요 (이 타임라인의 도우미 표시 {n}개)"
+CLEAR_RECEIPT = "✓ {at} 지웠어요 · 도우미 표시 {n}개"
+CLEAR_RECEIPT_PARTIAL = "{expected}개 중 {n}개만 지웠어요"
+CLEAR_RECEIPT_NONE = "지우지 못했어요. 리졸브는 그대로예요"
+CLEAR_CLOSED = "이 표시를 넣은 일 {n}개는 되돌리기 목록에서 '뺌'이 됐어요"
+CLEAR_UNDONE = "↶ {at} 되돌렸어요 · 지운 도우미 표시 {n}개를 다시 넣었어요"
+CLEAR_UNDO_LEFT = "{n}개는 다시 넣지 못했어요"
+CLEAR_UNDO_SKIPPED = "이미 있어서 건너뛴 것 {n}개"
+UNDO_WHAT_CLEAR = "{request} · 지운 도우미 표시 {n}개를 다시 넣어요"
+CLEARING = "지우는 중… · 취소할 수 없어요"
+CARD_CLEARED = "이 표시는 '도우미 표시 지우기'로 지웠어요"
+UNDO_STARTED = "빼는 중이에요. 결과는 위 카드와 되돌리기 목록에 나와요"
+SAVE_SLOT_BUTTON = "자동화 {n}"
+JUMPING = "재생 위치를 옮기는 중…"
+UNDO_WHAT_MARKS = "{request} · 도우미 표시 {n}개를 빼요"
 
 # ── 아래쪽: 되돌리기 (설계 B6.3) ────────────────────────────────────
 BTN_UNDO = "↶ 되돌리기 ▾"

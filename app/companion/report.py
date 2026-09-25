@@ -83,6 +83,8 @@ class TestSession:
         self.runs: List[Dict[str, Any]] = []  # 자동화 버튼: 계산·넣기·되돌리기·모두 빼기마다 한 줄
         self.voice: List[Dict[str, Any]] = []  # 목소리 고르기 (물음과 답)
         self.manual: Dict[str, Dict[str, Any]] = {}  # 확인 질문 M2, M3의 답 (M3은 다시 읽은 표시 수도)
+        # 대화: 부탁마다 알아들은 일·카드·영수증·재생 위치 옮기기·버튼에 저장 (시험 T2 13~21번)
+        self.chat: List[Dict[str, Any]] = []
 
     def record(self, name: str, ok: bool, summary: str, data: Dict[str, Any],
                error: Optional[Dict[str, Any]] = None) -> StepRecord:
@@ -560,6 +562,8 @@ def build_report(session: TestSession, link: Dict[str, Any], env: Dict[str, Any]
                          f"{' / 이전 설정 있음' if s.get('previous') else ''}")
     lines += ["", "[자동화 버튼 실행]"]
     lines += [_json1(row) for row in session.runs] or ["이번에는 하지 않았습니다."]
+    lines += ["", "[대화]", link.get("brain") or "답하는 쪽: 모름"]
+    lines += [_json1(row) for row in session.chat] or ["이번에는 하지 않았습니다."]
     lines += ["", "[목소리 고르기]"]
     lines += [_json1(row) for row in session.voice] or ["이번에는 묻지 않았습니다."]
     if link.get("voice"):

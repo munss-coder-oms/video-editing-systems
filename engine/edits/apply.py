@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from ..resolve_link.bridge import BridgeError, BridgeTimeout
 from ..resolve_link.ops import MAX_ADD_MARKERS, MarkerResult, MarkerSpec, ResolveOps, TimelineInfo
 from ..timeline.snapshot import fingerprint
-from .journal import Journal, key_for, marker_prefix
+from .journal import Journal, entry_op, key_for, marker_prefix
 from .proposal import Proposal
 
 LEGACY_TEST_TRACK = "AI 도우미 시험"  # 1차 시험판 [소리 넣기 시험]이 만든 트랙 (app/companion/steps.TEST_NAME)
@@ -107,11 +107,14 @@ def apply_markers(ops: ResolveOps, proposal: Proposal, *, root: Optional[Path] =
     if not info.has_timeline or not _same_timeline(info, proposal.timeline):
         out.status = "other_timeline"
         return out
-    items = ops.timeline_items("audio", cancel=cancel)
-    fp = fingerprint(items)
-    if fp != proposal.fingerprint and not force:
-        out.status = "changed"
-        return out
+    fp = ""
+    if proposal.fingerprint:
+        # 클립에서 찾은 표시만 클립이 바뀌었는지 본다 (대화의 "3분 20초에 표시"는 클립과 상관없다)
+        items = ops.timeline_items("audio", cancel=cancel)
+        fp = fingerprint(items)
+        if fp != proposal.fingerprint and not force:
+            out.status = "changed"
+            return out
     journal = Journal.for_timeline(info, root)
     for old in replace:
         r = _undo_one(ops, journal, info, old, cancel)
@@ -139,7 +142,7 @@ def resume_markers(ops: ResolveOps, proposal: Proposal, *, root: Optional[Path] 
     if journal.entry(proposal.id) is None:
         out.status = "missing"
         return out
-    fp = fingerprint(ops.timeline_items("audio", cancel=cancel))
+    fp = fingerprint(ops.timeline_items("audio", cancel=cancel)) if proposal.fingerprint else ""
     present = {m.get("custom") for m in ops.get_markers(proposal.prefix, cancel=cancel)}
     missing = [s for s in proposal.specs if s.custom not in present]
     total = MarkerResult()
@@ -197,6 +200,8 @@ class UndoOutcome:
     remaining: Optional[int] = None
     message: Optional[str] = None
     calls: Dict[str, Any] = field(default_factory=dict)
+    restored: bool = False  # 지우기(clear_marks)를 되돌림: deleted는 다시 넣은 표시 수
+    reopened: List[str] = field(default_factory=list)  # 지우기로 "뺌"이 됐다가 다시 "넣음"이 된 제안
 
 
 def _undo_one(ops: ResolveOps, journal: Journal, info: TimelineInfo, pid: str,
@@ -209,6 +214,10 @@ def _undo_one(ops: ResolveOps, journal: Journal, info: TimelineInfo, pid: str,
     if blocker is not None:
         out.status, out.message = "other_timeline", blocker
         return out
+    if entry_op(e) == "clear_marks":
+        from .marks import undo_clear  # 지운 표시를 스냅숏에서 다시 넣는다
+
+        return undo_clear(ops, journal, e, cancel=cancel)
     out.expected = len(e.get("created", {}).get("markers") or []) or len(e.get("expected", {}).get("markers") or [])
     r = ops.delete_markers(prefix=marker_prefix(pid), cancel=cancel)
     out.deleted = int(r.get("deleted_count") or 0)
@@ -319,8 +328,14 @@ def active_entries(journal: Journal, kind: str) -> List[Dict[str, Any]]:
     """같은 종류로 넣어 둔 것 (다시 누르면 [바꾸기]/[더하기]를 묻는다)."""
     out = []
     for e in journal.entries:
-        cmds = e.get("commands") or []
-        op = cmds[0].get("op") if cmds and isinstance(cmds[0], dict) else None
-        if op == kind and e.get("status") in ("applied", "partial"):
+        if entry_op(e) == kind and e.get("status") in ("applied", "partial"):
             out.append(e)
     return out
+
+
+def last_active(journal: Journal) -> Optional[Dict[str, Any]]:
+    """대화의 "방금 거 취소"가 가리키는 것: 이 타임라인에서 마지막으로 넣은(또는 지운) 것 하나."""
+    for e in reversed(journal.entries):
+        if e.get("status") in ("applied", "partial"):
+            return e
+    return None

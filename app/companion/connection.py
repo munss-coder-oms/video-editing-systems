@@ -54,8 +54,9 @@ def panel_connect_step(bridge, out: Dict[str, Any], ping_timeout: float = steps.
     out["ping"] = bridge.ping(timeout=ping_timeout)
     supports = getattr(bridge, "supports", None)
     known = supports("timeline_info") if callable(supports) else None
-    # 2.1a 때 켠 스크립트(같은 1.1.0이지만 표시를 한꺼번에 넣는 add_markers가 없음)도 한 번 더 눌러 달라고 한다
-    if known is False or (callable(supports) and supports("add_markers") is False):
+    # 2.1a·2.1b 때 켠 스크립트(같은 1.1.0이지만 add_markers나 재생 위치 옮기기 jump_to가 없음)도
+    # 한 번 더 눌러 달라고 한다
+    if known is False or (callable(supports) and (supports("add_markers") is False or supports("jump_to") is False)):
         out["old_script"] = True
     try:
         if known:

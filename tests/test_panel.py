@@ -26,7 +26,7 @@ from tests.fakes import FakeLuaBridge, timeline_info  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 UI_MODULES = ("window", "header_view", "automation_view", "chat_view", "undo_view", "check_page", "connection",
-              "cards", "voice_picker", "slot_settings", "runs", "fmt", "jobs", "listen")
+              "cards", "voice_picker", "slot_settings", "runs", "fmt", "jobs", "listen", "chat_flow")
 HANGUL = re.compile(r"[ㄱ-ㆎ가-힣]")
 
 
@@ -240,15 +240,23 @@ def test_enter_shift_enter_and_escape(qapp, make_window, fake):
     assert sent == ["3분 20초에 표시해줘"]
 
 
-def test_chat_never_asks_resolve(qapp, make_window, fake):
+def test_chat_asks_resolve_only_when_it_needs_the_timeline(qapp, make_window, fake):
+    """도움말·못 하는 부탁·못 알아들은 말은 리졸브에 묻지 않는다. 시간을 풀 때만 ping + 타임라인 읽기 (바꾸지 않음)."""
     w = connected_window(qapp, make_window, fake)
     before = len(fake.requests)
+    for text in ("뭐 할 수 있어?", "자동 자막 만들어줘", "오늘 날씨 어때"):
+        w.chat.input.setPlainText(text)
+        w.chat.send_btn.click()
+        settle(qapp, 0.1)
+    assert len(fake.requests) == before
+    log = w.chat.log.toPlainText()
+    assert S.CHAT_HELP in log and S.CHAT_REPLIES["studio"] in log and S.CHAT_NO_MATCH in log
+    assert w.chat.brain.text() == S.CHAT_BRAIN_LINE
     w.chat.input.setPlainText("3분 20초에 표시해줘")
     w.chat.send_btn.click()
-    settle(qapp, 0.2)
-    assert len(fake.requests) == before
-    assert S.CHAT_SOON in w.chat.log.toPlainText()
-    assert w.chat.brain.text() == S.CHAT_BRAIN_LINE
+    wait_until(qapp, lambda: not w.busy and w.pending == 0 and not w.chat_flow.active)
+    assert fake.requests[before:] == ["ping", "timeline_info"]
+    assert S.CARD_TITLE_PROPOSE in w.chat.log.toPlainText()
 
 
 def test_chat_collapses_but_input_stays(qapp, make_window, fake, tmp_path):

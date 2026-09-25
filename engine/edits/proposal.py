@@ -15,7 +15,7 @@ import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..resolve_link.ops import MAX_MARKER_NAME, MAX_MARKER_NOTE, MarkerSpec
 from .journal import marker_prefix
@@ -105,10 +105,29 @@ class Proposal:
     found: int = 0  # 줄이기 전에 찾은 수 (max를 넘었으면 count보다 크다)
     point_only: bool = False  # 길이 있는 표시를 쓰지 않음 (설정이나 기능 점검 결과)
     debug: Dict[str, Any] = field(default_factory=dict)
+    # 대화에서 온 제안 (설계 B4.3, B4.4): 값마다 출처, 사용자가 말한 범위, 카드에 적을 줄, 못 알아들은 부분
+    provenance: Dict[str, str] = field(default_factory=dict)
+    requested: Optional[Dict[str, Any]] = None  # brain.RequestedScope를 사전으로
+    notes: List[Tuple[str, Dict[str, Any]]] = field(default_factory=list)
+    leftovers: List[str] = field(default_factory=list)
+    offer: Optional[str] = None  # 못 하는 부탁 대신 권하는 표시 ("cut" 보라 / "audio" 노랑)
 
     @property
     def count(self) -> int:
         return len(self.specs)
+
+    @property
+    def from_chat(self) -> bool:
+        return self.origin.startswith("chat:")
+
+    @property
+    def colors(self) -> List[str]:
+        """표시 색 (나온 순서, 겹치지 않게). 대화의 표시 카드는 줄마다 색이 다를 수 있다."""
+        out: List[str] = []
+        for s in self.specs:
+            if s.color not in out:
+                out.append(s.color)
+        return out
 
     @property
     def prefix(self) -> str:

@@ -2210,6 +2210,13 @@ def test_no_delete_request_removes_a_user_marker(h):
         {"prefix": "aih:"}, {"prefix": "aih:P1:"}, {"prefix": "aih:", "colors": ["Green"]},
         {"custom": "aih_test"}, {"custom": "aih:P1:1"}, {"custom": ""}, {"custom": "user"}, {"custom": "aih"},
         {"custom": "AIH:P1:1"}, {"custom": " aih:P1:1"}, {"custom": "autosubs_1"}, {}, {"colors": ["Green"]},
+        # 2.1c 대화의 지우기: 꼬리표 목록(customs)은 모두 우리 꼬리표여야 한다
+        {"prefix": "aih:", "customs": ["autosubs_1"]}, {"prefix": "aih:", "customs": ["", "user"]},
+        {"prefix": "aih:", "customs": [" aih:P1:1"]}, {"prefix": "aih:", "customs": ["AIH:P1:1"]},
+        {"prefix": "aih:", "customs": ["aih"]}, {"prefix": "aih:", "customs": ["aih-P1-1"]},
+        {"prefix": "aih:", "customs": ["aih:P1:1", "autosubs_1"]}, {"prefix": "aih:", "customs": "autosubs_1"},
+        {"prefix": "aih:", "customs": []}, {"prefix": "aih:", "customs": ["aih:P1:1"], "snapshot": True},
+        {"customs": ["aih:P1:1"]},
     ]
     for args in tries:
         h.op("delete_markers", args)
@@ -2232,3 +2239,92 @@ def test_remove_audio_switches_to_edit_page_only_when_asked(h):
     assert [x[0] for x in h.logged("OpenPage")] == ["edit", "fairlight"]  # 원래 화면으로 돌아간다
     assert h.logged("DeleteClips")[0][1] == "edit"
     assert h.fake.page == "fairlight"
+
+
+# ---------------------------------------------------------------------------
+# 2.1c: 대화의 지우기 (delete_markers{prefix, customs}) · 재생 위치 옮기기 (jump_to)
+# ---------------------------------------------------------------------------
+
+def test_customs_delete_takes_only_the_listed_tags(h):
+    h.init()
+    user = _user_markers(h)
+    h.op("add_markers", {"markers": [_mk(i, 100 + i * 10) for i in range(1, 4)]})
+    r = h.op("delete_markers", {"prefix": "aih:", "customs": ["aih:P1:1", "aih:P1:3"], "snapshot": True})["result"]
+    assert (r["deleted_count"], r["matched"], r["remaining"], r["remaining_ours"]) == (2, 2, 0, 1)
+    assert sorted(x["custom"] for x in r["snapshot"]) == ["aih:P1:1", "aih:P1:3"]
+    assert {x["frame"] for x in r["snapshot"]} == {110, 130} and r["snapshot"][0]["name"] == "쉼 1"
+    assert sorted(x[0] for x in h.logged("DeleteMarkerAtFrame")) == [110, 130]
+    left = {m["frame"]: m["custom"] for m in _markers(h)}
+    assert left == {**user, 120: "aih:P1:2"}
+    # 이미 없는 꼬리표만 주면 아무것도 지우지 않는다
+    r = h.op("delete_markers", {"prefix": "aih:", "customs": ["aih:P1:1"]})["result"]
+    assert r["deleted_count"] == 0 and r["matched"] == 0
+
+
+@pytest.mark.parametrize("args", [
+    {"prefix": "aih:", "customs": ["autosubs_1"]},
+    {"prefix": "aih:", "customs": ["aih:P1:1", "user"]},
+    {"prefix": "aih:P1:", "customs": ["aih:P2:1"]},  # prefix 밖의 꼬리표
+    {"prefix": "aih:", "customs": []},
+    {"prefix": "aih:", "customs": "aih:P1:1"},
+    {"prefix": "aih:", "customs": [5]},
+])
+def test_customs_delete_refuses_foreign_or_bad_tags_before_any_change(h, args):
+    h.init()
+    user = _user_markers(h)
+    h.op("add_markers", {"markers": [_mk(1, 100), _mk(1, 500, custom="aih:P2:1")]})
+    r = h.op("delete_markers", args)
+    assert r["ok"] is False and r["error"] == "bad_args" and r["func"] == "customs", r
+    assert h.logged("DeleteMarkerAtFrame") == [] and h.logged("DeleteMarkerByCustomData") == []
+    assert {m["frame"]: m["custom"] for m in _markers(h)} == {**user, 100: "aih:P1:1", 500: "aih:P2:1"}
+
+
+@pytest.mark.parametrize("page", ["cut", "edit", "color", "fairlight", "deliver"])
+def test_jump_to_moves_the_playhead_on_pages_with_a_playhead(h, page):
+    h.init()
+    h.fake.page = page
+    r = h.op("jump_to", {"frame": 86400 + 300, "tc": "01:00:10:00"})
+    assert r["ok"] is True, r
+    res = r["result"]
+    assert res["ok"] is True and res["readback_tc"] == "01:00:10:00" and res["requested_tc"] == "01:00:10:00"
+    assert res["page"] == page and res["frame"] == 86400 + 300
+    assert [x[0] for x in h.logged("SetCurrentTimecode")] == ["01:00:10:00"]
+    assert h.logged("OpenPage") == [] and h.logged("AddMarker") == []  # 화면을 바꾸지도, 표시를 넣지도 않는다
+
+
+@pytest.mark.parametrize("page", ["media", "fusion"])
+def test_jump_to_refuses_media_and_fusion_pages_without_calling_resolve(h, page):
+    h.init()
+    h.fake.page = page
+    res = h.op("jump_to", {"frame": 86400 + 300, "tc": "01:00:10:00"})["result"]
+    assert (res["ok"], res["reason"], res["page"]) == (False, "page", page)
+    assert h.logged("SetCurrentTimecode") == [] and h.logged("OpenPage") == []
+
+
+@pytest.mark.parametrize("frame", [86400 - 1, 86400 + 9000, 0])
+def test_jump_to_outside_the_timeline_is_refused(h, frame):
+    h.init()
+    res = h.op("jump_to", {"frame": frame, "tc": "01:00:10:00"})["result"]
+    assert res["ok"] is False and res["reason"] == "outside"
+    assert (res["start_frame"], res["end_frame"]) == (86400, 86400 + 9000)
+    assert h.logged("SetCurrentTimecode") == []
+
+
+@pytest.mark.parametrize("args,func", [
+    ({"frame": 86700, "tc": "1:00:10"}, "tc"), ({"frame": 86700, "tc": "01:00:10:00;"}, "tc"),
+    ({"frame": 86700}, "tc"), ({"frame": "86700", "tc": "01:00:10:00"}, "frame"),
+    ({"frame": 86700.5, "tc": "01:00:10:00"}, "frame"), ({"tc": "01:00:10:00"}, "frame"),
+])
+def test_jump_to_bad_args(h, args, func):
+    h.init()
+    r = h.op("jump_to", args)
+    assert (r["ok"], r["error"], r["func"]) == (False, "bad_args", func), r
+    assert h.logged("SetCurrentTimecode") == []
+
+
+def test_jump_to_reports_a_readback_that_did_not_move(h):
+    h.init()
+    tl = h.fake.timeline
+    tl.SetCurrentTimecode = h.lua.eval("function(self, tc) return true end")  # 답은 true인데 움직이지 않는 판
+    res = h.op("jump_to", {"frame": 86400 + 300, "tc": "01:00:20:00"})["result"]
+    assert res["ok"] is False and res["set_result"] is True and res["readback_tc"] == "01:00:10:00"

@@ -74,6 +74,12 @@ QLabel[role="tile-title"] {{ font-size: {body}px; font-weight: 600; }}
 QFrame#card, QGroupBox {{ background: {t.card}; border: 1px solid {t.border}; border-radius: 8px; }}
 QFrame#card QLabel {{ background: transparent; }}
 QLabel[role="card-title"] {{ font-size: {card}px; font-weight: 600; }}
+QLabel[role="item"] {{ padding: 2px 0; }}
+QToolButton[role="chip"] {{ border-radius: 14px; min-height: 32px; padding: 0 10px; color: {t.focus}; }}
+QLabel[role="chip"] {{
+    border: 1px solid {t.border}; border-radius: 12px; padding: 4px 10px; color: {t.focus}; background: {t.card};
+}}
+QToolButton[role="step"], QPushButton[role="step"] {{ min-width: {HIT_MIN}px; padding: 0 4px; }}
 QScrollArea#chatLog {{ background: {t.bg}; border: 1px solid {t.border}; border-radius: 6px; }}
 QWidget#messages, QWidget#settingsInner {{ background: {t.bg}; }}
 QWidget#progressRow {{ background: {t.card}; border: 1px solid {t.border}; border-radius: 6px; }}

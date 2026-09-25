@@ -36,6 +36,7 @@ from . import steps
 from . import strings_ko as S
 from . import theme
 from .automation_view import AutomationView
+from .chat_flow import ChatController
 from .chat_view import ChatView
 from .check_page import CheckPage
 from .connection import AUTO_PING_MS, AUTO_PING_SLOW_MS, AUTO_SLOW_AFTER, UNREAD_LIMIT  # noqa: F401 - 예전 이름
@@ -197,6 +198,7 @@ class HelperWindow(QMainWindow):
             auto_ping_ms=auto_ping_ms, extras=self._connect_extras, parent=self,
         )
         self.runs = RunController(self)
+        self.chat_flow = ChatController(self)
         self.controller.job_busy = lambda: self.runs.busy
         self._build()
         self.controller.changed.connect(self._refresh)
@@ -504,6 +506,9 @@ class HelperWindow(QMainWindow):
         self.footer.set_connected(c.connected and c.status != conn.OLD_SCRIPT and not c.probe_copy_name)
         # 연결이 안 될 때 보내 주는 결과 파일이 가장 중요하므로 결과 저장은 작업 중에도 누를 수 있다.
         self.report_btn.setEnabled(not self.closing and not self.report_pending)
+        chat_flow = getattr(self, "chat_flow", None)
+        if chat_flow is not None:
+            chat_flow.idle()  # 일이 끝났으면 대화에서 남은 일·기다리던 말을 잇는다
 
     def _show_info(self) -> None:
         info = self.controller.info
@@ -920,8 +925,8 @@ class HelperWindow(QMainWindow):
 
     @Slot(str)
     def on_chat(self, text: str) -> None:
-        # 2.1a에는 대화가 없다. 리졸브에는 아무것도 묻지 않는다.
-        self.chat.add_helper(S.CHAT_SOON)
+        """대화 칸에 보냄 (흐름은 chat_flow.py). 시간을 풀어야 할 때만 먼저 ping한다."""
+        self.chat_flow.send(text)
 
     # ── 결과 파일 ──────────────────────────────────────────────────────
 
