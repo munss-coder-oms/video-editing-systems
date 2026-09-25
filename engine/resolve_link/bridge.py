@@ -6,10 +6,19 @@
 
 답이 없으면 BridgeTimeout (Scripts 메뉴를 아직 안 눌렀거나 리졸브에 대화 상자가 열려 있음),
 Lua가 실패를 알리면 BridgeError. 우체통은 한 칸짜리라 요청은 한 번에 하나씩만 보낸다.
+
+2차(스크립트 1.1.0)에서 더한 것
+- 답을 받으면 request.lua를 지운다 (Lua가 0.1초마다 같은 파일을 다시 읽지 않게, S2).
+- 20KB가 넘는 답 뒤에는 작은 ping을 한 번 더 보낸다 (Fusion.prefs에 큰 값이 남지 않게, S16).
+- 작업마다 기다리는 시간이 다르고(OP_TIMEOUTS), 읽기 작업은 답이 없으면 한 번만 조용히 다시 보낸다.
+- cancel(threading.Event)이 켜지면 기다리기를 그만둔다.
+- ping 답의 ops 목록에 없는 작업은 보내지 않고 OldScript를 낸다 (예전 스크립트가 도는 중).
+- 한가할 때 스스로 보내는 요청은 없다. 요청은 부르는 쪽(연결 관리)이 사용자 동작에 맞춰 보낸다.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -21,7 +30,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 from . import SCRIPT_NAME
 from .paths import find_fusion_prefs, mailbox_dir, state_dir
-from .protocol import REQUEST_FILENAME, IdGenerator, Response, encode_request, parse_responses
+from .protocol import LEGACY_OPS, REQUEST_FILENAME, IdGenerator, Response, encode_request, parse_responses
 
 # Fusion.prefs에 저장된 Lua의 Claim 값 (마지막으로 맡은 요청 번호)
 _CLAIM_RE = re.compile(r"\bClaim\s*=\s*\"?(\d{1,16})\"?")
@@ -37,6 +46,29 @@ POLL_INTERVAL = 0.1
 _REPLACE_RETRY_SECONDS = 1.0
 # 아직 답한 Fusion.prefs를 모를 때 후보를 다시 찾는 간격 (처음 연결 전에는 파일이 없을 수도 있다)
 _RESEARCH_SECONDS = 5.0
+
+# 작업마다 기다리는 시간(초). 없는 작업은 DEFAULT_TIMEOUT
+DEFAULT_TIMEOUT = 15.0
+OP_TIMEOUTS: Dict[str, float] = {
+    "ping": 5.0,
+    "stop": 5.0,
+    "state": 30.0,
+    "timeline_info": 30.0,
+    "timeline_items": 30.0,
+    "scope": 30.0,
+    "probe_read": 30.0,
+    "get_markers": 30.0,
+    "add_marker": 15.0,
+    "delete_markers": 30.0,
+    "place_audio": 30.0,
+    "remove_audio": 30.0,
+    "probe_copy": 120.0,
+    "switch_timeline": 15.0,
+}
+# 읽기만 하는 작업: 답이 없으면 한 번 더 보내도 리졸브에 두 번 무엇이 생기지 않는다
+READ_OPS = frozenset({"state", "timeline_info", "timeline_items", "scope", "probe_read", "get_markers"})
+# 이보다 큰 답 뒤에는 작은 ping을 보내 Fusion.prefs의 답 자리를 작게 바꿔 둔다 (S16)
+LARGE_RESPONSE_BYTES = 20 * 1024
 
 TIMEOUT_MESSAGE = (
     "리졸브가 대답하지 않습니다.\n"
@@ -70,11 +102,19 @@ class BridgeTimeout(LinkError):
         self.prefs_changed = list(prefs_changed or [])
 
 
-class BridgeCancelled(BridgeTimeout):
-    """앱을 닫는 중이라 기다리기를 그만둠."""
+CLOSING_MESSAGE = "앱을 닫는 중이라 리졸브의 답을 기다리지 않았습니다."
+CANCEL_MESSAGE = "멈췄어요. 리졸브의 답은 기다리지 않아요."
+OLD_SCRIPT_MESSAGE = (
+    "리졸브 쪽 스크립트가 예전 판이에요. "
+    f"Scripts → {SCRIPT_NAME}를 한 번 더 눌러 주세요"
+)
 
-    def __init__(self, op: str = "") -> None:
-        super().__init__(op, "앱을 닫는 중이라 리졸브의 답을 기다리지 않았습니다.")
+
+class BridgeCancelled(BridgeTimeout):
+    """앱을 닫는 중이거나 사용자가 멈춰서 기다리기를 그만둠."""
+
+    def __init__(self, op: str = "", message: str = CLOSING_MESSAGE) -> None:
+        super().__init__(op, message)
 
 
 class BridgeError(LinkError):
@@ -99,6 +139,13 @@ class BridgeError(LinkError):
         self.func = func
         self.op = op
         self.payload = dict(payload) if isinstance(payload, dict) else None
+
+
+class OldScript(BridgeError):
+    """리졸브에서 도는 스크립트가 이 작업을 모름 (예전 판). Scripts 메뉴를 다시 누르면 새 판이 돈다."""
+
+    def __init__(self, op: str = "", payload: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__("unknown_op", "request", op, OLD_SCRIPT_MESSAGE, payload)
 
 
 FileSig = Optional[Tuple[int, int]]
@@ -145,6 +192,12 @@ class LuaBridge:
         self.script_version: Optional[str] = None
         self.last_response: Optional[Dict[str, Any]] = None
         self.connected = False
+        # 지금 도는 스크립트가 아는 작업 (ping 답의 ops). None이면 아직 모름
+        self.known_ops: Optional[frozenset] = None
+        # 보낸 요청 수, 큰 답 뒤에 보낸 작은 ping 수, 조용히 다시 보낸 읽기 수 (시험·결과 파일용)
+        self.request_count = 0
+        self.cleanup_pings = 0
+        self.read_retries = 0
 
     @property
     def request_path(self) -> Path:
@@ -310,49 +363,119 @@ class LuaBridge:
                     unread[path] = True
         return None
 
-    def request(self, op: str, args: Optional[Dict[str, Any]] = None, timeout: float = 15.0) -> Dict[str, Any]:
-        """작업 하나를 보내고 답(result 표)을 돌려준다."""
-        with self._lock:
-            if self._closed.is_set():
-                raise BridgeCancelled(op)
-            self._seed_ids(self.prefs_candidates())
-            req_id = self._ids.next()
-            text = encode_request(req_id, op, args)
-            if not self._backup_done:
-                # 백업을 만들었거나 이미 있으면 끝. Fusion.prefs를 아직 못 찾았으면 다음 요청 때 다시 해 본다.
-                self._backup_done = bool(self.backup_prefs()) or self.has_backup()
-            # 요청을 쓰기 전 상태를 기억해 두고, 그 뒤에 바뀐 Fusion.prefs만 읽는다.
-            initial: Dict[Path, FileSig] = {p: _sig(p) for p in self.prefs_candidates()}
-            seen = dict(initial)
-            unread: Dict[Path, bool] = {}
-            self._write_request(text, op)
-            deadline = self._clock() + timeout
-            while True:
-                hit = self._scan(req_id, seen, initial, unread)
-                if hit is not None:
-                    return self._accept(op, *hit)
-                if self._clock() >= deadline:
-                    break
-                if self._closed.wait(self._poll):
-                    self._discard_request(text)
-                    raise BridgeCancelled(op)
-            self._discard_request(text)
-            self._remember_timeout(req_id, op)
-            self.connected = False
-            raise BridgeTimeout(op, req_id=req_id, prefs_changed=[str(p) for p in unread])
+    def supports(self, op: str) -> Optional[bool]:
+        """지금 스크립트가 op를 아는지. 아직 모르면(ping 전) None."""
+        if self.known_ops is None:
+            return None
+        return op in self.known_ops
 
-    def _accept(self, op: str, path: Path, resp: Response) -> Dict[str, Any]:
+    def request(
+        self,
+        op: str,
+        args: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+        cancel: Optional[threading.Event] = None,
+        retry: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """작업 하나를 보내고 답(result 표)을 돌려준다.
+
+        timeout: 없으면 OP_TIMEOUTS. retry: 없으면 읽기 작업(READ_OPS)만 답이 없을 때 한 번 더.
+        cancel: 켜지면 BridgeCancelled. 스크립트가 모르는 작업이면 OldScript (보내지 않는다).
+        """
+        if op not in ("ping", "stop") and self.known_ops is not None and op not in self.known_ops:
+            raise OldScript(op)
+        wait = OP_TIMEOUTS.get(op, DEFAULT_TIMEOUT) if timeout is None else float(timeout)
+        again = (op in READ_OPS) if retry is None else bool(retry)
+        with self._lock:
+            try:
+                result, size = self._request_once(op, args, wait, cancel)
+            except BridgeCancelled:
+                raise
+            except BridgeTimeout:
+                if not again:
+                    raise
+                self.read_retries += 1
+                log.info("%s 답이 없어 한 번 더 보냄", op)
+                result, size = self._request_once(op, args, wait, cancel)
+            if size > LARGE_RESPONSE_BYTES and op not in ("ping", "stop"):
+                # 큰 답이 Fusion.prefs에 남아 있지 않게 작은 답으로 덮는다. 실패해도 이번 결과는 그대로
+                try:
+                    self._request_once("ping", None, OP_TIMEOUTS["ping"], cancel)
+                    self.cleanup_pings += 1
+                except LinkError as exc:
+                    log.info("큰 답 뒤 ping 실패: %s", exc)
+            return result
+
+    def _request_once(
+        self,
+        op: str,
+        args: Optional[Dict[str, Any]],
+        timeout: float,
+        cancel: Optional[threading.Event],
+    ) -> Tuple[Dict[str, Any], int]:
+        if self._closed.is_set():
+            raise BridgeCancelled(op)
+        if cancel is not None and cancel.is_set():
+            raise BridgeCancelled(op, CANCEL_MESSAGE)
+        self._seed_ids(self.prefs_candidates())
+        req_id = self._ids.next()
+        text = encode_request(req_id, op, args)
+        if not self._backup_done:
+            # 백업을 만들었거나 이미 있으면 끝. Fusion.prefs를 아직 못 찾았으면 다음 요청 때 다시 해 본다.
+            self._backup_done = bool(self.backup_prefs()) or self.has_backup()
+        # 요청을 쓰기 전 상태를 기억해 두고, 그 뒤에 바뀐 Fusion.prefs만 읽는다.
+        initial: Dict[Path, FileSig] = {p: _sig(p) for p in self.prefs_candidates()}
+        seen = dict(initial)
+        unread: Dict[Path, bool] = {}
+        self._write_request(text, op)
+        self.request_count += 1
+        deadline = self._clock() + timeout
+        while True:
+            hit = self._scan(req_id, seen, initial, unread)
+            if hit is not None:
+                return self._accept(op, text, *hit)
+            if self._clock() >= deadline:
+                break
+            if cancel is not None and cancel.is_set():
+                self._discard_request(text)
+                raise BridgeCancelled(op, CANCEL_MESSAGE)
+            if self._closed.wait(self._poll):
+                self._discard_request(text)
+                raise BridgeCancelled(op)
+        self._discard_request(text)
+        self._remember_timeout(req_id, op)
+        self.connected = False
+        raise BridgeTimeout(op, req_id=req_id, prefs_changed=[str(p) for p in unread])
+
+    def _accept(self, op: str, text: str, path: Path, resp: Response) -> Tuple[Dict[str, Any], int]:
+        # 답을 받은 요청 파일은 지운다 (S2). 그사이 다른 요청으로 바뀌었으면 그대로 둔다.
+        self._discard_request(text)
         self.prefs_path = path
+        if resp.owner != self.owner and op != "ping":
+            self.known_ops = None  # 스크립트를 다시 눌렀다: 다음 ping 때 다시 안다
         self.owner = resp.owner
         self.last_response = resp.data
         sv = resp.data.get("sv")
         self.script_version = sv if isinstance(sv, str) else None
         self.connected = True
+        try:
+            size = len(json.dumps(resp.data, ensure_ascii=False).encode("utf-8"))
+        except (TypeError, ValueError):
+            size = 0
         if not resp.data.get("ok"):
-            raise BridgeError(str(resp.data.get("error") or "unknown"), str(resp.data.get("func") or ""), op,
-                              payload=resp.data)
+            error = str(resp.data.get("error") or "unknown")
+            if error == "unknown_op":
+                raise OldScript(op, payload=resp.data)
+            raise BridgeError(error, str(resp.data.get("func") or ""), op, payload=resp.data)
         result = resp.data.get("result")
-        return result if isinstance(result, dict) else {}
+        result = result if isinstance(result, dict) else {}
+        if op == "ping":
+            ops = result.get("ops")
+            if isinstance(ops, list) and all(isinstance(x, str) for x in ops):
+                self.known_ops = frozenset(ops)
+            else:
+                self.known_ops = frozenset(LEGACY_OPS)  # 1.0.0 스크립트는 목록을 주지 않는다
+        return result, size
 
     def close(self) -> None:
         """앱을 닫을 때: 기다리는 요청을 바로 끝내고 더 보내지 않는다."""
@@ -360,10 +483,10 @@ class LuaBridge:
 
     # ── 작업별 바로가기 ───────────────────────────────────────────────
 
-    def ping(self, timeout: float = 15.0) -> Dict[str, Any]:
+    def ping(self, timeout: Optional[float] = None) -> Dict[str, Any]:
         return self.request("ping", timeout=timeout)
 
-    def state(self, timeout: float = 15.0) -> Dict[str, Any]:
+    def state(self, timeout: Optional[float] = None) -> Dict[str, Any]:
         return self.request("state", timeout=timeout)
 
     def add_marker(
@@ -374,29 +497,29 @@ class LuaBridge:
         note: str = "",
         custom: str = "",
         duration: int = 1,
-        timeout: float = 15.0,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         args = {"frame": int(frame), "color": color, "name": name, "note": note,
                 "custom": custom, "duration": max(1, int(duration))}
         return self.request("add_marker", args, timeout=timeout)
 
-    def get_markers(self, timeout: float = 15.0) -> Dict[str, Any]:
+    def get_markers(self, timeout: Optional[float] = None) -> Dict[str, Any]:
         return self.request("get_markers", timeout=timeout)
 
-    def delete_markers(self, custom: str, timeout: float = 15.0) -> Dict[str, Any]:
+    def delete_markers(self, custom: str, timeout: Optional[float] = None) -> Dict[str, Any]:
         return self.request("delete_markers", {"custom": custom}, timeout=timeout)
 
     def place_audio(
-        self, path, track_name: str, record_frame: int, frames: int, timeout: float = 30.0
+        self, path, track_name: str, record_frame: int, frames: int, timeout: Optional[float] = None
     ) -> Dict[str, Any]:
         args = {"path": str(path), "track_name": track_name,
                 "record_frame": int(record_frame), "frames": int(frames)}
         return self.request("place_audio", args, timeout=timeout)
 
-    def remove_audio(self, track_name: str, timeout: float = 15.0) -> Dict[str, Any]:
+    def remove_audio(self, track_name: str, timeout: Optional[float] = None) -> Dict[str, Any]:
         return self.request("remove_audio", {"track_name": track_name}, timeout=timeout)
 
-    def stop(self, timeout: float = 5.0) -> Dict[str, Any]:
+    def stop(self, timeout: Optional[float] = None) -> Dict[str, Any]:
         return self.request("stop", timeout=timeout)
 
 

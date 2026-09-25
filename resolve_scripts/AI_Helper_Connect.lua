@@ -1,5 +1,5 @@
 --[[
-AI 도우미 - 리졸브 연결 스크립트 (연결 시험판)
+AI 도우미 - 리졸브 연결 스크립트 (1.1.0)
 
 리졸브에서 Workspace(워크스페이스) → Scripts(스크립트) → AI_Helper_Connect를 누르면 시작한다.
 리졸브를 켤 때마다 한 번 누른다. 옆에 뜨는 AI 도우미 창과 파일로 이야기를 주고받는다.
@@ -18,6 +18,10 @@ os.execute, os.remove가 없다. 그래서 요청은 loadfile로 읽고, 답은 
 - 할 일이 없을 때는 설정을 쓰지 않는다 (리졸브가 꺼지는 중에 설정을 쓰다 꺼진 일이 있다).
 - 리졸브 함수는 판마다 없거나 다르게 동작할 수 있어서 모두 pcall로 부르고,
   함수마다 결과("ok" / "err:<내용>" / "missing")를 calls에 적어 돌려준다.
+- 유료판(Studio) 전용 함수(AIH.DENY)는 부르지 않는다. 무료판에서 부르면 리졸브에 안내 창이 떠서
+  그 뒤의 요청이 모두 멈춘 일이 있다.
+- 우리가 넣은 것에는 꼬리표를 붙이고(표시의 custom data "aih:", 트랙 이름 "AI ...",
+  미디어 풀 폴더 "AI 도우미", 점검용 타임라인 이름 "AI 도우미 점검용 ..."), 지울 때는 꼬리표가 있는 것만 지운다.
 - 우편함 경로와 스크립트 판은 설치할 때 AI 도우미가 아래 값을 채워 넣는다.
 ]]
 
@@ -30,24 +34,48 @@ AIH.MAILBOX_HEX = "@@MAILBOX_HEX@@" -- 우편함 폴더 경로 (바이트의 16�
 AIH.MAILBOX_LONG_HEX = "@@MAILBOX_LONG_HEX@@"
 
 AIH.BIN_NAME = "AI 도우미"      -- 미디어 풀에 만들 저장소(빈) 이름
+AIH.PROBE_PREFIX = "AI 도우미 점검용" -- 기능 점검 때 잠깐 만드는 복사본 타임라인 이름의 앞부분
+AIH.PROBE_TRACK = "AI 도우미 점검" -- 기능 점검(C7)이 복사본에 만드는 오디오 트랙 이름
 AIH.MAX_HEX = 400000            -- 답(16진수)이 이보다 길면 too_large로 대신 답한다
 AIH.MAX_ITEMS = 300             -- state: 종류(영상/오디오)마다 알려 줄 클립 수
 AIH.MAX_MARKERS = 2000
+AIH.PAGE_ITEMS = 100            -- timeline_items: 한 번에 알려 줄 클립 수
+AIH.PAGE_BYTES = 60000          -- timeline_items: 한 번의 답(JSON)이 이보다 크지 않게 (64KB 아래)
+AIH.MAX_MAPPING = 4096          -- probe_read: 오디오 연결 정보(JSON 글자)를 이만큼만
 AIH.FRESH_SECONDS = 15          -- 시작할 때 남아 있던 요청은 이 시간 안에 쓴 것만 실행
 AIH.TICK = 0.1                  -- 요청 파일을 보는 간격(초)
 AIH.OWNER_EVERY = 10            -- 이 횟수(약 1초)마다 주인 표시를 다시 본다
 AIH.BUSY_CHECK = 300            -- 이 횟수(약 30초)마다 bmd.wait가 실제로 쉬는지 본다
-AIH.MAX_DELETE = 200            -- 시험 표시를 지울 때 되풀이하는 최대 횟수
+AIH.MAX_DELETE = 2000           -- 표시를 지울 때 되풀이하는 최대 횟수
 AIH.STALE_CLAIM_MS = 600000     -- Claim이 요청 번호보다 이만큼(10분) 넘게 크면 PC 시계가 뒤로 가기 전에 남은 값
 
 local KEY_OWNER = "Global.AIHelper.Owner"
 local KEY_CLAIM = "Global.AIHelper.Claim"
 local KEY_RESPONSE = "Global.AIHelper.Response"
 
+-- 할 일 목록 (앱의 engine/resolve_link/protocol.py OPS와 같아야 한다: 시험이 맞춰 본다)
 local OPS_ALLOWED = {
-	ping = true, state = true, add_marker = true, get_markers = true, delete_markers = true,
+	ping = true, state = true, timeline_info = true, timeline_items = true, scope = true,
+	probe_read = true, probe_copy = true, switch_timeline = true,
+	add_marker = true, get_markers = true, delete_markers = true,
 	place_audio = true, remove_audio = true, stop = true,
 }
+
+-- 유료판(Studio) 전용이거나 부르면 안내 창이 뜰 수 있는 함수. AIH.call은 이 이름을 부르지 않고
+-- "err:denied"로만 적는다. 이 이름들은 이 표 밖에서 쓰지 않는다 (시험이 스크립트 글을 뒤져 확인한다).
+AIH.DENY = {
+	CreateSubtitlesFromAudio = true, TranscribeAudio = true, ClearTranscription = true,
+	GetTranscription = true, PerformAudioClassification = true, ClearAudioClassification = true,
+	AnalyzeForIntellisearch = true, AnalyzeForSlate = true, GenerateSpeech = true,
+	RemoveMotionBlur = true, SmartReframe = true, CreateMagicMask = true, RegenerateMagicMask = true,
+	SetVoiceIsolationState = true, GetVoiceIsolationState = true, EnableVoiceIsolationState = true,
+	ConvertTimelineToStereo = true, AnalyzeDolbyVision = true,
+	GetStereoConvergenceValues = true, GetStereoLeftFloatingWindowParams = true,
+	GetStereoRightFloatingWindowParams = true, SetStereoConvergenceValues = true,
+}
+
+-- 재생 위치를 옮길 수 있는 화면 (SetCurrentTimecode 설명서)
+local PLAYHEAD_PAGES = { cut = true, edit = true, color = true, fairlight = true, deliver = true }
 
 local unpack = unpack or table.unpack
 
@@ -316,6 +344,10 @@ function AIH.call(calls, name, obj, method, ...)
 	if obj == nil then
 		return nil, false
 	end
+	if AIH.DENY[method] then
+		record(calls, name, "err:denied") -- 부르지 않는다
+		return nil, false
+	end
 	local okm, fn = pcall(function() return obj[method] end)
 	if not okm or fn == nil then
 		record(calls, name, "missing")
@@ -473,6 +505,227 @@ local function clip_path(calls, mpi)
 	return nil
 end
 
+-- 목록 인자: 1..n 목록이고 max개 이하일 때만
+local function list_arg(v, name, max)
+	if type(v) ~= "table" then
+		fail("bad_args", name)
+	end
+	local out, count = seq(v), 0
+	for _ in pairs(v) do
+		count = count + 1
+	end
+	if count ~= #out or #out > max then
+		fail("bad_args", name)
+	end
+	return out
+end
+AIH.list_arg = list_arg
+
+-- true/false가 아니면 JSON null
+local function bool_or_null(v)
+	if type(v) == "boolean" then
+		return v
+	end
+	return NULL
+end
+
+-- 바꾸는 함수의 결과: 오류면 "error", 아니면 true/false (그 밖의 답은 null)
+local function call_result(v, ok)
+	if not ok then
+		return "error"
+	end
+	return bool_or_null(v)
+end
+
+-- 우리가 붙인 표시 꼬리표인지: "aih:"로 시작하거나 1차 시험판이 쓴 "aih_test"
+local function our_custom(c)
+	return type(c) == "string" and (string.sub(c, 1, 4) == "aih:" or c == "aih_test")
+end
+AIH.our_custom = our_custom
+
+local function is_probe_name(name)
+	return type(name) == "string" and string.sub(name, 1, #AIH.PROBE_PREFIX) == AIH.PROBE_PREFIX
+end
+AIH.is_probe_name = is_probe_name
+
+-- 지금 리졸브 화면 (edit, fairlight ...). 알 수 없으면 nil
+local function current_page(calls)
+	local p = call(calls, "Resolve.GetCurrentPage", st.R, "GetCurrentPage")
+	if type(p) == "string" and p ~= "" then
+		return p
+	end
+	return nil
+end
+
+local function uid_of(calls, name, obj)
+	local u = call(calls, name, obj, "GetUniqueId")
+	if type(u) == "string" and u ~= "" then
+		return u
+	end
+	return nil
+end
+
+-- 타임라인의 번호(uid)와 이름
+local function timeline_ident(calls, tl)
+	local uid = uid_of(calls, "Timeline.GetUniqueId", tl)
+	local name = call(calls, "Timeline.GetName", tl, "GetName")
+	if type(name) ~= "string" then
+		name = nil
+	end
+	return uid, name
+end
+
+-- 번호가 둘 다 있으면 번호로, 아니면 이름으로 같은 타임라인인지 본다
+local function same_timeline(uid, name, want_uid, want_name)
+	if uid ~= nil and want_uid ~= nil then
+		return uid == want_uid
+	end
+	return name ~= nil and want_name ~= nil and name == want_name
+end
+
+-- 프로젝트에서 번호(또는 이름)가 맞는 타임라인을 찾는다. 없으면 nil
+local function find_timeline(calls, project, want_uid, want_name)
+	local n = call(calls, "Project.GetTimelineCount", project, "GetTimelineCount")
+	if type(n) ~= "number" then
+		return nil
+	end
+	for i = 1, n do
+		local tl = call(calls, "Project.GetTimelineByIndex", project, "GetTimelineByIndex", i)
+		if tl ~= nil then
+			local uid, name = timeline_ident(calls, tl)
+			if same_timeline(uid, name, want_uid, want_name) then
+				return tl
+			end
+		end
+	end
+	return nil
+end
+
+-- 프레임 속도와 드롭 프레임: 타임라인 설정 → 프로젝트 설정 순서로, 리졸브가 주는 글자 그대로
+local function timeline_rate(calls, project, tl, res)
+	local fps, how = setting(calls, tl, "Timeline", "timelineFrameRate")
+	local source = fps ~= nil and ("timeline_" .. how) or nil
+	if fps == nil and project ~= nil then
+		fps, how = setting(calls, project, "Project", "timelineFrameRate")
+		source = fps ~= nil and ("project_" .. how) or nil
+	end
+	res.fps = fps ~= nil and tostring(fps) or NULL
+	res.fps_source = source or NULL
+
+	local df, df_how = setting(calls, tl, "Timeline", "timelineDropFrameTimecode")
+	local df_source = df ~= nil and ("timeline_" .. df_how) or nil
+	if df == nil and project ~= nil then
+		df, df_how = setting(calls, project, "Project", "timelineDropFrameTimecode")
+		df_source = df ~= nil and ("project_" .. df_how) or nil
+	end
+	res.drop_frame = bool_or_null(as_bool(df))
+	res.drop_frame_raw = df ~= nil and tostring(df) or NULL
+	res.drop_frame_source = df_source or NULL
+	return res
+end
+
+-- GetMarkInOut 답을 숫자만 남긴 표로. 아무것도 없으면 null
+local function in_out_table(v)
+	if type(v) ~= "table" then
+		return NULL
+	end
+	local out, any = {}, false
+	for _, k in ipairs({ "video", "audio" }) do
+		local x = v[k]
+		if type(x) == "table" then
+			local i, o = x["in"], x.out
+			if type(i) == "number" or type(o) == "number" then
+				out[k] = { ["in"] = type(i) == "number" and i or NULL, out = type(o) == "number" and o or NULL }
+				any = true
+			end
+		end
+	end
+	if not any then
+		return NULL
+	end
+	return out
+end
+
+---------------------------------------------------------------------------
+-- 타임라인 지문: 클립·트랙·(우리 것이 아닌) 표시를 줄 글로 적어 정렬한 뒤 두 가지 해시로 줄인다.
+-- 점검용 복사본을 지우기 전에 "점검 때와 같은지" 맞춰 보는 데 쓴다. 읽지 못하면 nil (그러면 지우지 않는다)
+---------------------------------------------------------------------------
+
+local TWO32 = 4294967296
+
+local function hash_rows(rows)
+	local h1, h2 = 17, 5381
+	for r = 1, #rows do
+		local s = rows[r] .. "\n"
+		for i = 1, #s do
+			local b = string.byte(s, i)
+			h1 = (h1 * 31 + b) % TWO32
+			h2 = (h2 * 131 + b + 7) % TWO32
+		end
+	end
+	return int_text(#rows) .. ":" .. int_text(h1) .. ":" .. int_text(h2)
+end
+AIH.hash_rows = hash_rows
+
+local function text_of(v)
+	if v == nil or v == NULL then
+		return ""
+	end
+	if type(v) == "number" then
+		return json_number(v)
+	end
+	return tostring(v)
+end
+
+function AIH.fingerprint(tl)
+	if tl == nil then
+		return nil
+	end
+	local calls = {} -- 지문 읽기는 답의 calls에 섞지 않는다
+	local rows = {}
+	for _, kind in ipairs({ "video", "audio" }) do
+		local n = call(calls, "Timeline.GetTrackCount", tl, "GetTrackCount", kind)
+		if type(n) ~= "number" then
+			return nil
+		end
+		for track = 1, n do
+			local raw, ok = call(calls, "Timeline.GetItemListInTrack", tl, "GetItemListInTrack", kind, track)
+			if not ok or type(raw) ~= "table" then
+				return nil
+			end
+			local items = seq(raw)
+			local en = call(calls, "Timeline.GetIsTrackEnabled", tl, "GetIsTrackEnabled", kind, track)
+			rows[#rows + 1] = "T|" .. kind .. "|" .. track .. "|" .. #items .. "|" .. text_of(en)
+			for i = 1, #items do
+				local it = items[i]
+				local mpi = call(calls, "TimelineItem.GetMediaPoolItem", it, "GetMediaPoolItem")
+				rows[#rows + 1] = table.concat({
+					"I", kind, tostring(track),
+					text_of(uid_of(calls, "TimelineItem.GetUniqueId", it)),
+					text_of(call(calls, "TimelineItem.GetStart", it, "GetStart")),
+					text_of(call(calls, "TimelineItem.GetEnd", it, "GetEnd")),
+					text_of(call(calls, "TimelineItem.GetLeftOffset", it, "GetLeftOffset")),
+					text_of(mpi ~= nil and clip_path(calls, mpi) or nil),
+					text_of(call(calls, "TimelineItem.GetClipEnabled", it, "GetClipEnabled")),
+				}, "|")
+			end
+		end
+	end
+	local markers = call(calls, "Timeline.GetMarkers", tl, "GetMarkers")
+	if type(markers) == "table" then
+		for f, m in pairs(markers) do
+			if type(m) == "table" and not our_custom(m.customData) then
+				rows[#rows + 1] = "M|" .. text_of(f) .. "|" .. text_of(m.color) .. "|" .. text_of(m.duration)
+					.. "|" .. text_of(m.name) .. "|" .. text_of(m.customData)
+			end
+		end
+	else
+		rows[#rows + 1] = "M|unreadable"
+	end
+	table.sort(rows)
+	return hash_rows(rows)
+end
+
 ---------------------------------------------------------------------------
 -- 할 일 (화이트리스트)
 ---------------------------------------------------------------------------
@@ -497,6 +750,15 @@ ops.ping = function(a, calls)
 	end
 	res.product = nz(call(calls, "Resolve.GetProductName", st.R, "GetProductName"))
 	res.resolve_version = nz(call(calls, "Resolve.GetVersionString", st.R, "GetVersionString"))
+	res.product_version = res.resolve_version
+	res.page = nz(current_page(calls))
+	-- 이 스크립트가 할 수 있는 일 목록: 창이 예전 스크립트인지 알아보는 데 쓴다
+	local names = {}
+	for name in pairs(OPS_ALLOWED) do
+		names[#names + 1] = name
+	end
+	table.sort(names)
+	res.ops = array(names)
 	res.profile_path = nz(call(calls, "Fusion.MapPath", st.F, "MapPath", "Profile:"))
 	-- 저장하지 않은 설정을 다시 읽을 수 있는지 (두 번 눌렀을 때 먼저 켠 쪽이 멈추는 데 필요)
 	res.owner_readback = call(calls, "Fusion.GetPrefs", st.F, "GetPrefs", KEY_OWNER) == st.owner
@@ -538,30 +800,7 @@ ops.state = function(a, calls)
 	res.start_tc = nz(call(calls, "Timeline.GetStartTimecode", tl, "GetStartTimecode"))
 	res.current_tc = nz(call(calls, "Timeline.GetCurrentTimecode", tl, "GetCurrentTimecode"))
 
-	-- 프레임 속도: 타임라인 설정 → 프로젝트 설정 순서로, 리졸브가 주는 글자 그대로
-	local fps, how = setting(calls, tl, "Timeline", "timelineFrameRate")
-	local source = fps ~= nil and ("timeline_" .. how) or nil
-	if fps == nil then
-		fps, how = setting(calls, project, "Project", "timelineFrameRate")
-		source = fps ~= nil and ("project_" .. how) or nil
-	end
-	res.fps = fps ~= nil and tostring(fps) or NULL
-	res.fps_source = source or NULL
-
-	local df, df_how = setting(calls, tl, "Timeline", "timelineDropFrameTimecode")
-	local df_source = df ~= nil and ("timeline_" .. df_how) or nil
-	if df == nil then
-		df, df_how = setting(calls, project, "Project", "timelineDropFrameTimecode")
-		df_source = df ~= nil and ("project_" .. df_how) or nil
-	end
-	local drop = as_bool(df)
-	if drop == nil then
-		res.drop_frame = NULL
-	else
-		res.drop_frame = drop
-	end
-	res.drop_frame_raw = df ~= nil and tostring(df) or NULL
-	res.drop_frame_source = df_source or NULL
+	timeline_rate(calls, project, tl, res)
 
 	local counts = {}
 	for _, kind in ipairs({ "video", "audio", "subtitle" }) do
@@ -595,6 +834,331 @@ ops.state = function(a, calls)
 	end
 	res.subtitle_items = subs
 	res.truncated = res.truncated or false
+	return res
+end
+
+-- 트랙 목록: 이름, 켜짐, 잠김, (오디오) 종류, 클립 수
+local function track_list(calls, tl, kind)
+	local list = array()
+	local n = call(calls, "Timeline.GetTrackCount", tl, "GetTrackCount", kind)
+	if type(n) ~= "number" then
+		return NULL
+	end
+	for i = 1, n do
+		local t = { index = i }
+		t.name = nz(call(calls, "Timeline.GetTrackName", tl, "GetTrackName", kind, i))
+		t.enabled = bool_or_null(call(calls, "Timeline.GetIsTrackEnabled", tl, "GetIsTrackEnabled", kind, i))
+		t.locked = bool_or_null(call(calls, "Timeline.GetIsTrackLocked", tl, "GetIsTrackLocked", kind, i))
+		if kind == "audio" then
+			t.subtype = nz(call(calls, "Timeline.GetTrackSubType", tl, "GetTrackSubType", kind, i))
+		end
+		local raw, ok = call(calls, "Timeline.GetItemListInTrack", tl, "GetItemListInTrack", kind, i)
+		t.count = (ok and type(raw) == "table") and #seq(raw) or NULL
+		list[#list + 1] = t
+	end
+	return list
+end
+
+local function probe_record()
+	local p = st.probe
+	if p == nil then
+		return NULL
+	end
+	return {
+		original_uid = nz(p.original_uid), original_name = nz(p.original_name),
+		copy_uid = nz(p.copy_uid), copy_name = nz(p.copy_name),
+	}
+end
+
+-- 읽기만: 프로젝트·타임라인 이름과 번호, 길이, 프레임 속도, 화면, 트랙마다 이름·켜짐·잠김·클립 수
+ops.timeline_info = function(a, calls)
+	local res = { calls = calls, page = nz(current_page(calls)) }
+	local project = project_of(calls)
+	if project == nil then
+		res.project, res.timeline = NULL, NULL
+		return res
+	end
+	res.project = call(calls, "Project.GetName", project, "GetName") or ""
+	res.project_uid = nz(uid_of(calls, "Project.GetUniqueId", project))
+	res.timeline_count = nz(call(calls, "Project.GetTimelineCount", project, "GetTimelineCount"))
+	local tl = call(calls, "Project.GetCurrentTimeline", project, "GetCurrentTimeline")
+	if tl == nil then
+		res.timeline = NULL
+		return res
+	end
+	local uid, name = timeline_ident(calls, tl)
+	res.timeline = name or ""
+	res.timeline_uid = nz(uid)
+	res.start_frame = nz(call(calls, "Timeline.GetStartFrame", tl, "GetStartFrame"))
+	res.end_frame = nz(call(calls, "Timeline.GetEndFrame", tl, "GetEndFrame"))
+	res.start_tc = nz(call(calls, "Timeline.GetStartTimecode", tl, "GetStartTimecode"))
+	res.current_tc = nz(call(calls, "Timeline.GetCurrentTimecode", tl, "GetCurrentTimecode"))
+	timeline_rate(calls, project, tl, res)
+	res.tracks = {
+		video = track_list(calls, tl, "video"),
+		audio = track_list(calls, tl, "audio"),
+		subtitle = track_list(calls, tl, "subtitle"),
+	}
+	res.is_probe_copy = is_probe_name(name)
+	res.probe = probe_record()
+	return res
+end
+
+-- 클립 한 줄 (timeline_items). end는 GetEnd 그대로 (끝 프레임은 들어가지 않는 값)
+local function item_row(calls, item, track, kind)
+	local info = { track = track, kind = kind }
+	info.uid = nz(uid_of(calls, "TimelineItem.GetUniqueId", item))
+	info.name = nz(call(calls, "TimelineItem.GetName", item, "GetName"))
+	info.start = nz(call(calls, "TimelineItem.GetStart", item, "GetStart"))
+	info["end"] = nz(call(calls, "TimelineItem.GetEnd", item, "GetEnd"))
+	info.duration = nz(call(calls, "TimelineItem.GetDuration", item, "GetDuration"))
+	info.left_offset = nz(call(calls, "TimelineItem.GetLeftOffset", item, "GetLeftOffset"))
+	info.source_start = nz(call(calls, "TimelineItem.GetSourceStartFrame", item, "GetSourceStartFrame"))
+	info.source_end = nz(call(calls, "TimelineItem.GetSourceEndFrame", item, "GetSourceEndFrame"))
+	info.enabled = bool_or_null(call(calls, "TimelineItem.GetClipEnabled", item, "GetClipEnabled"))
+	info.path, info.clip_fps, info.media_uid = NULL, NULL, NULL
+	local mpi = call(calls, "TimelineItem.GetMediaPoolItem", item, "GetMediaPoolItem")
+	if mpi ~= nil then
+		info.path = nz(clip_path(calls, mpi))
+		info.clip_fps = nz(call(calls, "MediaPoolItem.GetClipProperty.FPS", mpi, "GetClipProperty", "FPS"))
+		info.media_uid = nz(uid_of(calls, "MediaPoolItem.GetUniqueId", mpi))
+	end
+	local linked = call(calls, "TimelineItem.GetLinkedItems", item, "GetLinkedItems")
+	if type(linked) == "table" then
+		local list, uids = seq(linked), array()
+		for i = 1, math.min(#list, 8) do
+			uids[#uids + 1] = nz(uid_of(calls, "TimelineItem.GetUniqueId.linked", list[i]))
+		end
+		info.linked_uids = uids
+	else
+		info.linked_uids = NULL
+	end
+	return info
+end
+
+-- 읽기만: 클립 목록을 나눠서 (한 번에 limit개, JSON PAGE_BYTES 이하). 다음 쪽이 있으면 next = 다음 offset
+ops.timeline_items = function(a, calls)
+	local kind = str_arg(a.kind, "kind", "audio")
+	if kind ~= "audio" and kind ~= "video" then
+		fail("bad_args", "kind")
+	end
+	local from = a.track_from == nil and 1 or int_arg(a.track_from, "track_from", 1)
+	local to = nil
+	if a.track_to ~= nil then
+		to = int_arg(a.track_to, "track_to", 1)
+	end
+	local offset = a.offset == nil and 0 or int_arg(a.offset, "offset", 0)
+	local limit = a.limit == nil and AIH.PAGE_ITEMS or int_arg(a.limit, "limit", 1)
+	if limit > AIH.PAGE_ITEMS then
+		fail("bad_args", "limit")
+	end
+	local _, tl = need_timeline(calls)
+	local n = call(calls, "Timeline.GetTrackCount", tl, "GetTrackCount", kind)
+	if type(n) ~= "number" then
+		fail("track_count_failed", "Timeline.GetTrackCount")
+	end
+	if to == nil or to > n then
+		to = n
+	end
+	local items, bytes, index, nxt = array(), 0, 0, NULL
+	local track = from
+	while track <= to and nxt == NULL do
+		local list = seq(call(calls, "Timeline.GetItemListInTrack", tl, "GetItemListInTrack", kind, track))
+		for i = 1, #list do
+			if index >= offset then
+				if #items >= limit then
+					nxt = index
+					break
+				end
+				local row = item_row(calls, list[i], track, kind)
+				local size = #AIH.json(row) + 1
+				if #items > 0 and bytes + size > AIH.PAGE_BYTES then
+					nxt = index
+					break
+				end
+				items[#items + 1] = row
+				bytes = bytes + size
+			end
+			index = index + 1
+		end
+		track = track + 1
+	end
+	return {
+		kind = kind, items = items, offset = offset, ["next"] = nxt,
+		track_from = from, track_to = to, track_count = n, calls = calls,
+	}
+end
+
+local function readable_tc(calls, tl)
+	return nz(call(calls, "Timeline.GetCurrentTimecode", tl, "GetCurrentTimecode"))
+end
+
+-- 읽기만: 지금 화면, 재생 위치, In/Out, 고른 클립 (없는 함수는 null과 calls 기록)
+ops.scope = function(a, calls)
+	local res = { calls = calls, page = nz(current_page(calls)) }
+	local project, tl = need_timeline(calls)
+	local uid, name = timeline_ident(calls, tl)
+	res.timeline, res.timeline_uid = nz(name), nz(uid)
+	res.playhead_tc = readable_tc(calls, tl)
+	res.start_tc = nz(call(calls, "Timeline.GetStartTimecode", tl, "GetStartTimecode"))
+	res.start_frame = nz(call(calls, "Timeline.GetStartFrame", tl, "GetStartFrame"))
+	timeline_rate(calls, project, tl, res)
+	res.in_out = in_out_table(call(calls, "Timeline.GetMarkInOut", tl, "GetMarkInOut"))
+	local sel, ok = call(calls, "Timeline.GetSelectedClips", tl, "GetSelectedClips")
+	if ok and type(sel) == "table" then
+		local list, uids = seq(sel), array()
+		for i = 1, math.min(#list, 50) do
+			uids[#uids + 1] = nz(uid_of(calls, "TimelineItem.GetUniqueId", list[i]))
+		end
+		res.selected_uids, res.selected_count = uids, #list
+	else
+		res.selected_uids, res.selected_count = NULL, NULL
+	end
+	return res
+end
+
+-- 기능 점검(읽기): 이 판에 있는 함수 이름. 이름으로 찾아보기만 하고 부르지 않는다
+local PROBE_NAMES = {
+	{ "Resolve", { "GetCurrentPage", "OpenPage", "GetProductName", "GetVersionString",
+		"GetCurrentProject", "GetCurrentTimeline", "GetMediaPool", "GetFairlightPresets" } },
+	{ "Project", { "GetUniqueId", "GetTimelineCount", "GetTimelineByIndex", "SetCurrentTimeline",
+		"GetCurrentTimeline", "InsertAudioToCurrentTrackAtPlayhead", "GetAudioRenderFormats" } },
+	{ "MediaPool", { "GetUniqueId", "ImportMedia", "AppendToTimeline", "DeleteClips", "DeleteTimelines",
+		"CreateEmptyTimeline", "ImportTimelineFromFile", "GetSelectedClips" } },
+	{ "Timeline", { "GetUniqueId", "DuplicateTimeline", "GetMarkInOut", "SetMarkInOut", "GetSelectedClips",
+		"SetCurrentTimecode", "GetCurrentTimecode", "AddMarker", "DeleteMarkerAtFrame",
+		"DeleteMarkerByCustomData", "GetMarkerByCustomData", "UpdateMarkerCustomData",
+		"SetTrackEnable", "GetIsTrackEnabled", "SetTrackLock", "GetIsTrackLocked", "GetTrackSubType",
+		"DeleteClips", "SetClipsLinked", "Export", "ImportIntoTimeline", "GetOutputBlanking",
+		"GetNormalizeAudioModes", "NormalizeAudioLevel", "AutoAlignClips" } },
+	{ "TimelineItem", { "GetUniqueId", "GetClipEnabled", "SetClipEnabled", "GetLinkedItems",
+		"GetSourceStartFrame", "GetSourceEndFrame", "GetSourceAudioChannelMapping",
+		"SetSourceAudioChannelMapping", "GetProperty", "SetProperty", "GetTrackTypeAndIndex",
+		"GetFades", "SetFades", "GetSpeed", "GetType", "AddTransition" } },
+	{ "MediaPoolItem", { "GetUniqueId", "GetAudioMapping", "SetAudioMapping", "ReplaceClip",
+		"GetClipProperty", "LinkProxyMedia" } },
+}
+AIH.PROBE_NAMES = PROBE_NAMES
+-- 있을 리 없는 이름. 이것이 "있다"고 나오면 이름 찾기 결과를 믿을 수 없다
+local CONTROL_NAMES = { "AIH_NoSuchMethod", "Razor" }
+
+local function has_name(obj, name)
+	if obj == nil or AIH.DENY[name] then
+		return nil
+	end
+	local ok, v = pcall(function() return obj[name] end)
+	return ok and v ~= nil
+end
+
+local function first_item(calls, tl, kind)
+	local n = call(calls, "Timeline.GetTrackCount", tl, "GetTrackCount", kind)
+	if type(n) ~= "number" then
+		return nil
+	end
+	for track = 1, n do
+		local items = seq(call(calls, "Timeline.GetItemListInTrack", tl, "GetItemListInTrack", kind, track))
+		if items[1] ~= nil then
+			return items[1]
+		end
+	end
+	return nil
+end
+
+local function props_keys(calls, item, name)
+	local all = call(calls, name, item, "GetProperty")
+	if type(all) ~= "table" then
+		return NULL
+	end
+	local keys = {}
+	for k in pairs(all) do
+		keys[#keys + 1] = tostring(k)
+	end
+	table.sort(keys)
+	while #keys > 120 do
+		table.remove(keys)
+	end
+	return array(keys)
+end
+
+local function clipped(s)
+	if type(s) ~= "string" then
+		return NULL, false
+	end
+	if #s > AIH.MAX_MAPPING then
+		return string.sub(s, 1, AIH.MAX_MAPPING), true
+	end
+	return s, false
+end
+
+ops.probe_read = function(a, calls)
+	local res = { calls = calls, page = nz(current_page(calls)) }
+	local project = project_of(calls)
+	local tl = project ~= nil and call(calls, "Project.GetCurrentTimeline", project, "GetCurrentTimeline") or nil
+	local pool = project ~= nil and call(calls, "Project.GetMediaPool", project, "GetMediaPool") or nil
+	local vitem = tl ~= nil and first_item(calls, tl, "video") or nil
+	local aitem = tl ~= nil and first_item(calls, tl, "audio") or nil
+	-- 오디오 트랙마다 첫 클립 (A1~A4: OBS 녹화의 소리 1~4가 어디로 갔는지 보려고)
+	local aitems = {}
+	local na = tl ~= nil and call(calls, "Timeline.GetTrackCount", tl, "GetTrackCount", "audio") or nil
+	if type(na) == "number" then
+		for track = 1, na do
+			if #aitems >= 4 then
+				break
+			end
+			local first = seq(call(calls, "Timeline.GetItemListInTrack", tl, "GetItemListInTrack", "audio", track))[1]
+			if first ~= nil then
+				aitems[#aitems + 1] = { item = first, track = track }
+			end
+		end
+	end
+	local sample = aitem or vitem
+	local mpi = sample ~= nil and call(calls, "TimelineItem.GetMediaPoolItem", sample, "GetMediaPoolItem") or nil
+	local objects = {
+		Resolve = st.R, Project = project, MediaPool = pool, Timeline = tl, TimelineItem = sample, MediaPoolItem = mpi,
+	}
+	local exists, reliable = {}, true
+	for _, group in ipairs(PROBE_NAMES) do
+		local cls, names = group[1], group[2]
+		local obj = objects[cls]
+		for _, name in ipairs(names) do
+			exists[cls .. "." .. name] = nz(has_name(obj, name))
+		end
+		for _, name in ipairs(CONTROL_NAMES) do
+			if has_name(obj, name) then
+				reliable = false
+				exists[cls .. "." .. name] = true
+			end
+		end
+	end
+	res.exists = exists
+	res.existence_reliable = reliable
+	res.project_uid = project ~= nil and nz(uid_of(calls, "Project.GetUniqueId", project)) or NULL
+	res.timeline_uid = tl ~= nil and nz(uid_of(calls, "Timeline.GetUniqueId", tl)) or NULL
+	res.props_keys = {
+		video = vitem ~= nil and props_keys(calls, vitem, "TimelineItem.GetProperty.video") or NULL,
+		audio = aitem ~= nil and props_keys(calls, aitem, "TimelineItem.GetProperty.audio") or NULL,
+	}
+	local mappings = array()
+	for i = 1, #aitems do
+		local raw = call(calls, "TimelineItem.GetSourceAudioChannelMapping", aitems[i].item,
+			"GetSourceAudioChannelMapping")
+		local text, cut = clipped(raw)
+		mappings[#mappings + 1] = { track = aitems[i].track, mapping = text, truncated = cut }
+	end
+	res.source_audio_mapping = mappings
+	if mpi ~= nil then
+		local text, cut = clipped(call(calls, "MediaPoolItem.GetAudioMapping", mpi, "GetAudioMapping"))
+		res.clip_audio_mapping = { mapping = text, truncated = cut }
+	else
+		res.clip_audio_mapping = NULL
+	end
+	if tl ~= nil then
+		res.in_out = in_out_table(call(calls, "Timeline.GetMarkInOut", tl, "GetMarkInOut"))
+		local sel, ok = call(calls, "Timeline.GetSelectedClips", tl, "GetSelectedClips")
+		res.selected_count = (ok and type(sel) == "table") and #seq(sel) or NULL
+	else
+		res.in_out, res.selected_count = NULL, NULL
+	end
 	return res
 end
 
@@ -669,7 +1233,9 @@ end
 
 ops.delete_markers = function(a, calls)
 	local custom = str_arg(a.custom, "custom")
-	if custom == "" then
+	-- 우리 꼬리표("aih:..." 또는 1차 시험판의 "aih_test")가 아니면 리졸브를 부르기 전에 거절한다.
+	-- 다른 프로그램(예: 자막 도구)이 붙인 표시를 지우는 일이 없게.
+	if not our_custom(custom) then
 		fail("bad_args", "custom")
 	end
 	local _, tl = need_timeline(calls)
@@ -705,8 +1271,8 @@ ops.delete_markers = function(a, calls)
 	return { deleted = count > 0, deleted_count = count, remaining = remaining, calls = calls }
 end
 
--- 미디어 풀 맨 위 폴더 아래의 "AI 도우미" 저장소를 찾고, 없으면 만든다
-local function find_bin(calls, pool)
+-- 미디어 풀 맨 위 폴더 아래의 "AI 도우미" 저장소를 찾고, 없으면 만든다 (no_create면 nil)
+local function find_bin(calls, pool, no_create)
 	local root = call(calls, "MediaPool.GetRootFolder", pool, "GetRootFolder")
 	if root == nil then
 		fail("no_root_folder", "MediaPool.GetRootFolder")
@@ -716,6 +1282,9 @@ local function find_bin(calls, pool)
 		if call(calls, "Folder.GetName", subs[i], "GetName") == AIH.BIN_NAME then
 			return subs[i]
 		end
+	end
+	if no_create then
+		return nil
 	end
 	local bin = call(calls, "MediaPool.AddSubFolder", pool, "AddSubFolder", root, AIH.BIN_NAME)
 	if bin == nil then
@@ -809,8 +1378,9 @@ local function place_audio(a, calls, pool, tl, path, track_name, record_frame, f
 		track_named = named == true
 	end
 
+	-- endFrame은 들어가지 않는 끝이다 (리졸브 21.1에서 frames - 1을 주면 한 프레임 모자라게 들어갔다)
 	local info = {
-		mediaPoolItem = item, startFrame = 0, endFrame = frames - 1,
+		mediaPoolItem = item, startFrame = 0, endFrame = frames,
 		mediaType = 2, trackIndex = index, recordFrame = record_frame,
 	}
 	local raw = call(calls, "MediaPool.AppendToTimeline", pool, "AppendToTimeline", { info })
@@ -837,9 +1407,15 @@ local function place_audio(a, calls, pool, tl, path, track_name, record_frame, f
 		append_raw_type = type(raw), append_retry = retry,
 		clip = clip_info(calls, item), calls = calls,
 	}
+	res.requested_frames = frames
+	res.placed_frames, res.length_ok = NULL, NULL
 	if placed[1] ~= nil then
 		res.item_start = call(calls, "TimelineItem.GetStart", placed[1], "GetStart")
 		res.item_end = call(calls, "TimelineItem.GetEnd", placed[1], "GetEnd")
+		if type(res.item_start) == "number" and type(res.item_end) == "number" then
+			res.placed_frames = res.item_end - res.item_start
+			res.length_ok = res.placed_frames == frames
+		end
 		-- trackIndex대로 들어갔는지 확인용 (없는 판이면 missing)
 		res.item_track = call(calls, "TimelineItem.GetTrackTypeAndIndex", placed[1], "GetTrackTypeAndIndex")
 	end
@@ -877,9 +1453,15 @@ ops.remove_audio = function(a, calls)
 	if track_name == "" then
 		fail("bad_args", "track_name")
 	end
+	-- 클립 지우기(DeleteClips)는 편집(Edit) 화면 밖에서 실패한다는 보고가 있다: 편집 화면에서만 한다
+	local page = current_page(calls)
+	if page ~= nil and page ~= "edit" then
+		fail("need_edit_page", "Resolve.GetCurrentPage")
+	end
 	local _, tl = need_timeline(calls)
 	local count = call(calls, "Timeline.GetTrackCount", tl, "GetTrackCount", "audio")
 	local removed, skipped = 0, 0
+	local clip_results, track_results = array(), array()
 	if type(count) == "number" then
 		-- 뒤 트랙부터 지워야 앞 트랙 번호가 바뀌지 않는다
 		for index = count, 1, -1 do
@@ -898,9 +1480,12 @@ ops.remove_audio = function(a, calls)
 				end
 				if ours then
 					if #items > 0 then
-						call(calls, "Timeline.DeleteClips", tl, "DeleteClips", items)
+						local done, okd = call(calls, "Timeline.DeleteClips", tl, "DeleteClips", items)
+						clip_results[#clip_results + 1] = { track = index, count = #items, result = call_result(done, okd) }
 					end
-					if call(calls, "Timeline.DeleteTrack", tl, "DeleteTrack", "audio", index) then
+					local gone, okt = call(calls, "Timeline.DeleteTrack", tl, "DeleteTrack", "audio", index)
+					track_results[#track_results + 1] = { track = index, result = call_result(gone, okt) }
+					if gone then
 						removed = removed + 1
 					else
 						skipped = skipped + 1
@@ -911,7 +1496,566 @@ ops.remove_audio = function(a, calls)
 			end
 		end
 	end
-	return { removed_tracks = removed, skipped = skipped, calls = calls }
+	return {
+		removed_tracks = removed, skipped = skipped, page = nz(page),
+		delete_clips = clip_results, delete_track = track_results, calls = calls,
+	}
+end
+
+---------------------------------------------------------------------------
+-- 기능 점검 (probe_copy): 지금 타임라인의 복사본을 잠깐 만들어 그 복사본에서만 시험하고 지운다.
+-- C1 복사본 만들기 · C2 트랙 끄기 · C3 클립 끄기 · C4 구간 표시 · C5 재생 위치 · C6 다시 넣기
+-- C7 새 소리 파일 가져오기 · C8 정리. C2~C7은 지금 타임라인이 그 복사본일 때만 한다.
+-- 단계마다 바꾼 것을 되돌린 뒤 복사본의 지문을 돌려준다. C8은 지문이 맞을 때만 복사본을 지운다.
+---------------------------------------------------------------------------
+
+-- 지금 타임라인이 C1이 만든 복사본인지. 아니면 오류로 멈춘다 (사용자 타임라인은 건드리지 않는다)
+local function probe_copy_current(calls)
+	local p = st.probe
+	if p == nil or (p.copy_uid == nil and p.copy_name == nil) then
+		fail("no_probe", "probe_copy")
+	end
+	local project, tl = need_timeline(calls)
+	local uid, name = timeline_ident(calls, tl)
+	if not same_timeline(uid, name, p.copy_uid, p.copy_name) or (name ~= nil and not is_probe_name(name)) then
+		fail("not_probe_copy", "probe_copy")
+	end
+	return project, tl
+end
+
+local function stage_result(stage, ok, detail, tl)
+	return { stage = stage, ok = ok and true or false, detail = detail, fingerprint = nz(AIH.fingerprint(tl)) }
+end
+
+local probe_stages = {}
+
+probe_stages.C1 = function(a, calls)
+	local suffix = str_arg(a.suffix, "suffix")
+	if not string.match(suffix, "^%d%d%d%d%d%d$") then
+		fail("bad_args", "suffix")
+	end
+	local project, tl = need_timeline(calls)
+	local uid, name = timeline_ident(calls, tl)
+	if is_probe_name(name) then
+		fail("already_probe_copy", "probe_copy") -- 복사본의 복사본은 만들지 않는다
+	end
+	local copy_name = AIH.PROBE_PREFIX .. " " .. suffix
+	if find_timeline(calls, project, nil, copy_name) ~= nil then
+		fail("name_taken", "probe_copy")
+	end
+	-- 지난 점검의 복사본이 남아 있으면 새로 만들지 않는다 (그 기록을 잃지 않게)
+	local old = st.probe
+	if old ~= nil and (old.copy_uid ~= nil or old.copy_name ~= nil)
+		and find_timeline(calls, project, old.copy_uid, old.copy_name) ~= nil then
+		fail("leftover_copy", "probe_copy")
+	end
+	st.probe = {
+		original_uid = uid, original_name = name,
+		page = current_page(calls),
+		tc = call(calls, "Timeline.GetCurrentTimecode", tl, "GetCurrentTimecode"),
+	}
+	local copy = call(calls, "Timeline.DuplicateTimeline", tl, "DuplicateTimeline", copy_name)
+	if copy == nil then
+		fail("duplicate_failed", "Timeline.DuplicateTimeline")
+	end
+	local cuid, cname = timeline_ident(calls, copy)
+	if cname ~= nil and not is_probe_name(cname) then
+		-- 이름을 무시한 판: 꼬리표가 붙은 이름으로 한 번 더 바꿔 본다
+		call(calls, "Timeline.SetName", copy, "SetName", copy_name)
+		cuid, cname = timeline_ident(calls, copy)
+	end
+	st.probe.copy_uid = cuid
+	st.probe.copy_name = cname or copy_name
+	call(calls, "Project.SetCurrentTimeline", project, "SetCurrentTimeline", copy)
+	local now_tl = call(calls, "Project.GetCurrentTimeline.after", project, "GetCurrentTimeline")
+	local nuid, nname = nil, nil
+	if now_tl ~= nil then
+		nuid, nname = timeline_ident(calls, now_tl)
+	end
+	local switched = same_timeline(nuid, nname, st.probe.copy_uid, st.probe.copy_name)
+	local detail = {
+		original_uid = nz(uid), original_name = nz(name), copy_uid = nz(cuid), copy_name = nz(st.probe.copy_name),
+		name_tagged = is_probe_name(st.probe.copy_name), switched = switched,
+		page = nz(st.probe.page), tc = nz(st.probe.tc),
+	}
+	return stage_result("C1", switched and is_probe_name(st.probe.copy_name), detail, copy)
+end
+
+probe_stages.C2 = function(a, calls)
+	local _, tl = probe_copy_current(calls)
+	local n = call(calls, "Timeline.GetTrackCount", tl, "GetTrackCount", "audio")
+	if type(n) ~= "number" or n < 1 then
+		return stage_result("C2", false, { reason = "no_audio_track" }, tl)
+	end
+	local before = call(calls, "Timeline.GetIsTrackEnabled", tl, "GetIsTrackEnabled", "audio", 1)
+	local set = call(calls, "Timeline.SetTrackEnable", tl, "SetTrackEnable", "audio", 1, false)
+	local mid = call(calls, "Timeline.GetIsTrackEnabled.after", tl, "GetIsTrackEnabled", "audio", 1)
+	call(calls, "Timeline.SetTrackEnable.restore", tl, "SetTrackEnable", "audio", 1, before ~= false)
+	local after = call(calls, "Timeline.GetIsTrackEnabled.restored", tl, "GetIsTrackEnabled", "audio", 1)
+	local detail = {
+		before = bool_or_null(before), set_result = bool_or_null(set), readback = bool_or_null(mid),
+		restored = bool_or_null(after),
+	}
+	return stage_result("C2", mid == false and after == (before ~= false), detail, tl)
+end
+
+local function enabled_states(calls, items, name)
+	local out = {}
+	for i = 1, #items do
+		out[i] = call(calls, name, items[i], "GetClipEnabled")
+	end
+	return out
+end
+
+probe_stages.C3 = function(a, calls)
+	local _, tl = probe_copy_current(calls)
+	local item = seq(call(calls, "Timeline.GetItemListInTrack", tl, "GetItemListInTrack", "audio", 1))[1]
+	if item == nil then
+		return stage_result("C3", false, { reason = "no_audio_item" }, tl)
+	end
+	local linked = seq(call(calls, "TimelineItem.GetLinkedItems", item, "GetLinkedItems"))
+	local before = call(calls, "TimelineItem.GetClipEnabled", item, "GetClipEnabled")
+	local linked_before = enabled_states(calls, linked, "TimelineItem.GetClipEnabled.linked")
+	local set = call(calls, "TimelineItem.SetClipEnabled", item, "SetClipEnabled", false)
+	local mid = call(calls, "TimelineItem.GetClipEnabled.after", item, "GetClipEnabled")
+	local linked_mid = enabled_states(calls, linked, "TimelineItem.GetClipEnabled.linked_after")
+	local linked_changed = false
+	for i = 1, #linked do
+		if linked_mid[i] ~= linked_before[i] then
+			linked_changed = true
+		end
+	end
+	call(calls, "TimelineItem.SetClipEnabled.restore", item, "SetClipEnabled", before ~= false)
+	if linked_changed then
+		for i = 1, #linked do
+			if linked_before[i] ~= nil then
+				call(calls, "TimelineItem.SetClipEnabled.restore_linked", linked[i], "SetClipEnabled", linked_before[i])
+			end
+		end
+	end
+	local after = call(calls, "TimelineItem.GetClipEnabled.restored", item, "GetClipEnabled")
+	local detail = {
+		before = bool_or_null(before), set_result = bool_or_null(set), readback = bool_or_null(mid),
+		restored = bool_or_null(after), linked_count = #linked, linked_changed = linked_changed,
+	}
+	return stage_result("C3", mid == false and after == (before ~= false), detail, tl)
+end
+
+probe_stages.C4 = function(a, calls)
+	local _, tl = probe_copy_current(calls)
+	local custom = "aih:probe:c4"
+	local markers = call(calls, "Timeline.GetMarkers", tl, "GetMarkers")
+	if type(markers) ~= "table" then
+		markers = {}
+	end
+	local frame = nil
+	for f = 60, 65 do
+		if markers[f] == nil then
+			frame = f
+			break
+		end
+	end
+	if frame == nil then
+		return stage_result("C4", false, { reason = "no_free_frame" }, tl)
+	end
+	local added = call(calls, "Timeline.AddMarker", tl, "AddMarker", frame, "Blue", "AI 도우미 점검", "", 120, custom)
+	local point_only = false
+	if not added then
+		added = call(calls, "Timeline.AddMarker.point", tl, "AddMarker", frame, "Blue", "AI 도우미 점검", "", 1, custom)
+		point_only = added and true or false
+	end
+	local now = call(calls, "Timeline.GetMarkers.after", tl, "GetMarkers")
+	local got = type(now) == "table" and now[frame] or nil
+	local readback = type(got) == "table" and got.duration or nil
+	local by_custom = call(calls, "Timeline.DeleteMarkerByCustomData", tl, "DeleteMarkerByCustomData", custom)
+	local by_frame = NULL
+	local left = marker_frames(calls, tl, custom, "Timeline.GetMarkers.check")
+	if left ~= nil and #left > 0 then
+		by_frame = call(calls, "Timeline.DeleteMarkerAtFrame", tl, "DeleteMarkerAtFrame", frame) and true or false
+		left = marker_frames(calls, tl, custom, "Timeline.GetMarkers.final")
+	end
+	local detail = {
+		frame = frame, added = added and true or false, point_only = point_only,
+		duration_readback = nz(readback), range_ok = readback == 120,
+		deleted_by_custom = bool_or_null(by_custom), deleted_by_frame = by_frame,
+		left = left ~= nil and #left or NULL,
+	}
+	return stage_result("C4", (added and left ~= nil and #left == 0) and true or false, detail, tl)
+end
+
+probe_stages.C5 = function(a, calls)
+	local tc = str_arg(a.tc, "tc")
+	if not string.match(tc, "^%d%d:%d%d:%d%d[:;]%d%d$") then
+		fail("bad_args", "tc")
+	end
+	local _, tl = probe_copy_current(calls)
+	local page = current_page(calls)
+	if page ~= nil and not PLAYHEAD_PAGES[page] then
+		return stage_result("C5", false, { reason = "page", page = page }, tl)
+	end
+	local before = call(calls, "Timeline.GetCurrentTimecode", tl, "GetCurrentTimecode")
+	local set = call(calls, "Timeline.SetCurrentTimecode", tl, "SetCurrentTimecode", tc)
+	local readback = call(calls, "Timeline.GetCurrentTimecode.after", tl, "GetCurrentTimecode")
+	if type(before) == "string" then
+		call(calls, "Timeline.SetCurrentTimecode.restore", tl, "SetCurrentTimecode", before)
+	end
+	local after = call(calls, "Timeline.GetCurrentTimecode.restored", tl, "GetCurrentTimecode")
+	local detail = {
+		requested = tc, before = nz(before), set_result = bool_or_null(set), readback = nz(readback),
+		restored = nz(after), page = nz(page),
+	}
+	return stage_result("C5", readback == tc, detail, tl)
+end
+
+-- 편집(Edit) 화면이 아니면 잠깐 바꾼다. 돌려주는 값: 원래 화면(바꿨을 때만)
+local function edit_page(calls)
+	local page = current_page(calls)
+	if page ~= nil and page ~= "edit" then
+		call(calls, "Resolve.OpenPage", st.R, "OpenPage", "edit")
+		return page
+	end
+	return nil
+end
+
+local function restore_page(calls, page)
+	if page ~= nil then
+		call(calls, "Resolve.OpenPage.restore", st.R, "OpenPage", page)
+	end
+end
+
+local function all_items(calls, tl)
+	local out = {}
+	for _, kind in ipairs({ "video", "audio" }) do
+		local n = call(calls, "Timeline.GetTrackCount", tl, "GetTrackCount", kind)
+		if type(n) == "number" then
+			for track = 1, n do
+				local items = seq(call(calls, "Timeline.GetItemListInTrack", tl, "GetItemListInTrack", kind, track))
+				for i = 1, #items do
+					out[#out + 1] = items[i]
+				end
+			end
+		end
+	end
+	return out
+end
+
+local function placed_row(calls, item)
+	local row = {}
+	local tt = call(calls, "TimelineItem.GetTrackTypeAndIndex", item, "GetTrackTypeAndIndex")
+	if type(tt) == "table" then
+		row.track_type, row.track = nz(tt[1]), nz(tt[2])
+	end
+	row.start = nz(call(calls, "TimelineItem.GetStart", item, "GetStart"))
+	row["end"] = nz(call(calls, "TimelineItem.GetEnd", item, "GetEnd"))
+	if type(row.start) == "number" and type(row["end"]) == "number" then
+		row.length = row["end"] - row.start
+	end
+	row.linked = #seq(call(calls, "TimelineItem.GetLinkedItems", item, "GetLinkedItems"))
+	return row
+end
+
+probe_stages.C6 = function(a, calls)
+	local project, tl = probe_copy_current(calls)
+	local pool = call(calls, "Project.GetMediaPool", project, "GetMediaPool")
+	if pool == nil then
+		fail("no_media_pool", "Project.GetMediaPool")
+	end
+	local start = call(calls, "Timeline.GetStartFrame", tl, "GetStartFrame")
+	local items = all_items(calls, tl)
+	local source = nil
+	for i = 1, #items do
+		source = call(calls, "TimelineItem.GetMediaPoolItem", items[i], "GetMediaPoolItem")
+		if source ~= nil then
+			break
+		end
+	end
+	if source == nil or type(start) ~= "number" then
+		return stage_result("C6", false, { reason = "no_source" }, tl)
+	end
+	local old_page = edit_page(calls)
+	local deleted = NULL
+	if #items > 0 then
+		deleted = bool_or_null(call(calls, "Timeline.DeleteClips", tl, "DeleteClips", items, false))
+	end
+	local left = #all_items(calls, tl)
+	local info = { mediaPoolItem = source, startFrame = 0, endFrame = 600, recordFrame = start }
+	local placed = seq(call(calls, "MediaPool.AppendToTimeline", pool, "AppendToTimeline", { info }))
+	local rows = array()
+	for i = 1, #placed do
+		rows[#rows + 1] = placed_row(calls, placed[i])
+	end
+	restore_page(calls, old_page)
+	local semantics = NULL
+	if rows[1] ~= nil and type(rows[1].length) == "number" then
+		if rows[1].length == 600 then
+			semantics = "exclusive"
+		elseif rows[1].length == 601 then
+			semantics = "inclusive"
+		else
+			semantics = "other"
+		end
+	end
+	local detail = {
+		page_switched_from = nz(old_page), items_before = #items, delete_result = deleted, items_left = left,
+		record_frame = start, requested_frames = 600, placed = rows, end_semantics = semantics,
+	}
+	return stage_result("C6", #rows > 0, detail, tl)
+end
+
+probe_stages.C7 = function(a, calls)
+	local path = str_arg(a.path, "path")
+	local good, why = AIH.path_ok(path)
+	if not good then
+		fail("bad_path:" .. why, "path_guard")
+	end
+	local rest = string.lower(string.sub(to_backslash(path), #AIH.files_prefix() + 1))
+	if string.sub(rest, 1, 6) ~= "probe\\" then
+		fail("bad_path:not_probe", "path_guard")
+	end
+	local frames = int_arg(a.frames, "frames", 1)
+	local project, tl = probe_copy_current(calls)
+	local pool = call(calls, "Project.GetMediaPool", project, "GetMediaPool")
+	if pool == nil then
+		fail("no_media_pool", "Project.GetMediaPool")
+	end
+	local start = call(calls, "Timeline.GetStartFrame", tl, "GetStartFrame")
+	local previous = call(calls, "MediaPool.GetCurrentFolder", pool, "GetCurrentFolder")
+	local ok, detail = pcall(function()
+		local bin = find_bin(calls, pool)
+		call(calls, "MediaPool.SetCurrentFolder", pool, "SetCurrentFolder", bin)
+		local known = {}
+		local before = seq(call(calls, "Folder.GetClipList", bin, "GetClipList"))
+		for i = 1, #before do
+			local u = uid_of(calls, "MediaPoolItem.GetUniqueId", before[i])
+			if u ~= nil then
+				known[u] = true
+			end
+		end
+		local got = seq(call(calls, "MediaPool.ImportMedia", pool, "ImportMedia", { path }))
+		local item, imported, found_by = got[1], false, NULL
+		if item ~= nil then
+			local u = uid_of(calls, "MediaPoolItem.GetUniqueId", item)
+			imported = not (u ~= nil and known[u])
+			found_by = "import"
+		else
+			local clips = seq(call(calls, "Folder.GetClipList.after_import", bin, "GetClipList"))
+			for i = 1, #clips do
+				if same_file(clip_path(calls, clips[i]), path) then
+					item, found_by = clips[i], "path"
+					break
+				end
+			end
+		end
+		local d = { imported = imported, found_by = found_by, requested_frames = frames }
+		if item == nil then
+			d.reason = "import_failed"
+			return d
+		end
+		st.probe.clip_path = path
+		st.probe.clip_uid = uid_of(calls, "MediaPoolItem.GetUniqueId", item)
+		st.probe.clip_imported = imported
+		d.clip = clip_info(calls, item)
+		d.clip_uid = nz(st.probe.clip_uid)
+		if not call(calls, "Timeline.AddTrack", tl, "AddTrack", "audio", "stereo") then
+			d.reason = "add_track_failed"
+			return d
+		end
+		local index = call(calls, "Timeline.GetTrackCount", tl, "GetTrackCount", "audio")
+		d.track_index = nz(index)
+		if type(index) ~= "number" then
+			d.reason = "track_count_failed"
+			return d
+		end
+		call(calls, "Timeline.SetTrackName", tl, "SetTrackName", "audio", index, AIH.PROBE_TRACK)
+		local info = {
+			mediaPoolItem = item, startFrame = 0, endFrame = frames,
+			mediaType = 2, trackIndex = index, recordFrame = type(start) == "number" and start or 0,
+		}
+		local placed = seq(call(calls, "MediaPool.AppendToTimeline", pool, "AppendToTimeline", { info }))
+		d.appended = #placed
+		if placed[1] ~= nil then
+			local row = placed_row(calls, placed[1])
+			d.placed = row
+			d.placed_frames = nz(row.length)
+			d.length_ok = row.length == frames
+		end
+		return d
+	end)
+	if previous ~= nil then
+		call(calls, "MediaPool.SetCurrentFolder.restore", pool, "SetCurrentFolder", previous)
+	end
+	if not ok then
+		error(detail, 0)
+	end
+	return stage_result("C7", detail.imported == true and detail.length_ok == true, detail, tl)
+end
+
+-- 정리: 원래 타임라인으로 돌아가서, 복사본의 지문이 expect_fingerprint와 같을 때만 복사본을 지운다.
+-- 스크립트를 다시 눌러 기록(st.probe)이 없으면 창이 알려 준 번호·이름을 쓴다 (이름 꼬리표와 지문 검사는 같다).
+probe_stages.C8 = function(a, calls)
+	local expect = str_arg(a.expect_fingerprint, "expect_fingerprint", "")
+	local rec = st.probe
+	if rec == nil then
+		rec = {
+			original_uid = a.original_uid, original_name = a.original_name,
+			copy_uid = a.copy_uid, copy_name = a.copy_name,
+			clip_path = a.clip_path, clip_imported = a.clip_imported == true,
+		}
+	end
+	if rec.copy_uid == nil and rec.copy_name == nil then
+		fail("no_probe", "probe_copy")
+	end
+	local project = project_of(calls)
+	if project == nil then
+		fail("no_project", "ProjectManager.GetCurrentProject")
+	end
+	local detail = { steps = {} }
+	local function step(name, fn)
+		local ok, err = pcall(fn)
+		detail.steps[name] = ok and "ok" or ("err:" .. short(type(err) == "table" and err.code or err))
+	end
+	local fp_before = nil
+	step("read_current", function()
+		local cur = call(calls, "Project.GetCurrentTimeline", project, "GetCurrentTimeline")
+		if cur ~= nil then
+			local uid, name = timeline_ident(calls, cur)
+			if same_timeline(uid, name, rec.copy_uid, rec.copy_name) then
+				fp_before = AIH.fingerprint(cur)
+			end
+		end
+	end)
+	step("switch_back", function()
+		local original = find_timeline(calls, project, rec.original_uid, rec.original_name)
+		detail.original_found = original ~= nil
+		if original ~= nil then
+			call(calls, "Project.SetCurrentTimeline", project, "SetCurrentTimeline", original)
+		end
+	end)
+	local copy, fp = nil, nil
+	step("find_copy", function()
+		copy = find_timeline(calls, project, rec.copy_uid, rec.copy_name)
+	end)
+	detail.copy_found = copy ~= nil
+	detail.deleted = false
+	if copy ~= nil then
+		step("check_copy", function()
+			local uid, name = timeline_ident(calls, copy)
+			local cur = call(calls, "Project.GetCurrentTimeline.check", project, "GetCurrentTimeline")
+			local cuid, cname = nil, nil
+			if cur ~= nil then
+				cuid, cname = timeline_ident(calls, cur)
+			end
+			fp = AIH.fingerprint(copy) or fp_before
+			detail.fingerprint_before_switch = nz(fp_before)
+			if not is_probe_name(name) then
+				detail.reason = "not_probe_name"
+			elseif cur == nil or same_timeline(cuid, cname, uid, name) then
+				detail.reason = "copy_is_current"
+			elseif expect == "" then
+				detail.reason = "no_expect"
+			elseif fp == nil or fp ~= expect or (fp_before ~= nil and fp_before ~= expect) then
+				detail.reason = "fingerprint_mismatch"
+			else
+				local done = call(calls, "MediaPool.DeleteTimelines", call(calls, "Project.GetMediaPool", project,
+					"GetMediaPool"), "DeleteTimelines", { copy })
+				detail.delete_result = bool_or_null(done)
+				detail.deleted = find_timeline(calls, project, rec.copy_uid, rec.copy_name) == nil
+			end
+		end)
+	else
+		detail.reason = "copy_gone"
+	end
+	detail.clip_deleted = NULL
+	if rec.clip_path ~= nil and rec.clip_imported == true and AIH.ours(rec.clip_path) then
+		step("delete_clip", function()
+			local pool = call(calls, "Project.GetMediaPool", project, "GetMediaPool")
+			local bin = pool ~= nil and find_bin(calls, pool, true) or nil
+			detail.clip_deleted = false
+			if bin == nil then
+				return
+			end
+			local clips = seq(call(calls, "Folder.GetClipList", bin, "GetClipList"))
+			for i = 1, #clips do
+				if same_file(clip_path(calls, clips[i]), rec.clip_path) then
+					call(calls, "MediaPool.DeleteClips", pool, "DeleteClips", { clips[i] })
+					local still = false
+					local again = seq(call(calls, "Folder.GetClipList.check", bin, "GetClipList"))
+					for j = 1, #again do
+						if same_file(clip_path(calls, again[j]), rec.clip_path) then
+							still = true
+						end
+					end
+					detail.clip_deleted = not still
+					break
+				end
+			end
+		end)
+	end
+	step("restore", function()
+		if rec.page ~= nil and current_page(calls) ~= rec.page then
+			call(calls, "Resolve.OpenPage.restore", st.R, "OpenPage", rec.page)
+		end
+		local cur = call(calls, "Project.GetCurrentTimeline.restore", project, "GetCurrentTimeline")
+		if type(rec.tc) == "string" and cur ~= nil and PLAYHEAD_PAGES[current_page(calls) or "edit"] then
+			call(calls, "Timeline.SetCurrentTimecode.restore", cur, "SetCurrentTimecode", rec.tc)
+		end
+	end)
+	if detail.deleted or not detail.copy_found then
+		st.probe = nil
+	end
+	return {
+		stage = "C8", ok = (detail.deleted or not detail.copy_found) and true or false,
+		detail = detail, fingerprint = nz(fp),
+	}
+end
+
+ops.probe_copy = function(a, calls)
+	local stage = str_arg(a.stage, "stage")
+	local fn = probe_stages[stage]
+	if fn == nil then
+		fail("bad_args", "stage")
+	end
+	local res = fn(a, calls)
+	res.calls = calls
+	res.probe = probe_record()
+	return res
+end
+
+-- 원래 타임라인으로 돌아가기만 한다 (아무것도 고치지 않음). 기능 점검 C1이 적어 둔 원래 타임라인만 된다.
+-- 스크립트를 다시 눌러 기록이 없으면, 지금 타임라인이 점검용 복사본일 때만 창이 알려 준 번호로 간다.
+ops.switch_timeline = function(a, calls)
+	local uid = a.uid ~= nil and str_arg(a.uid, "uid") or nil
+	local name = a.name ~= nil and str_arg(a.name, "name") or nil
+	if uid == nil and name == nil then
+		fail("bad_args", "uid")
+	end
+	local project, cur = need_timeline(calls)
+	local rec = st.probe
+	local recorded = rec ~= nil and (rec.original_uid ~= nil or rec.original_name ~= nil)
+	if recorded then
+		if not same_timeline(uid, name, rec.original_uid, rec.original_name) then
+			fail("not_original", "switch_timeline")
+		end
+	else
+		local _, cname = timeline_ident(calls, cur)
+		if not is_probe_name(cname) then
+			fail("not_original", "switch_timeline")
+		end
+	end
+	local target = find_timeline(calls, project, uid, name)
+	if target == nil then
+		fail("timeline_not_found", "switch_timeline")
+	end
+	call(calls, "Project.SetCurrentTimeline", project, "SetCurrentTimeline", target)
+	local now_tl = call(calls, "Project.GetCurrentTimeline.after", project, "GetCurrentTimeline")
+	local ruid, rname = nil, nil
+	if now_tl ~= nil then
+		ruid, rname = timeline_ident(calls, now_tl)
+	end
+	return {
+		switched = same_timeline(ruid, rname, uid, name), readback_uid = nz(ruid), readback_name = nz(rname),
+		recorded = recorded, calls = calls,
+	}
 end
 
 ops.stop = function(a, calls)

@@ -24,7 +24,7 @@ pytest.importorskip("lupa")
 lupa_jit = pytest.importorskip("lupa.luajit21")
 
 from app.companion import report, steps  # noqa: E402
-from engine.resolve_link import SCRIPT_VERSION  # noqa: E402
+from engine.resolve_link import SCRIPT_VERSION, protocol  # noqa: E402
 from engine.resolve_link.bridge import BridgeError, BridgeTimeout, LuaBridge  # noqa: E402
 from engine.resolve_link.install import install_script  # noqa: E402
 from engine.resolve_link.testfiles import make_test_tone  # noqa: E402
@@ -171,6 +171,9 @@ def test_full_round_trip(rig):
     assert env["loadfile"] and env["setfenv"] and env["bmd_wait"] and env["os_time"]
     assert not (env["io"] or env["require"] or env["ffi"] or env["os_execute"])
     assert rig.bridge.prefs_path == rig.prefs and rig.bridge.connected
+    # 스크립트가 아는 작업 목록을 기억하고, 답을 받은 요청 파일은 지운다 (S2)
+    assert rig.bridge.known_ops == frozenset(protocol.OPS)
+    assert not (rig.mailbox / "request.lua").exists()
 
     state = rig.bridge.state()
     assert state["project"] == "시험 프로젝트" and state["timeline"] == "타임라인 1"
@@ -195,6 +198,7 @@ def test_full_round_trip(rig):
     assert audio["imported"] is True and audio["track_index"] == 1 and audio["appended"] == 1
     assert (audio["item_start"], audio["item_end"]) == (86700, 86789)
     assert audio["clip"]["path"] == str(tone) and audio["clip"]["frames"] == "104"
+    assert (audio["placed_frames"], audio["length_ok"]) == (89, True)
     state = rig.bridge.state()
     assert state["tracks"]["audio"] == 1
     [placed] = state["items"]["audio"]
@@ -219,7 +223,7 @@ def test_full_round_trip(rig):
     appends = [_table(a[0]) for a in rig.logged("AppendToTimeline")]
     assert appends[0] == {
         "count": 1, "keys": "endFrame,mediaPoolItem,mediaType,recordFrame,startFrame,trackIndex",
-        "item": "aih_test_tone.wav", "startFrame": 0, "endFrame": 88, "mediaType": 2,
+        "item": "aih_test_tone.wav", "startFrame": 0, "endFrame": 89, "mediaType": 2,  # 들어가지 않는 끝
         "trackIndex": 1, "recordFrame": 86700,
     }
     assert rig.logged("SetTrackName") == [["audio", 1, TRACK], ["audio", 2, TRACK]]
@@ -350,3 +354,49 @@ def test_helper_steps_on_drop_frame_timeline(rig):
     assert steps.summarize("marker", out)[0]
     out = steps.run_step(steps.audio_step, rig.bridge)
     assert out["record_frame"] == 107892 + 300 and out["audio"]["item_start"] == 108192
+
+
+def test_panel_connect_and_probe_against_the_real_script(rig, tmp_path):
+    """새 창의 연결 확인(+붙여 하는 읽기)과 [기능 점검] 단계를 실제 스크립트에 대고 돌린다."""
+    pytest.importorskip("PySide6")
+    import functools
+
+    from app.companion import connection as conn
+    from app.companion.window import probe_step
+    from engine.resolve_link.caps import CapabilityStore
+    from engine.resolve_link.probe import ProbeStateStore
+
+    # 영상과 함께 붙은 소리 (C2 트랙 끄기, C3 클립 끄기, C6 다시 넣기에 필요). 원본은 충분히 길다.
+    video = rig.fake.timeline.tracks.video[1]["items"][1]
+    audio = rig.fake.add_clip("audio", 1, "촬영 원본.mp4", 86400, 900, None)
+    audio.mpi = video.mpi
+    rig.fake.link(video, audio)
+    video.mpi.props["Frames"] = "100000"
+    rig.start()
+    caps_store = CapabilityStore(tmp_path / "caps")
+    extras = [functools.partial(conn.extra_audio_items, known=None),
+              functools.partial(conn.extra_probe_read, store=caps_store),
+              functools.partial(conn.extra_reconcile, root=tmp_path)]
+    out = steps.run_step(functools.partial(conn.panel_connect_step, extras=extras), rig.bridge)
+    assert "extra_errors" not in out, out.get("extra_errors")
+    assert out["state_kind"] == "timeline_info" and out["state"]["timeline"] == "타임라인 1"
+    [item] = out["audio_items"]["items"]
+    assert item["path"] == CLIP_PATH and out["probe_read"]["existence_reliable"] is True
+    assert not out["caps"].needs_probe_read(SCRIPT_VERSION)
+
+    seen = []
+    probe_store = ProbeStateStore(tmp_path / "caps" / "probe_state.json")
+    step = functools.partial(probe_step, store=probe_store, caps_store=caps_store,
+                             on_stage=lambda stage, data: seen.append(stage))
+    out = steps.run_step(step, rig.bridge)
+    run = out["probe_run"]
+    assert run["refused"] is None and not run["leftover"]
+    assert [s for s in ("C1", "C2", "C3", "C4", "C5", "C6", "C7") if not run["stages"][s]["ok"]] == []
+    assert all(run["stages"][s]["fingerprint"] for s in ("C1", "C2", "C3", "C4", "C5", "C6", "C7"))
+    assert run["stages"]["C7"]["detail"]["imported"] is True
+    assert run["cleanup"]["detail"]["deleted"] is True
+    assert seen[0] == "read" and seen[-1] == "C8"
+    assert probe_store.load() is None  # 정리했으니 남은 복사본 기록도 없다
+    assert out["state"]["timeline"] == "타임라인 1"  # 원래 타임라인으로 돌아왔다
+    caps = out["caps"]
+    assert caps.has("fresh_import") is True and caps.has("exact_placement") is True

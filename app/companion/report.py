@@ -1,8 +1,12 @@
-"""연결 시험 결과 파일 (AI도우미_연결시험_결과.txt).
+"""결과 파일 (AI도우미_결과_<yyyymmdd-hhmm>.txt, 버튼 이름은 그대로 [결과 저장]).
 
 사용자가 이 파일을 그대로 보내 주면, 사용자 PC의 리졸브에서 어떤 함수가 되고 안 되는지 알 수 있다.
 맨 위에는 단계마다 됨/안 됨을 쉬운 말로, 아래에는 리졸브가 준 답을 그대로(JSON) 적는다.
+2판(v2)에는 화면 크기, 기능 점검(C1~C8)과 점검 기록, 소리 파일의 스트림마다 ffprobe 값(start_time 포함),
+자동화 버튼 설정과 순서, 일지 요약, 걸린 시간, 답하는 쪽을 더 적는다.
 사용자가 일부러 보내는 파일이라 경로는 가리지 않고 그대로 적는다. 화면(Qt) 코드는 없다.
+
+결과를 모으는 일(collect_env)은 파일만 읽는다. 리졸브에 묻지 않으므로 작업 중에도 저장할 수 있다.
 """
 
 from __future__ import annotations
@@ -14,15 +18,19 @@ import os
 import platform
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from engine import __version__ as engine_version
 from engine.resolve_link import SCRIPT_NAME, SCRIPT_VERSION
-from engine.resolve_link.protocol import parse_responses
+from engine.resolve_link.protocol import REQUEST_FILENAME, parse_responses
 
-REPORT_NAME = "AI도우미_연결시험_결과.txt"
+REPORT_PREFIX = "AI도우미_결과_"
+REPORT_TITLE = "AI 편집 도우미 - 결과"
+MAX_FFPROBE_FILES = 3  # 결과 파일에 스트림 정보를 적는 소리 파일 수 (ffprobe는 파일마다 1초 안팎)
+README_LINES = 40  # 리졸브 Scripting README.txt에서 적는 줄 수
 
 # 결과 파일 맨 위에 적는 단계 (이름, 제목)
 STEPS = (
@@ -31,6 +39,14 @@ STEPS = (
     ("audio", "③ 소리 넣기"),
     ("cleanup", "시험 흔적 지우기"),
 )
+# 그 밖의 일 (한 일 목록과 리졸브의 답 제목)
+TITLES = dict(STEPS, probe="기능 점검", switch="원래 타임라인으로", leftover="점검용 복사본 지우기",
+              slot="자동화 버튼")
+
+
+def report_name(now: Optional[datetime.datetime] = None) -> str:
+    """AI도우미_결과_20260925-1432.txt (저장할 때의 분까지. 같은 분에 다시 저장하면 덮어쓴다)."""
+    return f"{REPORT_PREFIX}{(now or datetime.datetime.now()):%Y%m%d-%H%M}.txt"
 
 
 def _now() -> str:
@@ -60,6 +76,8 @@ class TestSession:
         self.history: List[str] = []  # 단계를 할 때마다 한 줄 (같은 단계를 여러 번 해도 남는다)
         self.auto_attempts = 0  # 연결 전 자동 확인 횟수
         self.install: Dict[str, Any] = {}  # 스크립트 설치 결과
+        self.probe_runs: List[Dict[str, Any]] = []  # 기능 점검 (ProbeRun.to_dict)
+        self.timings: List[Tuple[str, float]] = []  # 버튼 작업마다 걸린 시간 (이름, 초)
 
     def record(self, name: str, ok: bool, summary: str, data: Dict[str, Any],
                error: Optional[Dict[str, Any]] = None) -> StepRecord:
@@ -67,9 +85,12 @@ class TestSession:
         self.steps[name] = rec
         self.records.append((name, rec))
         self.history.append(
-            f"{rec.at} {dict(STEPS).get(name, name)}: {'됨' if ok else '안 됨'} - {_one_line(summary)}"
+            f"{rec.at} {TITLES.get(name, name)}: {'됨' if ok else '안 됨'} - {_one_line(summary)}"
         )
         return rec
+
+    def timing(self, name: str, seconds: float) -> None:
+        self.timings.append((name, round(float(seconds), 3)))
 
 
 def step_lines(session: TestSession) -> List[str]:
@@ -180,27 +201,262 @@ def find_fatal_responses(paths: Iterable[Path]) -> List[Dict[str, Any]]:
     return found
 
 
+# ── 결과를 모으기 (파일만 읽는다: 짧은 작업 스레드에서) ─────────────────────
+
+_MAILBOX_HEX_RE = re.compile(r'AIH\.MAILBOX_HEX\s*=\s*"([0-9A-Fa-f]*)"')
+_VERSION_RE = re.compile(r'AIH\.VERSION\s*=\s*"([^"\r\n]*)"')
+_CLAIM_RE = re.compile(r'\bClaim\s*=\s*"?(\d+)"?')
+
+
+def _stamp(seconds: float) -> str:
+    return datetime.datetime.fromtimestamp(seconds).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def script_details(paths, mailbox) -> List[Dict[str, Any]]:
+    """설치된 스크립트마다 안에 적힌 판과 우체통 (예전 스크립트나 다른 우체통을 누른 것인지 알아보려고)."""
+    out = []
+    for path in paths:
+        info: Dict[str, Any] = {"file": str(path)}
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            info["error"] = str(exc)
+            out.append(info)
+            continue
+        m, v = _MAILBOX_HEX_RE.search(text), _VERSION_RE.search(text)
+        info["version"] = v.group(1) if v else None
+        info["mailbox"] = None
+        if m and len(m.group(1)) % 2 == 0:
+            # 설치 프로그램과 같은 규칙: 윈도우는 ANSI 코드 페이지, 그 밖은 UTF-8
+            encoding = "mbcs" if sys.platform == "win32" else "utf-8"
+            info["mailbox"] = bytes.fromhex(m.group(1)).decode(encoding, "replace")
+        info["same_mailbox"] = info["mailbox"] is not None and (
+            os.path.normcase(info["mailbox"]) == os.path.normcase(str(mailbox)))
+        out.append(info)
+    return out
+
+
+def prefs_details(bridge, paths) -> List[Dict[str, Any]]:
+    """Fusion.prefs 후보마다 바뀐 시각, 크기, Claim, 들어 있는 답 (답을 기다리다 그만둔 요청의 답이면 late)."""
+    try:
+        timed_out = dict(getattr(bridge, "timed_out", None) or {})
+    except RuntimeError:  # 작업 스레드가 마침 고치는 중: 늦은 답 표시만 빠진다
+        timed_out = {}
+    note_late = getattr(bridge, "note_late_answers", None)
+    out = []
+    for path in paths:
+        info: Dict[str, Any] = {"file": str(path)}
+        try:
+            st = Path(path).stat()
+            text = Path(path).read_bytes().decode("latin-1")
+        except OSError as exc:
+            info["error"] = str(exc)
+            out.append(info)
+            continue
+        info["mtime"], info["size"] = _stamp(st.st_mtime), st.st_size
+        claims = _CLAIM_RE.findall(text)
+        info["claim"] = claims[-1] if claims else None
+        responses = parse_responses(text)
+        if note_late is not None:
+            try:
+                note_late(Path(path), responses)
+            except RuntimeError:
+                pass
+        info["responses"] = [
+            {"id": r.id, "owner": r.owner, "ok": r.data.get("ok"), "error": r.data.get("error"),
+             "late": r.id in timed_out}
+            for r in responses
+        ]
+        out.append(info)
+    return out
+
+
+def request_file_info(mailbox) -> Dict[str, Any]:
+    """우체통에 요청 파일이 남아 있는지 (창이 답을 기다리는 중이 아니면 보통 없다)."""
+    path = Path(mailbox) / REQUEST_FILENAME
+    try:
+        st = path.stat()
+        text = path.read_text(encoding="ascii", errors="replace")
+    except OSError:
+        return {"file": str(path), "exists": False}
+    return {"file": str(path), "exists": True, "age_seconds": round(time.time() - st.st_mtime, 1),
+            "size": st.st_size, "text": text[:300]}
+
+
+def stream_info(paths: Sequence[str], limit: int = MAX_FFPROBE_FILES) -> List[Dict[str, Any]]:
+    """소리 파일마다 ffprobe로 본 오디오 스트림 (번호, 코덱, 채널, 이름, start_time). 파일은 limit개까지."""
+    from engine.probe import probe
+
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for raw in paths:
+        if not isinstance(raw, str) or not raw or raw in seen:
+            continue
+        seen.add(raw)
+        if len(out) >= limit:
+            break
+        info: Dict[str, Any] = {"file": raw}
+        try:
+            media = probe(raw)
+        except FileNotFoundError:
+            info["error"] = "파일 없음 (이 PC에서 그 경로를 찾지 못함)"
+        except Exception as exc:  # noqa: BLE001 - ffprobe가 없거나 깨진 파일: 이유만 적는다
+            info["error"] = f"{type(exc).__name__}: {_one_line(exc)[:300]}"
+        else:
+            info.update({
+                "duration": media.duration, "format_start": media.format_start,
+                "video_start": media.video_start if media.has_video else None,
+                "streams": [
+                    {"index": t.index, "codec": t.codec, "channels": t.channels, "sample_rate": t.sample_rate,
+                     "title": t.title, "language": t.language, "start_time": t.start, "decodable": t.decodable}
+                    for t in media.audio_tracks
+                ],
+            })
+        out.append(info)
+    return out
+
+
+def scripting_readme(lines: int = README_LINES) -> Optional[Dict[str, Any]]:
+    """%PROGRAMDATA%\\Blackmagic Design\\DaVinci Resolve\\Support\\Developer\\Scripting\\README.txt 앞부분."""
+    base = os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
+    path = Path(base) / "Blackmagic Design" / "DaVinci Resolve" / "Support" / "Developer" / "Scripting" / "README.txt"
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            head = [next(f, "").rstrip("\r\n") for _ in range(lines)]
+    except OSError:
+        return None
+    while head and head[-1] == "":
+        head.pop()
+    return {"file": str(path), "head": head}
+
+
+def saved_records(state_root: Optional[Path], caps_key: Optional[Tuple[Any, Any]] = None) -> Dict[str, Any]:
+    """앱이 저장해 둔 것: 기능 점검 기록(caps), 남은 복사본 기록(probe_state), 일지 요약 20개."""
+    from engine.edits.journal import all_journals
+    from engine.resolve_link.caps import CapabilityStore
+    from engine.resolve_link.probe import ProbeStateStore
+
+    out: Dict[str, Any] = {}
+    root = Path(state_root) if state_root is not None else None
+    caps_dir = root / "caps" if root is not None else None
+    try:
+        if caps_key is not None and (caps_key[0] or caps_key[1]):
+            caps = CapabilityStore(caps_dir).load(caps_key[0], caps_key[1])
+            out["caps"] = {"file": str(caps.path), "lines": caps.summary_lines(), "data": caps.data}
+        state = ProbeStateStore(caps_dir / "probe_state.json" if caps_dir is not None else None).load()
+        out["probe_state"] = state.to_dict() if state is not None else None
+        summaries: List[Dict[str, Any]] = []
+        for journal in all_journals(root):
+            for row in journal.summaries(20):
+                summaries.append(dict(row, timeline=journal.timeline.get("name"), key=journal.key))
+        out["journals"] = summaries[-20:]
+    except Exception as exc:  # noqa: BLE001 - 기록을 못 읽어도 결과 파일은 만든다
+        out["records_error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
+def collect_env(bridge, out: Dict[str, Any], *, audio_paths: Sequence[str] = (),
+                state_root: Optional[Path] = None, caps_key: Optional[Tuple[Any, Any]] = None) -> None:
+    """결과 파일에 넣을 설치·파일 상태. 리졸브에는 묻지 않고 파일만 읽는다 (작업 중에도 저장할 수 있게).
+
+    윈도우 판을 읽을 때 파이썬이 'ver' 명령을 따로 실행한다 (창에서 하면 1.2초 멈춤, 2026-09-25).
+    그래서 창이 아니라 짧은 작업 스레드에서 모은다.
+    """
+    from engine.resolve_link.bridge import prefs_backups
+    from engine.resolve_link.paths import installed_scripts, resolve_exe_versions, resolve_utility_dirs
+
+    out["system"] = system_lines()
+    scripts = installed_scripts()
+    out["installed_scripts"] = [str(p) for p in scripts]
+    out["script_details"] = script_details(scripts, bridge.mailbox)
+    out["utility_dirs"] = [str(p) for p in resolve_utility_dirs()]
+    out["resolve_exe"] = resolve_exe_versions()
+    candidates = list(bridge.prefs_candidates())
+    out["prefs_candidates"] = [str(p) for p in candidates]
+    out["prefs_details"] = prefs_details(bridge, candidates)
+    out["fatal"] = find_fatal_responses(candidates)
+    out["backups"] = [str(p) for p in prefs_backups(bridge.backup_dir())]
+    out["request"] = request_file_info(bridge.mailbox)
+    out["scripting_readme"] = scripting_readme()
+    out.update(saved_records(state_root, caps_key))
+    out["ffprobe"] = stream_info(list(audio_paths))
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+
+
+def _json1(value: Any) -> str:
+    """한 줄 JSON (짧은 값)."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _probe_lines(run: Dict[str, Any]) -> List[str]:
+    """기능 점검 한 번: 단계마다 됨/안 됨, 지문, C7 가져오기, C8 정리."""
+    lines = [f"시작: {run.get('started_at')}"]
+    if run.get("refused"):
+        lines.append(f"하지 않음: {run['refused']}")
+    read = run.get("read") or {}
+    if read:
+        exists = read.get("exists") if isinstance(read.get("exists"), dict) else {}
+        missing = sorted(k for k, v in exists.items() if v is False)
+        lines.append(f"읽기 점검(probe_read): 함수 {len(exists)}개 확인, 없음 {len(missing)}개"
+                     + (f" ({', '.join(missing[:20])})" if missing else "")
+                     + (f", 오류 {read.get('error')}" if read.get("error") else ""))
+    for stage, r in sorted((run.get("stages") or {}).items()):
+        if not isinstance(r, dict):
+            continue
+        detail = r.get("detail") if isinstance(r.get("detail"), dict) else {}
+        extra = []
+        if r.get("fingerprint"):
+            extra.append(f"지문 {r['fingerprint']}")
+        if stage == "C7":
+            # 새로 가져왔는지, 리졸브가 본 클립 속성(FPS/Duration/Frames), 놓인 길이(GetEnd - GetStart)
+            for key in ("imported", "requested_frames", "placed_frames", "length_ok"):
+                if key in detail:
+                    extra.append(f"{key}={detail[key]}")
+            if isinstance(detail.get("clip"), dict):
+                extra.append("clip=" + json.dumps(detail["clip"], ensure_ascii=False, sort_keys=True, default=str))
+        if r.get("error"):
+            extra.append(f"오류 {r.get('error')}")
+        lines.append(f"{stage}: {'됨' if r.get('ok') else '안 됨'}" + (f" ({', '.join(map(str, extra))})" if extra else ""))
+    cleanup = run.get("cleanup") or {}
+    if cleanup:
+        d = cleanup.get("detail") if isinstance(cleanup.get("detail"), dict) else {}
+        lines.append(f"C8 정리: 복사본 {'지움' if d.get('deleted') else '남음'}"
+                     f"{' (' + str(d.get('reason')) + ')' if d.get('reason') else ''}, "
+                     f"점검용 소리 클립 {'지움' if d.get('clip_deleted') else '안 지움'}")
+    lines.append(f"점검용 복사본 남음: {'예' if run.get('leftover') else '아니오'}")
+    if run.get("seconds"):
+        lines.append("걸린 시간(초): " + ", ".join(f"{k} {v}" for k, v in run["seconds"].items()))
+    return lines
 
 
 def build_report(session: TestSession, link: Dict[str, Any], env: Dict[str, Any]) -> str:
     """결과 파일 전체 글.
 
-    link: 브리지가 기억하는 것 (우체통, 답한 Fusion.prefs, 스크립트 판 ...)
-    env: 결과를 저장할 때 살펴본 것 (설치된 스크립트, Fusion.prefs 후보, 0번 답 ...)
+    link: 창과 브리지가 기억하는 것 (우체통, 답한 Fusion.prefs, 스크립트 판, 화면 크기, 자동화 버튼 ...)
+    env: 결과를 저장할 때 살펴본 파일 (설치된 스크립트, Fusion.prefs 후보, 0번 답, ffprobe ...)
     """
-    lines = ["AI 도우미 - 리졸브 연결 시험 결과", "=" * 40, ""]
+    lines = [REPORT_TITLE, "=" * 40, ""]
     lines += step_lines(session)
+    for run in session.probe_runs[-1:]:
+        stages = run.get("stages") or {}
+        ok = sum(1 for r in stages.values() if isinstance(r, dict) and r.get("ok"))
+        lines.append(f"기능 점검: {'하지 않음 (' + str(run['refused']) + ')' if run.get('refused') else f'됨 {ok}개 · 안 됨 {len(stages) - ok}개'}")
     lines += ["", "이 파일을 그대로 보내 주세요.", "", "[이 PC]"]
     # 보통은 작업 스레드에서 모아 둔 것 (collect_env). 없을 때만 여기서 읽는다.
     lines += env.get("system") or system_lines()
+    screen = link.get("screen")
+    if screen:
+        lines += ["", "[화면]", _json1(screen)]
     mailbox = link.get("mailbox")
     lines += [
         "",
         "[연결]",
         f"창을 연 시각: {session.started}",
         f"지금 연결됨: {'예' if link.get('connected') else '아니오'}",
+        f"연결 상태: {link.get('status') or '모름'}",
         f"연결 전 자동 확인 횟수: {session.auto_attempts}",
         f"우체통 폴더: {mailbox}",
     ]
@@ -210,10 +466,16 @@ def build_report(session: TestSession, link: Dict[str, Any], env: Dict[str, Any]
         lines.append(f"우체통 폴더(긴 이름): {link['mailbox_long']}")
     if link.get("auto_note"):
         lines.append(f"자동 확인: {link['auto_note']}")
+    known = link.get("known_ops")
     lines += [
         f"답한 Fusion.prefs: {link.get('prefs_path') or '아직 답 없음'}",
         f"리졸브에서 도는 스크립트 판: {link.get('script_version') or '모름'} (설치한 판: {SCRIPT_VERSION})",
+        f"스크립트가 할 수 있는 일(ops): {', '.join(sorted(known)) if known else '모름'}",
         f"스크립트 반복 표시(owner): {link.get('owner') or '모름'}",
+        f"요청 수: {link.get('request_count', '모름')}, 다시 읽은 수: {link.get('read_retries', '모름')}, "
+        f"큰 답 뒤 확인 ping: {link.get('cleanup_pings', '모름')}",
+        f"확인 횟수: 창을 다시 볼 때 {link.get('focus_pings', 0)}번, Resolve.exe 보기 {link.get('process_checks', 0)}번",
+        link.get("brain") or "답하는 쪽: 모름",
         "",
         "[스크립트 설치]",
     ]
@@ -238,7 +500,9 @@ def build_report(session: TestSession, link: Dict[str, Any], env: Dict[str, Any]
     for path in env.get("prefs_candidates") or []:
         lines.append(str(path))
         d = details.get(str(path))
-        if d:
+        if d and d.get("error"):
+            lines.append(f"  읽지 못함: {d['error']}")
+        elif d:
             lines.append(f"  바뀐 시각 {d.get('mtime')}, 크기 {d.get('size')}, Claim {d.get('claim') or '없음'}")
             for resp in d.get("responses") or []:
                 lines.append(f"  답 {resp.get('id')} (주인 {resp.get('owner')}): "
@@ -255,16 +519,61 @@ def build_report(session: TestSession, link: Dict[str, Any], env: Dict[str, Any]
     if env.get("error"):
         lines += ["", f"[살펴보다 난 오류] {env['error']}"]
 
+    if link.get("timeline"):
+        lines += ["", "[리졸브에서 열려 있는 것 (마지막으로 읽은 것)]", _json(link["timeline"])]
+    if env.get("ffprobe"):
+        lines += ["", "[소리 파일의 스트림 (ffprobe)]"]
+        for f in env["ffprobe"]:
+            lines.append(str(f.get("file")))
+            if f.get("error"):
+                lines.append(f"  {f['error']}")
+                continue
+            lines.append(f"  길이 {f.get('duration')}초, 파일 시작 {f.get('format_start')}, 영상 시작 {f.get('video_start')}")
+            for st in f.get("streams") or []:
+                lines.append(f"  소리 {st.get('index')}: {st.get('codec')} {st.get('channels')}ch {st.get('sample_rate')}Hz"
+                             f", 이름 {st.get('title') or '-'}, start_time {st.get('start_time')}")
+    elif link.get("audio_paths") is not None:
+        lines += ["", "[소리 파일의 스트림 (ffprobe)]", "타임라인의 소리 클립 경로를 아직 읽지 못했습니다."]
+
+    lines += ["", "[기능 점검]"]
+    if session.probe_runs:
+        for i, run in enumerate(session.probe_runs, 1):
+            lines.append(f"-- {i}번째")
+            lines += _probe_lines(run)
+    else:
+        lines.append("이번에는 하지 않았습니다.")
+    caps = env.get("caps")
+    if caps:
+        lines += ["", f"[기능 점검 기록] {caps.get('file')}"]
+        lines += caps.get("lines") or []
+    if env.get("probe_state"):
+        lines += ["", "[남은 점검용 복사본 기록 (probe_state.json)]", _json(env["probe_state"])]
+    if link.get("slots"):
+        lines += ["", "[자동화 버튼 (보이는 순서)]"]
+        for s in link["slots"]:
+            lines.append(f"{s.get('slot')}번 {s.get('name')} ({s.get('kind')}): {_json1(s.get('params'))}"
+                         f"{' / 이전 설정 있음' if s.get('previous') else ''}")
+    lines += ["", "[되돌리기 기록 (최근 20개)]"]
+    lines += [_json1(row) for row in env.get("journals") or []] or ["없음"]
+    if env.get("records_error"):
+        lines.append(f"기록을 읽다 난 오류: {env['records_error']}")
+    if session.timings:
+        lines += ["", "[걸린 시간 (초)]"]
+        lines += [f"{TITLES.get(name, name)}: {sec}" for name, sec in session.timings]
+    readme = env.get("scripting_readme")
+    if readme:
+        lines += ["", f"[리졸브 Scripting README.txt 앞부분] {readme.get('file')}"]
+        lines += readme.get("head") or []
+
     if link.get("late_answers"):
         lines += ["", "[답을 기다리다 그만둔 뒤에 온 답]", _json(link["late_answers"])]
 
     lines += ["", "[한 일]"]
     lines += session.history or ["아직 아무 단계도 하지 않았습니다."]
-    titles = dict(STEPS)
     counts: Dict[str, int] = {}
     for name, rec in session.records:
         counts[name] = counts.get(name, 0) + 1
-        lines += ["", f"---- {titles.get(name, name)} {counts[name]}번째 ({rec.at}) 리졸브의 답 ----"]
+        lines += ["", f"---- {TITLES.get(name, name)} {counts[name]}번째 ({rec.at}) 리졸브의 답 ----"]
         if rec.error:
             lines += ["오류:", _json(rec.error)]
         lines.append(_json(rec.data))
@@ -273,10 +582,10 @@ def build_report(session: TestSession, link: Dict[str, Any], env: Dict[str, Any]
     return "\n".join(lines) + "\n"
 
 
-def save_report(text: str, folder: Path) -> Path:
+def save_report(text: str, folder: Path, now: Optional[datetime.datetime] = None) -> Path:
     """결과 파일을 쓴다. 메모장이 인코딩을 헷갈리지 않게 BOM을 붙인 UTF-8로 저장한다."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / REPORT_NAME
+    path = folder / report_name(now)
     path.write_text(text, encoding="utf-8-sig", newline="\r\n" if os.name == "nt" else "\n")
     return path

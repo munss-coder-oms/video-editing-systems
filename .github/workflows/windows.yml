@@ -101,8 +101,16 @@ jobs:
           taskkill /f /im pythonw.exe >nul 2>&1
           exit /b %RC%
 
-      - name: AI 도우미 창 (리졸브 없이 설치 → 창 → 결과 파일)
+      - name: AI 도우미 창 (리졸브 없이 설치 → 창 → 결과 파일, 버튼 3개·대화 입력 칸·⋯ 메뉴·아래쪽이 보이는지)
         shell: cmd
+        run: |
+          call "%CONDA%\condabin\conda.bat" activate video-editing
+          python -m app --helper-smoke-test || exit /b 1
+
+      - name: AI 도우미 창 150% 배율 (1080p 노트북에서 흔한 배율: 좁은 모양으로도 잘리지 않는지)
+        shell: cmd
+        env:
+          QT_SCALE_FACTOR: "1.5"
         run: |
           call "%CONDA%\condabin\conda.bat" activate video-editing
           python -m app --helper-smoke-test || exit /b 1
@@ -123,7 +131,7 @@ jobs:
           call "%CONDA%\condabin\conda.bat" activate video-editing
           python -m pip install lupa || exit /b 1
           python -c "import lupa.luajit21 as l; print(l.LuaRuntime().eval('jit.version'))" || exit /b 1
-          python -m pytest -q -rs tests/test_lua_script.py tests/test_bridge_roundtrip.py tests/test_resolve_link.py || exit /b 1
+          python -m pytest -q -rs tests/test_lua_script.py tests/test_bridge_roundtrip.py tests/test_resolve_link.py tests/test_probe_leftover.py tests/test_resolve_ops.py || exit /b 1
 
       - name: 기록 파일 모으기
         if: always()
