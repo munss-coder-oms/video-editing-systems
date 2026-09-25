@@ -44,6 +44,7 @@ from engine.resolve_link.paths import (
 from engine.resolve_link.protocol import REQUEST_FILENAME, parse_responses
 
 from . import steps
+from . import report as report_mod
 from .report import STEPS, TestSession, build_report, find_fatal_responses, save_report
 
 WINDOW_TITLE = "AI 도우미 - 리졸브 연결 시험"
@@ -157,6 +158,9 @@ def request_file_info(mailbox) -> Dict[str, Any]:
 
 def collect_env(bridge, out: Dict[str, Any]) -> None:
     """결과 파일에 넣을 설치·파일 상태 (Fusion.prefs 찾기가 느릴 수 있어 작업 스레드에서)."""
+    # 윈도우 판을 읽을 때 파이썬이 'ver' 명령을 따로 실행한다 (윈도우 자동 검사에서 창이 1.2초 멈춤, 2026-09-25).
+    # 그래서 이 PC 정보도 창이 아니라 작업 스레드에서 모은다.
+    out["system"] = report_mod.system_lines()
     scripts = installed_scripts()
     out["installed_scripts"] = [str(p) for p in scripts]
     out["script_details"] = script_details(scripts, bridge.mailbox)

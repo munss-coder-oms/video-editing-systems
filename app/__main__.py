@@ -196,7 +196,9 @@ def _run_helper_smoke_test(app, window, install, QTimer) -> int:
     import time
 
     outcome = {"code": 1, "done": False}
-    ticks = {"last": time.monotonic(), "worst": 0.0}
+    started = time.monotonic()
+    # 첫 틱부터 잰다: 창을 처음 그리는 시간은 리졸브의 답을 기다리는 동안 멈추는지와 상관없다.
+    ticks = {"last": None, "worst": 0.0, "at": 0.0, "doing": ""}
 
     def finish(code: int, message: str) -> None:
         if outcome["done"]:
@@ -210,7 +212,11 @@ def _run_helper_smoke_test(app, window, install, QTimer) -> int:
     def tick():
         # 리졸브의 답을 기다리는 동안에도 창이 계속 움직이는지 (0.1초마다 불려야 함)
         now = time.monotonic()
-        ticks["worst"] = max(ticks["worst"], now - ticks["last"])
+        if ticks["last"] is not None and now - ticks["last"] > ticks["worst"]:
+            # 다시 실패하면 언제, 무엇을 하던 중이었는지 알 수 있게 남긴다
+            ticks["worst"] = now - ticks["last"]
+            ticks["at"] = ticks["last"] - started
+            ticks["doing"] = window.message.text() if hasattr(window, "message") else ""
         ticks["last"] = now
 
     def check_install():
@@ -229,12 +235,15 @@ def _run_helper_smoke_test(app, window, install, QTimer) -> int:
     def poll():
         if window.last_report is None:
             return
+        tick()  # 결과 저장 바로 뒤에 멈춘 시간도 빠짐없이 센다
         if not window.last_report.is_file():
             finish(1, f"HELPER SMOKE FAIL: 결과 파일 없음 {window.last_report}")
         elif ticks["worst"] > 1.0:
-            finish(1, f"HELPER SMOKE FAIL: 창이 {ticks['worst']:.1f}초 멈춤")
+            finish(1, f"HELPER SMOKE FAIL: 창이 {ticks['worst']:.1f}초 멈춤 "
+                      f"(시작 후 {ticks['at']:.1f}초부터, 그 뒤 화면 문구: {ticks['doing']!r})")
         else:
             print(f"결과 파일: {window.last_report}", flush=True)
+            print(f"가장 길게 멈춘 시간: {ticks['worst']:.2f}초", flush=True)
             finish(0, "HELPER SMOKE OK")
 
     tick_timer = QTimer()

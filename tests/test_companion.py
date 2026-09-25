@@ -428,6 +428,23 @@ def test_report_has_step_summary_and_raw_answers(qapp, window, fake, tmp_path):
     assert "[우체통의 요청 파일]" in text and "---- 리졸브의 마지막 답" in text
 
 
+def test_report_reads_pc_info_off_the_window_thread(qapp, window, fake, monkeypatch):
+    """윈도우 판을 읽는 일('ver' 명령 실행)은 창이 아니라 작업 스레드에서 한다 (창이 1.2초 멈췄던 문제)."""
+    threads = []
+    real = report.system_lines
+
+    def spy():
+        threads.append(threading.current_thread() is threading.main_thread())
+        return real()
+
+    monkeypatch.setattr(report, "system_lines", spy)
+    window.report_btn.click()
+    wait_until(qapp, lambda: window.last_report is not None)
+    assert threads == [False]
+    text = window.last_report.read_text(encoding="utf-8-sig")
+    assert re.search(r"^코드 지문: [0-9a-f]{12}$", text, re.M)
+
+
 def test_report_keeps_every_attempt(qapp, window, fake):
     """같은 단계를 여러 번 해도 각 시도의 답이 모두 결과 파일에 남는다."""
     connect(qapp, window, fake)

@@ -193,7 +193,8 @@ def build_report(session: TestSession, link: Dict[str, Any], env: Dict[str, Any]
     lines = ["AI 도우미 - 리졸브 연결 시험 결과", "=" * 40, ""]
     lines += step_lines(session)
     lines += ["", "이 파일을 그대로 보내 주세요.", "", "[이 PC]"]
-    lines += system_lines()
+    # 보통은 작업 스레드에서 모아 둔 것 (collect_env). 없을 때만 여기서 읽는다.
+    lines += env.get("system") or system_lines()
     mailbox = link.get("mailbox")
     lines += [
         "",
