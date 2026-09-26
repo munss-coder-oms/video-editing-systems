@@ -349,6 +349,14 @@ def _plan_slot(req: SlotRequest, env: PlanEnv, voice: VoiceMemory, *, override: 
     debug["mapping_conflicts"] = assignment.conflicts
     enabled_streams = sorted({assignment.stream_of[_item_key(it)] for it in usable
                               if it.path == primary and _item_key(it) in assignment.stream_of})
+    usable_keys = {_item_key(it) for it in usable}
+    unknown_usable = [it for it in assignment.unknown if _item_key(it) in usable_keys
+                      and counts.get(it.path or "", 0) >= 2]
+    if len(pm.audio_tracks) >= 2 and unknown_usable and not any(
+            _item_key(it) in assignment.stream_of for it in usable if it.path in media):
+        # 어느 클립이 원본의 몇 번째 소리인지 하나도 모름 (트랙 일부를 지웠거나 따로 자름, 연결 정보도 없음):
+        # 목소리를 골라도 넣을 곳을 찾지 못하니 묻지 않고 까닭을 알린다 (고르기 → 거절이 되풀이되지 않게)
+        raise PlanRefused("unmapped_tracks", n=len(unknown_usable))
 
     sig = layout_signature(pm)
     remembered = voice.choice(sig) if len(pm.audio_tracks) >= 2 else None
@@ -384,7 +392,6 @@ def _plan_slot(req: SlotRequest, env: PlanEnv, voice: VoiceMemory, *, override: 
             voice_of[p] = int(c2["stream"])
         else:
             warnings["other_layout"] = warnings.get("other_layout", 0) + 1
-    usable_keys = {_item_key(it) for it in usable}
     unknown = [it for it in assignment.unknown if _item_key(it) in usable_keys and it.path in voice_of
                and counts.get(it.path, 0) >= 2]
     if unknown:
@@ -392,6 +399,9 @@ def _plan_slot(req: SlotRequest, env: PlanEnv, voice: VoiceMemory, *, override: 
     voice_items = [it for it in usable if it.path in voice_of
                    and assignment.stream_of.get(_item_key(it)) == voice_of[it.path]]
     if not voice_items:
+        if unknown:
+            # 고른 목소리가 몇 번째 소리인지 모르는 클립에 있을 수 있다: 다시 골라도 소용없으니 까닭을 알린다
+            raise PlanRefused("unmapped_tracks", n=len(unknown), stream=chosen)
         raise PlanRefused("no_voice_items", stream=chosen)
 
     # 2. 크기 재는 중

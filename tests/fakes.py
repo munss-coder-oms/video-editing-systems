@@ -160,7 +160,7 @@ class FakeResolve:
             if not isinstance(c, str) or not TAG_RE.match(c) or c in seen:
                 self._fail("add_markers", "bad_args", "custom")
             seen.add(c)
-            if m["frame"] < 0 or m.get("dur", 1) < 1 or m["frame"] + m.get("dur", 1) > self.length:
+            if m["frame"] < 0 or m.get("dur", 1) < 1:
                 self._fail("add_markers", "bad_args", "frame")
         have = {m.get("custom") for m in self.markers.values()}
         placed, failed, skipped = [], [], []
@@ -169,11 +169,12 @@ class FakeResolve:
             if m["custom"] in have:
                 skipped.append(i)
                 continue
-            done = False
+            done, err = False, "taken"
             for k in range(6):
                 f = m["frame"] + k
                 dur = 1 if point else max(1, m.get("dur", 1) - k)
                 if f + dur > self.length:
+                    err = "outside"  # Lua처럼 타임라인 밖의 줄은 그 줄만 넣지 않는다
                     break
                 if f in self.markers:
                     continue
@@ -188,7 +189,7 @@ class FakeResolve:
                 done = True
                 break
             if not done:
-                failed.append({"i": i, "err": "taken"})
+                failed.append({"i": i, "err": err})
         return {"placed": placed, "failed": failed, "skipped_existing": skipped, "point_fallback": point,
                 "requested": len(rows), "length": self.length, "calls": {"Timeline.AddMarker": "ok"}}
 

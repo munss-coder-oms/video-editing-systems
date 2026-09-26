@@ -128,6 +128,42 @@ def test_compact_layout_at_380x640(qapp, make_window, fake):
     assert w.smoke_check() == []
 
 
+@pytest.mark.parametrize("height", [640, 760])
+def test_gears_stay_reachable_in_tiles(qapp, make_window, fake, height):
+    """낮은 화면(타일)에서도 ⚙가 보이고 눌리면 그 버튼의 설정이 열린다 (설계 B1.2 "⚙는 늘 누를 수 있다")."""
+    w = connected_window(qapp, make_window, fake)
+    resize(qapp, w, 380, height)
+    assert w.layout_name in ("tiles", "tight") and w.smoke_check() == []
+    for b, g in zip(w.automation.buttons, w.automation.gears):
+        assert g.isVisible() and w._inside(g) and g.width() >= 40 and g.height() >= 40
+        centre = g.mapTo(w, g.rect().center())
+        assert w.childAt(centre) is g
+    w.automation.gears[1].click()
+    assert w.stack.currentWidget() is w.settings_page and w.settings_page.number == w.automation.buttons[1].number
+
+
+@pytest.mark.parametrize("size", [(420, 900), (380, 760)])
+def test_progress_for_a_job_without_a_slot_is_shown_with_stop(qapp, make_window, fake, size):
+    """버튼과 상관없는 일(대화의 찾기 등)도 진행 줄과 [멈추기]가 버튼 아래에 보이고 눌린다."""
+    w = connected_window(qapp, make_window, fake)
+    resize(qapp, w, *size)
+    stopped = []
+    w.automation.stop_clicked.connect(lambda: stopped.append(True))
+    w.automation.show_progress(None, "1/3 소리 읽는 중", 0.2, True)
+    settle(qapp)
+    row, stop = w.automation.progress, w.automation.progress.stop_btn
+    assert row.isVisible() and w._inside(row) and w.automation.grid.indexOf(row) >= 0
+    centre = stop.mapTo(w, stop.rect().center())
+    assert w.childAt(centre) is stop
+    lowest = max(b.mapTo(w, b.rect().bottomLeft()).y() for b in w.automation.buttons)
+    assert row.mapTo(w, row.rect().topLeft()).y() > lowest  # 버튼 아래 (버튼에 가리지 않음)
+    stop.click()
+    assert stopped == [True]
+    w.automation.hide_progress()
+    settle(qapp)
+    assert not row.isVisible() and w.smoke_check() == []
+
+
 @pytest.mark.parametrize("width", [360, 460])
 @pytest.mark.parametrize("height", [640, 760, 900])
 def test_any_width_from_360_to_460_fits(qapp, make_window, fake, width, height):
@@ -217,9 +253,34 @@ def test_ime_preedit_enter_does_not_send(qapp, make_window, fake):
     commit = QInputMethodEvent("", [])
     commit.setCommitString("한")
     QApplication.sendEvent(box, commit)
-    assert box.preedit == "" and box.toPlainText().strip() == "한"
+    assert box.preedit == "" and box.toPlainText() == "한"  # 줄 바꿈이 끼지 않는다
     _key(box, Qt.Key_Return)
     assert sent == ["한"] and box.toPlainText() == ""
+    # 적던 말 끝의 조합 중인 글자도: Enter는 확정만 하고 앞의 말과 같은 줄에 남는다
+    box.setPlainText("3분 20초에 표시해")
+    box.moveCursor(box.textCursor().MoveOperation.End)
+    QApplication.sendEvent(box, QInputMethodEvent("줘", []))
+    _key(box, Qt.Key_Return)
+    commit = QInputMethodEvent("", [])
+    commit.setCommitString("줘")
+    QApplication.sendEvent(box, commit)
+    assert box.toPlainText() == "3분 20초에 표시해줘" and sent == ["한"]
+
+
+def test_chat_input_grows_for_a_long_wrapped_line(qapp, make_window, fake):
+    """긴 한 문단이 접혀 여러 줄이 되면 입력 칸이 세 줄까지 커진다 (설계 B1.3)."""
+    from app.companion import theme
+
+    w = connected_window(qapp, make_window, fake)
+    resize(qapp, w, 380, 900)
+    box = w.chat.input
+    box.setPlainText("5분에서 6분 사이에 2초 넘게 쉰 곳 표시하고 3분 20초에 빨간 표시도 해줘 " * 2)
+    settle(qapp)
+    assert box.document().blockCount() == 1 and box.document().size().height() >= 2
+    assert box.height() > theme.INPUT_H
+    box.setPlainText("짧게")
+    settle(qapp)
+    assert box.height() == theme.INPUT_H
 
 
 def test_enter_shift_enter_and_escape(qapp, make_window, fake):
@@ -438,7 +499,8 @@ def test_leftover_copy_is_deleted_only_after_confirm(qapp, make_window, fake, tm
     w.confirm = lambda *a: True
     w.check_page.leftover_btn.click()
     wait_until(qapp, lambda: w.action is None and w.pending == 0)
-    assert sent == [{"stage": "C8", "expect_fingerprint": "3:1:2", "original_uid": "tl-1",
+    # leftover: 남은 복사본 지우기 모드 (쪽·재생 위치를 되돌리지 않고, 복사본이 열려 있을 때만 원래 타임라인으로)
+    assert sent == [{"stage": "C8", "expect_fingerprint": "3:1:2", "original_uid": "tl-1", "leftover": True,
                      "original_name": "Timeline 1", "copy_uid": "tl-2", "copy_name": "AI 도우미 점검용 101500"}]
     assert w.message.text().endswith(S.LEFTOVER_DELETED)
     assert store.load() is None and not w.check_page.leftover_btn.isVisible()
@@ -470,3 +532,24 @@ def test_script_without_add_markers_asks_for_one_more_click(qapp, make_window, f
     assert w.status.text() == S.STATUS_OLD_SCRIPT
     assert w.automation.buttons[0].receipt.text() == S.SLOT_DISABLED_OLD_SCRIPT
     assert not w.automation.buttons[0].isEnabled()
+
+
+def test_failed_slot_settings_save_says_settings_not_result_file(qapp, make_window, fake, monkeypatch):
+    """⚙ [저장]·대화의 "자동화 버튼에 저장"이 실패하면 버튼 설정을 못 저장했다고 (결과 파일이 아니라)."""
+    from types import SimpleNamespace
+
+    w = connected_window(qapp, make_window, fake)
+
+    def boom(*a, **k):
+        raise OSError("디스크가 가득 찼어요")
+
+    monkeypatch.setattr(w.settings, "configure_slot", boom)
+    monkeypatch.setattr(w.settings, "save_slot", boom)
+    w.on_slot_settings(1)
+    w.settings_page.saved.emit(1, "mark_pauses", "쉬는 곳 표시", {"min_s": 2.0})
+    assert w.message.text() == S.SETTINGS_SAVE_FAILED.format(error="디스크가 가득 찼어요")
+    p = SimpleNamespace(kind="mark_pauses", params={"min_s": 2.0}, scope={"kind": "whole"}, id="P1")
+    assert w.chat_flow.save(p, 1) is False
+    log = w.chat.log.toPlainText()
+    assert S.SETTINGS_SAVE_FAILED.format(error="디스크가 가득 찼어요") in log
+    assert S.REPORT_FAILED.split("{")[0] not in log

@@ -4,10 +4,12 @@
 1. 정리 (NFC, 전각 → 반각, 빈칸 하나로).
 2. "빼고/말고"(부정)는 2.1에서 알아듣지 않는다 → 되묻기.
 3. 따옴표 안의 글(표시 이름·메모)과 양("2초 넘게", "6dB", "3개만")을 먼저 찾아 가려 두고, 시간 말을 찾는다.
-4. 부탁을 마디로 나눈다: 하고/그리고/쉼표/마침표 ... (시간 말 "5분하고 6분 사이" 안에서는 나누지 않는다).
-   "랑/이랑"은 양쪽에 동작이나 시간이 있을 때만 나눈다.
+4. 부탁을 마디로 나눈다: 하고/해 주고/그리고/쉼표/마침표 ... (시간 말 "5분하고 6분 사이" 안에서는 나누지 않는다).
+   "랑/이랑"은 양쪽에 동작이나 시간이 있을 때만, 다른 동사 뒤의 "-고"(키우고, 자르고, 옮기고, 걸고 ...)는 앞에 동작이
+   있고 뒤에 새 부탁(시간·대상·색)이 있을 때만 나눈다. 나눈 자리에 걸친 동작 낱말("찍고")은 앞 마디의 것으로 본다.
 5. 마디마다 규칙을 차례로 본다 (못 하는 부탁 → 도움말 → 상태 → 되돌리기 → 저장 → 모두 빼기 → 소리 바꾸기 →
-   지우기 → 재생 위치 → 쉬는 곳 → 튀는 소리 → 표시). 규칙은 쓴 글자 자리(consumed)를 적는다.
+   지우기 → 재생 위치 → 쉬는 곳 → 튀는 소리 → 표시). 규칙은 실제로 쓴 글자 자리(consumed)만 적는다: 표시 규칙은
+   표시 동작만, 도움말·되돌리기·저장은 그 낱말만. 권하는 표시(자르기·소리)는 말한 시간마다 하나씩.
    시간만 있는 마디("3분,")는 옆 표시 마디에 붙고, 색·메모만 있는 마디("빨간색으로")는 앞 마디를 꾸민다.
 6. 모자람 검사: 쓰지 않은 자리에 시간·동작·색 낱말이 남았거나, 다른 마디는 알아들었는데 한 마디를 못 알아들었으면
    "못 알아들은 부분"으로 남긴다 (카드의 주황 줄). 나눈 뒤 동작만 남은 마디("…하고 지워")가 있으면 부탁 전체를 되묻는다
@@ -46,9 +48,14 @@ OFFER_COLOR = {"cut": "Purple", "audio": "Yellow"}
 _FILLER_RE = re.compile(r"해\s*주세요|해\s*줘|주세요|해줄래|해\s*줄래|부탁해|제발|please|좀|줘|요|해|하|에서|에|을|를|은|는|이|가|도|만"
                         r"|으로|로|것|거|곳|부분|데|그리고|그|저|이제|다음|또|꼭|한번|한\s*번|[\s,;.!?~'\"]", re.IGNORECASE)
 _SPLIT_RE = re.compile(r"\s*(?:그리고\s*나서|그리고|그\s*다음에|그\s*다음|,|;|(?<!\d)\.(?!\d)|!|\?|\n)\s*")
-_STEM = r"(?:(?<=하)|(?<=찍)|(?<=지우)|(?<=달)|(?<=없애)|(?<=넣)|(?<=가)|(?<=해))"
+_STEM = r"(?:(?<=하)|(?<=찍)|(?<=지우)|(?<=달)|(?<=없애)|(?<=넣)|(?<=가)|(?<=해)|(?<=주))"
 _AND_VERB_RE = re.compile(_STEM + r"고(?:\s*나서)?(?=\s)")
+# 다른 동사 뒤의 "-고" ("키우고", "자르고", "옮기고", "걸고" ...): 앞에 동작(또는 못 하는 부탁 낱말)이 있고
+# 뒤에 새 부탁(시간·대상·색·못 하는 부탁 낱말)이 있을 때만 나눈다 ("쉬는 곳 찾고 표시해줘"는 한 부탁).
+_AND_ANY_RE = re.compile(r"(?<=[가-힣])고(?:\s*나서)?(?=\s)")
+_REFUSAL_RES = (K.STUDIO_RE, K.KEYFRAME_RE, K.NEEDS_AI_RE, K.CUT_RE, K.OUT_OF_SCOPE_RE, K.AUDIO_NOT_READY_RE)
 _RANG_RE = re.compile(r"(?<=[가-힣])(?:이랑|랑)(?=\s)")
+_SAVE_WORD_RE = re.compile(r"자동화|버튼|이대로|그대로")
 _EDGE_JUMP_RE = re.compile(r"(?:맨\s*)?(처음|시작|앞|끝|마지막|뒤)\s*(?:으로|로)")
 
 
@@ -90,6 +97,11 @@ class _Tokens:
         counts = [c for c in counts_all if c.kind == "count"]
         masked = q_spans + [f.span for f in min_s + above + db + lufs + counts]
         times = scan(text, masked)
+        # "2초 (정도) 쉰 곳": 초만 있는 시간 바로 뒤에 "쉰/쉬는"이 붙으면 자리가 아니라 쉰 길이다
+        lengths = [_pause_length(text, t) for t in times]
+        if any(lengths):
+            min_s = sorted(min_s + [f for f in lengths if f], key=lambda f: f.start)
+            times = [t for t, f in zip(times, lengths) if f is None]
         t_spans = [t.span for t in times]
         ones = [c for c in counts_all if c.kind == "one" and not overlaps(c.span, t_spans)]
         objects = outside(K.find_objects(text))
@@ -99,6 +111,20 @@ class _Tokens:
                    colors=outside(K.find_colors(text)), unknown_colors=outside(K.find_unknown_colors(text)),
                    quotes=quotes, min_s=min_s, above=above, db=db, lufs=lufs, counts=counts, ones=ones,
                    amounts=outside(K.find_word_amounts(text)), tracks=outside(K.find_tracks(text)))
+
+
+_PAUSE_AFTER_RE = re.compile(r"\s*(?:동안\s*)?(?:쉰|쉬는|쉬었던|쉬고\s*있는)")
+
+
+def _pause_length(text: str, t: TimeToken) -> Optional[Found]:
+    """"2초 쉰 곳", "2초 정도 쉬는 곳"의 "2초 (정도)" → 쉰 길이(min_s). "3분 20초 쉬는 곳"(분이 있음)이나
+    "3초에 쉬는 곳"(조사가 붙음)은 자리로 둔다."""
+    clk = t.expr.point if isinstance(t.expr, Around) else t.expr
+    if not isinstance(clk, Clock) or not clk.has_unit or (clk.lead or clk.unit) != "s" or "초" not in clk.raw:
+        return None
+    if not _PAUSE_AFTER_RE.match(text, t.end):
+        return None
+    return Found(t.start, t.end, "min_s", float(clk.seconds), t.text)
 
 
 def _in(items, a: int, b: int):
@@ -163,6 +189,7 @@ class _Result:
     reply: Optional[Reply] = None
     question: Optional[Question] = None
     consumed: List[Span] = field(default_factory=list)
+    left: List[str] = field(default_factory=list)  # 이 마디에서 쓰지 않은 부탁 (못 알아들은 부분으로)
 
 
 def _split(tok: _Tokens) -> List[Tuple[int, int]]:
@@ -186,6 +213,21 @@ def _split(tok: _Tokens) -> List[Tuple[int, int]]:
 
         if lively(left_a, m.start()) and lively(m.end(), right_b):
             cuts.append(m.span())
+    # 다른 동사 뒤의 "-고": 앞에 동작, 뒤에 새 부탁이 있을 때만
+    for m in _AND_ANY_RE.finditer(text):
+        if overlaps(m.span(), protected) or overlaps(m.span(), cuts):
+            continue
+        left_a = max([c[1] for c in cuts if c[1] <= m.start()], default=0)
+        right_b = min([c[0] for c in cuts if c[0] >= m.end()], default=len(text))
+
+        def refusal(a: int, b: int) -> bool:
+            return any(r.search(text[a:b]) for r in _REFUSAL_RES)
+
+        acts = any(v.start < m.start() and left_a < v.end for v in tok.verbs) or refusal(left_a, m.start())
+        fresh = bool(_in(tok.times, m.end(), right_b) or _in(tok.objects, m.end(), right_b)
+                     or _in(tok.colors, m.end(), right_b) or refusal(m.end(), right_b))
+        if acts and fresh:
+            cuts.append(m.span())
     cuts.sort()
     spans: List[Tuple[int, int]] = []
     pos = 0
@@ -207,6 +249,29 @@ def _split(tok: _Tokens) -> List[Tuple[int, int]]:
     return out
 
 
+def _residue_text(c: "_Clause", spans: Sequence[Span]) -> str:
+    """마디에서 쓴 자리를 뺀 나머지 글 (사용자가 쓴 말 그대로, 빈칸 하나로). 조사·끝말뿐이면 빈 글."""
+    chars = list(c.text)
+    for a, b in spans:
+        for i in range(max(a, c.start), min(b, c.end)):
+            chars[i - c.start] = " "
+    rest = re.sub(r"\s+", " ", "".join(chars)).strip(" ,;.!?")
+    return rest if _FILLER_RE.sub("", rest) else ""
+
+
+def _trim_verbs(verbs: Sequence[Found], spans: Sequence[Tuple[int, int]], text: str) -> List[Found]:
+    """나눈 자리에 걸친 동작 낱말("찍고"의 "고"에서 나눔)은 앞 마디 안쪽만 남긴다. 나눈 말 안에만 있으면 버린다."""
+    out: List[Found] = []
+    for v in verbs:
+        if any(a <= v.start and v.end <= b for a, b in spans):
+            out.append(v)
+            continue
+        part = next(((max(a, v.start), min(b, v.end)) for a, b in spans if v.start < b and a < v.end), None)
+        if part is not None and part[1] > part[0]:
+            out.append(Found(part[0], part[1], v.kind, v.value, text[part[0]:part[1]]))
+    return out
+
+
 def _residue(c: "_Clause", spans: Sequence[Span]) -> str:
     """마디에서 찾은 낱말 자리와 조사·끝말을 뺀 나머지 (시간만·색만 있는 마디가 정말 그것뿐인지 볼 때)."""
     chars = list(c.text)
@@ -217,7 +282,9 @@ def _residue(c: "_Clause", spans: Sequence[Span]) -> str:
 
 
 _STEM_ENDINGS = (("없애", "없애줘"), ("지우", "지워줘"), ("하", "해줘"), ("찍", "찍어줘"), ("달", "달아줘"), ("넣", "넣어줘"),
-                 ("가", "가줘"), ("해", "해줘"))
+                 ("가", "가줘"), ("해", "해줘"), ("주", "줘"), ("자르", "잘라줘"), ("줄이", "줄여줘"), ("키우", "키워줘"),
+                 ("옮기", "옮겨줘"), ("찾", "찾아줘"), ("걸", "걸어줘"), ("올리", "올려줘"), ("낮추", "낮춰줘"),
+                 ("맞추", "맞춰줘"), ("바꾸", "바꿔줘"), ("끄", "꺼줘"), ("켜", "켜줘"))
 
 
 def spoken(text: str) -> str:
@@ -281,7 +348,11 @@ class RuleBrain:
         replies = parsed.replies
         if not commands:
             if replies:
-                return replies[0]
+                rep = replies[0]
+                if parsed.leftovers:
+                    # 답만 하는 부탁에 다른 부탁이 섞였으면 그 부분을 숨기지 않는다 (화면이 주황 줄로 알린다)
+                    rep = Reply(rep.code, {**rep.data, "leftovers": list(parsed.leftovers)}, rep.chips)
+                return rep
             if any(r.clause.has_tokens for r in parsed.results):
                 return _what_to_do(parsed)
             return NotUnderstood(_examples(), text=norm)
@@ -324,7 +395,9 @@ class RuleBrain:
                                                  [Chip("example:mark_time", {"time": "3분 20초"}),
                                                   Chip("example:range_pauses")]))
         tok = _Tokens.read(text)
-        clauses = [_Clause.cut(tok, a, b) for a, b in _split(tok)]
+        spans = _split(tok)
+        tok.verbs = _trim_verbs(tok.verbs, spans, text)
+        clauses = [_Clause.cut(tok, a, b) for a, b in spans]
         results = [self._clause(c) for c in clauses]
         self._join(results)
         # 나눈 뒤 동작만 남은 마디 → 부탁 전체를 되묻는다 (설계 B4.2)
@@ -343,6 +416,9 @@ class RuleBrain:
             if good and r.kind in ("unmatched", "verb_only", "question", "time_only", "modifier"):
                 leftovers.append(spoken(r.clause.text))
                 consumed.append(r.clause.span)
+            for word in r.left:
+                if word not in leftovers:
+                    leftovers.append(word)
         if good:
             loose = [t.span for t in tok.times] + [v.span for v in tok.verbs] + \
                 [c.span for c in tok.colors + tok.unknown_colors]
@@ -368,6 +444,17 @@ class RuleBrain:
                 target = _neighbour(results, i, ("mark",))
                 if target is not None:
                     _merge_times(target, r)
+                    continue
+                # "3분 20, 표시해줘": 시간 없이 "어디에 표시할까요?"가 된 옆 마디에 그 시간을 준다
+                ask = next((results[j] for j in (i + 1, i - 1) if 0 <= j < len(results)
+                            and results[j].question is not None and results[j].question.code == "mark_where"), None)
+                if ask is not None:
+                    ask.clause.times = list(r.clause.times)
+                    new = self._mark(ask.clause)
+                    if new.command is not None:
+                        ask.kind, ask.command, ask.question = new.kind, new.command, None
+                        ask.consumed = new.consumed + r.consumed
+                        r.kind = "merged"
             elif r.kind == "modifier":
                 target = _neighbour(results, i, ("mark", "mark_pauses", "mark_spikes", "clear_marks"), prefer_prev=True)
                 if target is not None:
@@ -408,29 +495,49 @@ class RuleBrain:
         if subtitles and (c.verb("mark", "find") or re.search(r"만들|생성|달아|넣어|뽑아", text)) \
                 and not c.obj("marker"):
             return _Result(c, "reply", reply=Reply("subtitles_later"), consumed=whole)
-        # 도움말·상태
-        if K.HELP_RE.search(text):
-            return _Result(c, "reply", reply=Reply("help", {}, _examples()), consumed=whole)
+        # 도움말·상태. 도움말은 그 낱말만 쓴다: 같은 마디의 다른 부탁("도움말 3분에 표시")은 못 알아들은 부분으로
+        h = c.search(K.HELP_RE)
+        if h:
+            return self._context(c, "reply", [h], reply=Reply("help", {}, _examples()))
         if K.STATUS_RE.search(text):
             return _Result(c, "command", command=Command("status", clause=text, span=c.span), consumed=whole)
         # 되돌리기 ("방금 거 취소", "방금 넣은 거 빼줘")
         last = c.search(K.UNDO_LAST_RE)
         kinds_said = c.obj("pause", "spike") or c.colors
-        if (c.verb("undo") and not kinds_said) or (last and c.verb("clear", "undo")):
-            return _Result(c, "command", command=Command("undo", {"which": "last"}, {"which": SAID}, clause=text,
-                                                         span=c.span), consumed=whole)
+        if last and c.verb("clear", "undo"):
+            if c.colors:
+                # "방금 넣은 빨간 표시 빼줘": 방금 것 전체인지, 그 색 표시 모두인지 모름 → 되묻기
+                return self._recent_question(c)
+            return self._undo(c, [last])
+        if c.verb("undo") and not kinds_said:
+            every = c.search(K.UNDO_ALL_RE)
+            if every or any(isinstance(t.expr, Whole) for t in c.times):
+                # "다 취소": 되돌리기는 한 번에 하나 → 방금 것만인지, 도우미 것 모두인지 묻는다
+                chips = [Chip("example:undo"), Chip("example:remove_all")]
+                return _Result(c, "question", question=Question("undo_all", {"text": text}, chips), consumed=whole)
+            if c.times and c.obj("marker", "ours"):
+                # "3분에 표시 취소", "5분~6분 표시 취소": 말한 자리의 도우미 표시 지우기 (범위 지킴이를 거친다)
+                return self._clear(c)
+            if c.times:
+                chip = Chip("example:clear_at", {"time": c.times[0].text})
+                return _Result(c, "question", question=Question("clear_what", {"text": text}, [chip]),
+                               consumed=whole)
+            return self._undo(c, [])
         # 자동화 버튼에 저장 (구간은 저장하지 않는다)
         m = K.SAVE_SLOT_RE.search(text)
-        if m or (c.verb("save") and re.search(r"자동화|버튼|이대로|그대로", text)):
+        if m or (c.verb("save") and _SAVE_WORD_RE.search(text)):
             slot = None
             if m:
                 g = next((x for x in m.groups() if x), None)
                 slot = int(g) if g else None
             cmd = Command("save_slot", {"slot": slot}, {"slot": SAID} if slot else {}, clause=text, span=c.span)
-            return _Result(c, "command", command=cmd, consumed=whole)
+            used = [c.search(K.SAVE_SLOT_RE) if m else c.search(_SAVE_WORD_RE)]
+            return self._context(c, "command", used + [v.span for v in c.verb("save")], command=cmd)
         # 도우미가 넣은 것 모두 빼기
-        if K.REMOVE_ALL_RE.search(text) and not (c.colors or c.obj("pause", "spike") or c.times):
-            return _Result(c, "command", command=Command("remove_all_ours", clause=text, span=c.span), consumed=whole)
+        r = c.search(K.REMOVE_ALL_RE)
+        if r and not (c.colors or c.obj("pause", "spike") or c.times):
+            cmd = Command("remove_all_ours", clause=text, span=c.span)
+            return self._context(c, "command", [r] + [v.span for v in c.verb("clear")], command=cmd)
         # 소리 바꾸기: 2.1에서는 못 한다 → 그 자리에 노란 표시를 권한다
         audio_verbs = c.verb("down", "up", "even", "press")
         if audio_verbs and not c.obj("pause", "marker"):
@@ -440,6 +547,13 @@ class RuleBrain:
         # 지우기 (도우미 표시만)
         clear_verbs = c.verb("clear", "undo")
         if clear_verbs:
+            if c.search(K.OWN_MARKS_RE):
+                # "내가 찍은 표시 지워줘": 사용자가 넣은 표시는 도우미가 지우지 않는다 (모든 도우미 표시로 바꾸지 않는다)
+                return _Result(c, "reply", reply=Reply("own_markers", {}, [Chip("example:clear_ours")]),
+                               consumed=whole)
+            if c.search(K.RECENT_RE):
+                # "방금 파란 표시 지워": 방금 넣은 것인지, 그 색 표시 모두인지 모름 → 되묻기
+                return self._recent_question(c)
             target = c.obj("marker", "pause", "spike", "ours") or c.colors
             if target:
                 return self._clear(c)
@@ -483,8 +597,31 @@ class RuleBrain:
 
     # ── 규칙마다 ──────────────────────────────────────────────────────
 
+    def _context(self, c: _Clause, kind: str, used: List[Optional[Span]], **out: Any) -> _Result:
+        """시간·범위를 쓰지 않는 부탁(도움말·되돌리기·저장·모두 빼기): 쓴 낱말만 쓴 자리로 적는다.
+        같은 마디에 시간·동작·색이 더 있으면 그 나머지를 못 알아들은 부분으로 (조용히 버리지 않는다)."""
+        used = [u for u in used if u]
+        left_tokens = [x for x in c.times + c.verbs + c.colors if not overlaps(x.span, used)]
+        res = _Result(c, kind, consumed=[c.span], **out)
+        if left_tokens:
+            rest = _residue_text(c, used + [x.span for x in c.objects if x.kind == "ours"])
+            if rest:
+                res.left = [spoken(rest)]
+        return res
+
+    def _undo(self, c: _Clause, used: List[Span]) -> _Result:
+        cmd = Command("undo", {"which": "last"}, {"which": SAID}, clause=c.text, span=c.span)
+        used = used + [v.span for v in c.verb("clear", "undo")]
+        return self._context(c, "command", used, command=cmd)
+
+    def _recent_question(self, c: _Clause) -> _Result:
+        rest = _residue_text(c, [s for s in [c.search(K.UNDO_LAST_RE) or c.search(K.RECENT_RE)] if s])
+        chips = [Chip("example:undo")] + ([Chip("text", {"text": spoken(rest)})] if rest else [])
+        return _Result(c, "question", question=Question("recent_clear", {"text": c.text}, chips), consumed=[c.span])
+
     def _mark(self, c: _Clause) -> _Result:
-        consumed = [x.span for x in c.objects + c.verbs + c.times + c.quotes + c.tracks + c.ones]
+        # 표시 동작만 쓴 자리로 (같은 마디의 "가줘"·"키워" 같은 다른 동작은 못 알아들은 부분으로 남긴다)
+        consumed = [x.span for x in c.objects + c.verb("mark", "find") + c.times + c.quotes + c.tracks + c.ones]
         if c.unknown_colors:
             # 리졸브에 없는 색을 말함: 다른 색으로 넣지 않는다 (마디 전체를 못 알아들음)
             return _Result(c, "unmatched")
@@ -508,10 +645,11 @@ class RuleBrain:
         return _Result(c, "command", command=cmd, consumed=consumed)
 
     def _offer(self, c: _Clause, offer: str, name: str) -> Command:
-        """못 하는 부탁 대신 그 자리에 표시 (자르기 → 보라, 소리 → 노랑). 시간을 말하지 않았으면 재생 위치."""
+        """못 하는 부탁 대신 그 자리에 표시 (자르기 → 보라, 소리 → 노랑). 시간을 말하지 않았으면 재생 위치.
+        시간을 여럿 말하면 ("3분과 5분에서 잘라줘") 시간마다 하나씩 (앞의 하나만 넣고 나머지를 버리지 않는다)."""
         times = list(c.times) or [TimeToken(c.start, c.start, "", Playhead(""))]
         items = [{"time": t, "color": OFFER_COLOR[offer], "name": name, "note": None,
-                  "src": {"at": SAID if t.text else DEFAULT, "color": DEFAULT, "name": DEFAULT}} for t in times[:1]]
+                  "src": {"at": SAID if t.text else DEFAULT, "color": DEFAULT, "name": DEFAULT}} for t in times]
         return Command("mark", {"items": items}, clause=c.text, span=c.span, offer=offer)
 
     def _audio(self, c: _Clause, verbs: List[Found]) -> _Result:
@@ -571,6 +709,10 @@ class RuleBrain:
         return _Result(c, "command", command=cmd, consumed=[x.span for x in c.verbs + c.times])
 
     def _find(self, c: _Clause, op: str) -> _Result:
+        # 마디 맨 앞의 조사 없는 "지금"("지금 쉬는 곳 표시해줘")은 재생 위치가 아니라 "이제"라는 뜻으로 본다
+        now = [t for t in c.times if _adverb_now(c, t)]
+        if now:
+            c.times = [t for t in c.times if t not in now]
         if len(c.times) > 1 or c.unknown_colors:
             return _Result(c, "unmatched")
         params: Dict[str, Any] = {}
@@ -593,12 +735,14 @@ class RuleBrain:
         elif c.ones:
             cmd.scope.count_hint = 1
         tracks = [t.value for t in c.tracks if t.kind == "track"]
-        if tracks:
-            cmd.scope.tracks = tracks
         if any(t.kind == "game_track" for t in c.tracks):
             return _Result(c, "unmatched")
-        consumed = [x.span for x in c.objects + c.verbs + c.times + c.colors[:1] + c.min_s + c.above + c.counts
-                    + c.ones + c.tracks]
+        if tracks:
+            # 2.1의 찾기는 목소리로 고른 소리만 듣는다. 말한 트랙만 골라 듣지 못하므로, 늘 막히는 카드 대신 먼저 알린다
+            chip = Chip("example:pauses" if op == "mark_pauses" else "example:spikes")
+            return _Result(c, "reply", reply=Reply("find_track", {"tracks": tracks}, [chip]), consumed=[c.span])
+        consumed = [x.span for x in c.objects + c.verb("mark", "find", "jump") + c.times + c.colors[:1] + c.min_s
+                    + c.above + c.counts + c.ones + c.tracks + now]
         return _Result(c, "command", command=cmd, consumed=consumed)
 
     # ── 시간 풀기 ─────────────────────────────────────────────────────
@@ -695,6 +839,17 @@ class RuleBrain:
 
 
 # ── 도우미 ────────────────────────────────────────────────────────────
+
+
+_NOW_PLACE_RE = re.compile(r"\s+(?:위치|자리|앞뒤|전후|쯤|근처|부근|즈음)")
+
+
+def _adverb_now(c: _Clause, t: TimeToken) -> bool:
+    """마디 맨 앞, 조사 없이 빈칸이 뒤따르는 "지금" (자리 낱말이 뒤에 오면 재생 위치 그대로)."""
+    if not isinstance(t.expr, Playhead) or t.text != "지금" or t.start != c.start:
+        return False
+    after = c.text[t.end - c.start:]
+    return bool(after[:1].isspace()) and not _NOW_PLACE_RE.match(after)
 
 
 def _neighbour(results: List[_Result], i: int, ops: Sequence[str], prefer_prev: bool = False) -> Optional[_Result]:

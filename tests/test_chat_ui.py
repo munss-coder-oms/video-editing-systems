@@ -348,3 +348,168 @@ def test_script_without_jump_to_asks_for_one_more_click(qapp, make_window, resol
     fake.known_ops = frozenset(o for o in OPS if o != "jump_to")
     _send(qapp, w, "3분 20초로 가줘")
     assert S.CHAT_OLD_SCRIPT in w.chat.log.toPlainText() and fr.jumps == []
+
+
+def test_lost_answer_shows_checking_then_recheck_turns_it_into_a_receipt(qapp, make_window, resolve, monkeypatch):
+    """[리졸브에 넣기] 뒤 답이 끊김: 실패로 닫지 않고 "들어갔는지 아직 몰라요" + [다시 확인].
+    다시 확인(연결 확인)이 꼬리표로 맞춰 보면 영수증과 [되돌리기]가 나오고, 대화 줄은 쉬운 우리말이다."""
+    import re
+
+    from app.companion.cards import ProposalCard
+    from engine.resolve_link.bridge import BridgeTimeout
+
+    fake, fr = resolve
+    w = _window(qapp, make_window, fake)
+    _send(qapp, w, "3분 20초에 빨간 표시해줘")
+    card = _cards(w, ProposalCard)[-1]
+    real_add, real_get = fr._op_add_markers, fr._op_get_markers
+    lost = {"on": True}
+
+    def add_then_lose(a):
+        real_add(a)
+        raise BridgeTimeout("add_markers")
+
+    def get(a):
+        if lost["on"]:
+            raise BridgeTimeout("get_markers")
+        return real_get(a)
+
+    monkeypatch.setattr(fr, "_op_add_markers", add_then_lose)
+    monkeypatch.setattr(fr, "_op_get_markers", get)
+    card.buttons["apply"].click()
+    wait_until(qapp, lambda: card.state == "checking" and not w.busy and w.pending == 0, 20)
+    assert card.title.text() == S.RECEIPT_UNKNOWN and S.RECEIPT_UNKNOWN_DETAIL in card.plain_text()
+    assert list(card.buttons) == ["recheck"] and len(_ours(fr)) == 1
+    assert Journal.for_timeline(w._timeline_info, w.state_root).entry(card.proposal.id)["status"] == "applying"
+
+    lost["on"] = False
+    card.buttons["recheck"].click()
+    wait_until(qapp, lambda: card.state == "receipt" and w.pending == 0, 20)
+    assert card.title.text().startswith("✓") and "undo" in card.buttons
+    line = S.RECONCILED.format(summary=S.RECONCILED_APPLIED.format(found=1, expected=1))
+    log = w.chat.log.toPlainText()
+    assert line in log
+    reconciled = [x for x in log.splitlines() if x.startswith(f"{S.CHAT_HELPER}: {S.RECONCILED.split('{')[0]}")]
+    assert reconciled and not any(re.search(r"\b(applied|partial|undone|applying)\b", x) for x in reconciled)
+    assert Journal.for_timeline(w._timeline_info, w.state_root).entry(card.proposal.id)["status"] == "applied"
+    assert [e["status"] for e in w.footer.entries] == ["applied"]
+
+
+def test_apply_pings_first_and_a_lost_connection_fails_fast(qapp, make_window, resolve):
+    """[리졸브에 넣기]는 먼저 짧게 ping: 끊겼으면 넣기 요청을 보내지 않고 바로 알린다. 끊긴 동안 카드 단추는 꺼진다."""
+    from app.companion import connection as conn
+    from app.companion.cards import ProposalCard
+
+    fake, fr = resolve
+    w = _window(qapp, make_window, fake)
+    _send(qapp, w, "3분 20초에 빨간 표시해줘")
+    card = _cards(w, ProposalCard)[-1]
+    assert card.buttons["apply"].isEnabled()
+    fake.online = False
+    before = len(fake.requests)
+    card.buttons["apply"].click()
+    wait_until(qapp, lambda: not w.busy and w.pending == 0, 20)
+    assert fake.requests[before:] == ["ping"] and _ours(fr) == {}
+    assert w.controller.status == conn.NOT_CONNECTED
+    assert S.APPLY_FAILED.split("{")[0] in card.plain_text() and card.state == "proposal"
+    assert not card.buttons["apply"].isEnabled()  # 끊긴 동안은 누를 수 없다
+    fake.online = True
+    w.controller.check_now("connect")
+    wait_until(qapp, lambda: w.connected and w.pending == 0, 20)
+    assert card.buttons["apply"].isEnabled()
+    since = len(fake.requests)
+    card.buttons["apply"].click()
+    wait_until(qapp, lambda: card.state == "receipt" and not w.busy, 20)
+    assert fake.requests[since] == "ping" and "add_markers" in fake.requests[since:]
+    assert len(_ours(fr)) == 1
+
+
+def test_view_on_a_card_from_another_timeline_does_not_move_the_playhead(qapp, make_window, resolve):
+    """[보기]·영수증 줄: 카드를 만든 타임라인이 열려 있지 않으면 옮기지 않고 어디에 있는지 알린다."""
+    from app.companion.cards import ProposalCard
+
+    fake, fr = resolve
+    w = _window(qapp, make_window, fake)
+    _send(qapp, w, "3분 20초에 빨간 표시해줘")
+    card = _cards(w, ProposalCard)[-1]
+    fr.info.update(timeline="Timeline 2", timeline_uid="tl-2")
+    card.extra["view:0"].click()
+    _idle(qapp, w)
+    assert fr.jumps == [] and _mutating(fake) == []
+    assert S.CHAT_JUMP_OTHER_TIMELINE.format(name="Timeline 1") in w.chat.log.toPlainText()
+    fr.info.update(timeline="Timeline 1", timeline_uid="tl-1")
+    card.item_labels[0].clicked.emit()
+    _idle(qapp, w)
+    assert fr.jumps == [(TL0 + 200 * FPS, "01:03:20:00")]
+
+
+def test_context_chips_after_connect_and_after_apply(qapp, make_window, resolve):
+    """설계 B1.5: 연결된 뒤 (여기 표시해줘)(2초 넘게 쉰 곳 표시)(튀는 소리 표시해줘), 넣은 뒤 (방금 거 취소)(표시만 다 지워줘).
+    칩은 입력 칸만 채우고 보내지 않는다."""
+    from app.companion.cards import ProposalCard
+    from app.companion.chat_view import ChipRow
+
+    fake, fr = resolve
+    w = _window(qapp, make_window, fake)
+    rows = [x for x in w.chat.log.items if isinstance(x, ChipRow)]
+    assert [[c.text() for c in r.chips] for r in rows] == [list(S.CHIPS_AFTER_CONNECT)]
+    w.controller.check_now("connect")
+    _idle(qapp, w)
+    assert len([x for x in w.chat.log.items if isinstance(x, ChipRow)]) == 1  # 연결할 때마다가 아니라 처음 한 번
+    _send(qapp, w, "3분 20초에 빨간 표시해줘")
+    card = _cards(w, ProposalCard)[-1]
+    card.buttons["apply"].click()
+    wait_until(qapp, lambda: card.state == "receipt" and not w.busy, 20)
+    row = w.chat.last_chips
+    assert [c.text() for c in row.chips] == list(S.CHIPS_AFTER_APPLY)
+    sent = []
+    w.chat.sent.connect(sent.append)
+    before = len(fake.requests)
+    row.chips[0].click()
+    assert w.chat.input.toPlainText() == "방금 거 취소" and sent == [] and len(fake.requests) == before
+
+
+def test_reply_with_another_request_shows_the_leftover_line(qapp, make_window, resolve):
+    """"도움말 3분에 표시": 도움말을 보여 주고, 섞인 "3분에 표시"는 한 것처럼 보이지 않게 주황 줄과 칩으로 알린다."""
+    fake, fr = resolve
+    w = _window(qapp, make_window, fake)
+    before = len(fake.requests)
+    _send(qapp, w, "도움말 3분에 표시")
+    log = w.chat.log.toPlainText()
+    assert S.CHAT_HELP in log and S.GUARD["leftover"].format(text="3분에 표시") in log
+    row = w.chat.last_chips
+    assert [c.text() for c in row.chips] == [S.CHIP_LEFTOVER]
+    row.chips[0].click()
+    assert w.chat.input.toPlainText() == "3분에 표시"
+    assert _mutating(fake, before) == []
+
+
+def test_timed_cancel_is_a_clear_card_and_own_markers_are_refused(qapp, make_window, resolve):
+    """"3분에 표시 취소"는 방금 것 되돌리기가 아니라 그 자리의 도우미 표시 지우기 카드 (범위 지킴이를 거침).
+    "내가 찍은 표시 지워줘"는 도우미 표시 모두 지우기 카드로 바꾸지 않고 못 한다고 알린다."""
+    from app.companion.cards import ClearCard, QuestionCard
+
+    fake, fr = resolve
+    w = _window(qapp, make_window, fake)
+    before = len(fake.requests)
+    _send(qapp, w, "10초에 표시 취소")
+    cards = _cards(w, ClearCard)
+    assert len(cards) == 1 and not _cards(w, QuestionCard)
+    assert cards[0].proposal.params.get("lo") is not None  # 말한 자리만
+    _send(qapp, w, "내가 찍은 표시 지워줘")
+    assert S.CHAT_REPLIES["own_markers"] in w.chat.log.toPlainText()
+    assert len(_cards(w, ClearCard)) == 1
+    _send(qapp, w, "다 취소해줘")
+    assert S.CHAT_QUESTIONS["undo_all"] in w.chat.log.toPlainText()
+    assert [c.text() for c in w.chat.last_chips.chips] == [S.CHIPS["example:undo"], S.CHIPS["example:remove_all"]]
+    assert _mutating(fake, before) == [] and any(m.get("name") == "내 파란 표시" for m in fr.markers.values())
+
+
+def test_clamped_value_note_reads_in_plain_korean():
+    from app.companion.cards import note_lines
+
+    lines = note_lines([("min_s_clamped", {"said": 10.0, "used": 5.0, "lo": 0.5, "hi": 5.0}),
+                        ("above_clamped", {"said": 30.0, "used": 20.0, "lo": 4.0, "hi": 20.0})])
+    assert lines == [S.CARD_NOTES["min_s_clamped"].format(said="10", used="5", lo="0.5", hi="5"),
+                     S.CARD_NOTES["above_clamped"].format(said="30", used="20", lo="4", hi="20")]
+    assert "말씀하신 10초 대신 5초" in lines[0]

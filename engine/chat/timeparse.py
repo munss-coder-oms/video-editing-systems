@@ -42,7 +42,8 @@ class Clock:
     seconds: float
     raw: str = ""
     has_unit: bool = True  # "5~6분"의 5처럼 단위 없는 숫자는 False (뒤의 단위를 빌린다)
-    unit: str = "s"  # 가장 작은 단위: h / m / s (단위를 빌려줄 때)
+    unit: str = "s"  # 가장 작은 단위: h / m / s
+    lead: str = ""  # 가장 큰(맨 앞) 단위: "6분 30초"는 m. 단위를 빌려줄 때 이것을 쓴다 (비면 unit)
 
 
 @dataclass(frozen=True)
@@ -141,12 +142,16 @@ _NUM = r"\d+(?:\.\d+)?"
 _TC4_RE = re.compile(r"(?<![\d:;.])(\d{1,2})[:;.](\d{2})[:;.](\d{2})([:;])(\d{2})(?![\d:;])")
 _HMS3_RE = re.compile(r"(?<![\d:;.])(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)(?![\d:;])")
 _MS2_RE = re.compile(r"(?<![\d:;.])(\d{1,3}):(\d{2}(?:\.\d+)?)(?![\d:;])")
-# "1시간 2분 5초", "3분20초", "3분 반", "200초", "3분 20" (초를 생략)
+# "3분 20"의 20(초를 생략) 뒤에 올 수 있는 것: 조사·물결·끝, 또는 빈칸 뒤 단위가 아닌 말 ("3분 20 표시해줘").
+# 빈칸 뒤가 숫자나 단위·개수(개, 곳, 번, dB, % …)이면 초로 보지 않는다.
+_SB_AFTER = (r"\s*(?:에|에서|쯤|부터|까지|으로|로|~|-|$|\s*[,;.!?])"
+             r"|\s+(?![\d.]|개|곳|군데|번|초|분|시간|프레임|dB|db|DB|Db|데시벨|디비|%|퍼센트)")
+# "1시간 2분 5초", "3분20초", "3분 반", "200초", "3분 20" (초를 생략. 분 뒤에서만)
 _KO_RE = re.compile(
     r"(?<![\d.])"
     r"(?:(?P<h>\d+)\s*시간(?:\s*(?P<hh>반))?)?\s*"
     r"(?:(?P<m>\d+)\s*분(?:\s*(?P<mh>반))?)?\s*"
-    r"(?:(?P<s>" + _NUM + r")\s*초|(?P<sb>\d{1,2})(?=\s*(?:에|에서|쯤|부터|까지|으로|로|~|-|$|\s*[,;.!?])))?"
+    r"(?:(?P<s>" + _NUM + r")\s*초|(?(m)(?P<sb>\d{1,2})(?=" + _SB_AFTER + r")|(?!)))?"
 )
 _BARE_RE = re.compile(r"(?<![\d.:])(" + _NUM + r")(?=\s*(?:~|〜|-|–|부터|에서)\s*\d)")
 _PLAYHEAD_RE = re.compile(r"여기|지금|재생\s*위치|현재\s*위치|이\s*자리|이곳|이\s*부분|이\s*위치|재생\s*헤드|플레이\s*헤드")
@@ -189,7 +194,7 @@ def _points(text: str, masked: Sequence[Tuple[int, int]]) -> List[TimeToken]:
             add(m.start(), m.end(), Hms3(int(m.group(1)), int(m.group(2)), float(m.group(3)), m.group(0)))
     for m in _MS2_RE.finditer(text):
         if free(*m.span()):
-            add(m.start(), m.end(), Clock(int(m.group(1)) * 60 + float(m.group(2)), m.group(0), unit="s"))
+            add(m.start(), m.end(), Clock(int(m.group(1)) * 60 + float(m.group(2)), m.group(0), unit="s", lead="m"))
     for m in _KO_RE.finditer(text):
         g = m.groupdict()
         if not (g["h"] or g["m"] or g["s"]):
@@ -210,7 +215,8 @@ def _points(text: str, masked: Sequence[Tuple[int, int]]) -> List[TimeToken]:
         if g["mh"]:
             secs += 30
         unit = "s" if (g["s"] or g["sb"] or g["mh"]) else ("m" if g["m"] else "h")
-        add(a, b, Clock(secs, text[a:b], unit=unit))
+        lead = "h" if g["h"] else ("m" if g["m"] else "s")
+        add(a, b, Clock(secs, text[a:b], unit=unit, lead=lead))
     for m in _BARE_RE.finditer(text):
         if free(*m.span()):
             add(m.start(), m.end(), Clock(float(m.group(1)), m.group(0), has_unit=False))
@@ -222,12 +228,17 @@ def _points(text: str, masked: Sequence[Tuple[int, int]]) -> List[TimeToken]:
 
 
 def _borrow_unit(a: Clock, b: Point) -> Clock:
-    """"5~6분": 앞의 단위 없는 5는 뒤의 단위(분)를 쓴다."""
+    """"5~6분": 앞의 단위 없는 5는 뒤의 단위(분)를 쓴다.
+
+    뒤가 "6분 30초"처럼 여러 단위이면 맨 앞(가장 큰) 단위를 빌린다: "5~6분 30초" → 5분~6분 30초.
+    "15~25초"처럼 단위가 하나면 그 단위 그대로."""
     if a.has_unit or not isinstance(b, Clock):
         return a
-    scale = {"h": 3600.0, "m": 60.0, "s": 1.0}[b.unit if b.unit in ("h", "m") else "s"]
+    lead = b.lead or b.unit
+    lead = lead if lead in ("h", "m") else "s"
+    scale = {"h": 3600.0, "m": 60.0, "s": 1.0}[lead]
     # "3분 15~25초"는 앞이 이미 단위가 있으므로 여기 오지 않는다
-    return Clock(a.seconds * scale, a.raw, True, b.unit)
+    return Clock(a.seconds * scale, a.raw, True, lead, lead)
 
 
 def _inherit_high_units(a: Point, b: Point) -> Point:

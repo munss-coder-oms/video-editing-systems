@@ -185,8 +185,14 @@ class ChatController(QObject):
         row: Dict[str, Any] = {"text": text, "brain": self.brain.name, "result": type(result).__name__}
         if isinstance(result, Reply):
             row["code"] = result.code
+            left = [str(x) for x in (result.data or {}).get("leftovers") or []]
+            if left:
+                row["leftovers"] = left
             self._record(row)
             self._say(self.reply_text(result.code, result.data), self.chip_list(result.chips), code=result.code)
+            if left:
+                # 답만 하는 부탁에 섞인 다른 부탁 ("도움말 3분에 표시"): 한 것처럼 보이지 않게 알린다
+                self._say(S.GUARD["leftover"].format(text=" · ".join(left)), [(S.CHIP_LEFTOVER, " ".join(left))])
             return
         if isinstance(result, Question):
             row.update({"code": result.code, "data": result.data})
@@ -420,11 +426,11 @@ class ChatController(QObject):
         if self.w.runs.busy or self.w.closing:
             return
         plan = card.proposal
-        bridge, root = self.w.bridge, self.w.state_root
+        root = self.w.state_root
         t0 = time.monotonic()
 
-        def job(jctx):
-            return apply_clear(ResolveOps(LuaTransport(bridge)), plan, root=root)
+        def work(ops, jctx):
+            return apply_clear(ops, plan, root=root)
 
         def done(out) -> None:
             if self.w.closing:
@@ -434,6 +440,11 @@ class ChatController(QObject):
                 text = S.OTHER_TIMELINE_APPLY.format(name=out.timeline_name or "")
                 card.show_message(text)
                 self.w.show_message(text)
+            elif out.status == "unknown":
+                # 답이 끊겨 지워졌는지 모름: 일지는 "지우는 중". 곧바로 한 번 맞춰 본다 (설계 B6.2)
+                card.show_unknown(out)
+                self.w.show_message(S.CLEAR_RECEIPT_UNKNOWN)
+                self.w.runs.recheck()
             else:
                 card.show_receipt(out)
                 self.w.show_message(card.title.text())
@@ -462,7 +473,7 @@ class ChatController(QObject):
             self._record({"event": "clear", "proposal_id": plan.id, "status": "error", "error": f"{exc}"})
             self.w.refresh_undo(force=True)
 
-        if self.w.runs.jobs.start("clear", job, done, failed, None, cancellable=False):
+        if self.w.runs.start_write("clear", work, done, failed):
             card.lock()
             self.w.runs._progress(None, S.CLEARING, None, False)
 
@@ -489,8 +500,17 @@ class ChatController(QObject):
             self._say(S.CHAT_JUMP_FAILED.format(reason="tc"))
             return False
 
+        want_uid, want_key, want_name = _timeline_ident(timeline)
+
         def step(bridge, out):
-            out["jump"] = ResolveOps(LuaTransport(bridge)).jump_to(int(frame), tc)
+            ops = ResolveOps(LuaTransport(bridge))
+            # 카드를 만든 타임라인이 지금 열려 있을 때만 옮긴다 (다른 타임라인의 같은 시각으로 옮기지 않게)
+            now = ops.timeline_info()
+            out["timeline_now"] = {"timeline": now.timeline, "timeline_uid": now.timeline_uid}
+            if not _same_timeline(now, want_uid, want_key):
+                out["jump"] = {"ok": False, "reason": "other_timeline", "calls": {}}
+                return
+            out["jump"] = ops.jump_to(int(frame), tc)
 
         def done(out) -> None:
             if self.w.closing:
@@ -502,6 +522,8 @@ class ChatController(QObject):
             if r.get("ok") is True:
                 self.w.show_message(S.CHAT_JUMP_DONE.format(at=at, tc=tc))
                 self.w.chat.add_helper(S.CHAT_JUMP_DONE.format(at=at, tc=tc))
+            elif r.get("reason") == "other_timeline":
+                self._say(S.CHAT_JUMP_OTHER_TIMELINE.format(name=want_name or ""))
             elif r.get("reason") == "page":
                 self._say(S.CHAT_JUMP_PAGE)
             elif r.get("reason") == "outside":
@@ -623,7 +645,7 @@ class ChatController(QObject):
         try:
             self.w.settings.save_slot(int(number), kind, S.KIND_NAMES.get(kind, kind), params)
         except (OSError, ValueError, KeyError) as exc:
-            self._say(S.REPORT_FAILED.format(error=exc))
+            self._say(S.SETTINGS_SAVE_FAILED.format(error=exc))
             return False
         self.w._slots_changed()
         dropped = (p.scope or {}).get("kind") == "range"
@@ -718,6 +740,30 @@ class ChatController(QObject):
         self._record({"event": "apply", "proposal_id": p.id, "kind": p.kind, "status": out.status,
                       "expected": out.expected, "placed": out.placed, "readback": out.receipt.get("readback"),
                       "created": [c.get("frame") for c in out.created][:200]})
+
+
+def _timeline_ident(timeline: Any) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """TimelineInfo 또는 카드의 타임라인 기록(사전) → (uid, 일지 열쇠, 이름)."""
+    from engine.edits.journal import key_for
+
+    if isinstance(timeline, dict):
+        return timeline.get("timeline_uid"), timeline.get("key"), timeline.get("timeline") or timeline.get("name")
+    if timeline is None:
+        return None, None, None
+    return getattr(timeline, "timeline_uid", None), key_for(timeline), getattr(timeline, "timeline", None)
+
+
+def _same_timeline(now: TimelineInfo, uid: Optional[str], key: Optional[str]) -> bool:
+    """지금 열린 타임라인이 카드의 것인지. 알 수 없으면(기록이 없음) 막지 않는다 (재생 위치만 옮기는 일)."""
+    from engine.edits.journal import key_for
+
+    if not now.has_timeline:
+        return False
+    if uid and now.timeline_uid:
+        return uid == now.timeline_uid
+    if key:
+        return key == key_for(now)
+    return True
 
 
 def _status(ctx: AssistContext) -> Dict[str, Any]:

@@ -97,7 +97,10 @@ class VoicePickerCard(Card):
 
     def _apply_enabled(self) -> None:
         super()._apply_enabled()
-        for btn in (*getattr(self, "pick_buttons", {}).values(), *getattr(self, "listen_buttons", {}).values()):
+        # [이걸로]는 다시 계산이라 다른 일이 도는 동안 꺼 둔다 (설계 B10). 3초 듣기는 이 PC에서만이라 그대로
+        for btn in getattr(self, "pick_buttons", {}).values():
+            btn.setEnabled(not self.locked and not self.busy)
+        for btn in getattr(self, "listen_buttons", {}).values():
             btn.setEnabled(not self.locked)
 
     def done(self, index: Optional[int], note: Optional[str] = None) -> None:

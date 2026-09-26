@@ -134,6 +134,57 @@ def test_broken_voice_section_is_rebuilt(tmp_path):
     assert Settings(path).voice_choice("x")["stream"] == 2
 
 
+@pytest.mark.parametrize("content", [
+    json.dumps({"schema_version": 1, "automations": []}),
+    json.dumps({"schema_version": 1, "ui": []}),
+    json.dumps({"schema_version": 1, "automations": {"slots": "x"}}),
+])
+def test_wrong_section_shape_is_moved_aside_not_a_crash(tmp_path, content):
+    """맞는 JSON이어도 버튼·화면 칸의 모양이 틀리면 앱이 멈추지 않고 옮겨 둔 뒤 기본값으로 (검토: automations=[])."""
+    path = tmp_path / "settings.json"
+    path.write_text(content, encoding="utf-8")
+    s = Settings(path)
+    assert s.data == default_settings() and s.moved_bad is not None
+    assert s.slots and s.sec_per_min("mark_pauses") is None
+
+
+@pytest.mark.parametrize("section", [{"perf": []}, {"perf": {"sec_per_min": []}}, {"voice": {"by_layout": []}},
+                                     {"voice": {"profiles": "x"}}, {"chat": 3}, {"behaviour": None}])
+def test_wrong_memory_section_is_rebuilt_and_button_settings_stay(tmp_path, section):
+    path = tmp_path / "settings.json"
+    data = default_settings()
+    data["automations"]["slots"][0]["params"]["min_s"] = 2.5
+    for key, value in section.items():
+        if isinstance(value, dict):
+            data[key] = dict(data[key], **value)
+        else:
+            data[key] = value
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    s = Settings(path)
+    assert s.moved_bad is None and s.slot(1)["params"]["min_s"] == 2.5
+    assert s.sec_per_min("mark_pauses") is None and s.voice_choice("x") is None and s.voice_profile("x") is None
+    s.record_perf("mark_pauses", 3.0)
+    s.set_voice("x", 1)
+    again = Settings(path)
+    assert again.sec_per_min("mark_pauses") == 3.0 and again.voice_choice("x")["stream"] == 1
+
+
+def test_non_utf8_settings_and_journal_are_moved_aside(tmp_path):
+    """메모장 ANSI(CP949)로 저장한 파일: 멈추지 않고 옮겨 둔 뒤 기본값으로."""
+    from engine.edits.journal import Journal
+
+    path = tmp_path / "settings.json"
+    path.write_bytes(json.dumps({"schema_version": 1, "ui": {"text_scale": 115}}, ensure_ascii=False)
+                     .replace("115", "115, \"memo\": \"메모\"").encode("cp949"))
+    s = Settings(path)
+    assert s.data == default_settings() and s.moved_bad is not None
+    j_path = tmp_path / "timelines" / "tl" / "journal.json"
+    j_path.parent.mkdir(parents=True)
+    j_path.write_bytes('{"schema_version": 1, "timeline": {"name": "타임라인"}, "entries": []}'.encode("cp949"))
+    j = Journal(tmp_path, "tl")
+    assert j.entries == [] and j.moved_bad is not None and not j_path.exists()
+
+
 def test_legacy_test_track_name_is_shared():
     from app.companion import steps
     from engine.edits.apply import LEGACY_TEST_TRACK

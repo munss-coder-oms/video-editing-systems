@@ -202,3 +202,157 @@ def test_delete_leftover_without_state_sends_nothing(tmp_path):
     assert delete_leftover(ResolveOps(NoCalls()), store, confirmed=True).reason == "no_state"
     store.save(ProbeState(copy_uid="x", copy_name="AI 도우미 점검용 1"))  # 지문이 없는 기록
     assert delete_leftover(ResolveOps(NoCalls()), store, confirmed=True).reason == "no_fingerprint"
+
+
+# ---------------------------------------------------------------------------
+# 남은 복사본 지우기는 지금 보는 타임라인·화면·재생 위치를 건드리지 않는다 (검토 반영)
+# ---------------------------------------------------------------------------
+
+def _names(h):
+    return [h.fake.timelines[i].name for i in range(1, len(h.fake.timelines) + 1)]
+
+
+def _fresh_log(h):
+    h.fake.log = h.lua.table()
+
+
+def test_leftover_delete_keeps_the_users_timeline_page_and_playhead(lua):
+    """점검 뒤 사용자가 다른 타임라인·색 화면에서 일하는 중: [지우기]는 그 타임라인·화면을 바꾸지 않는다."""
+    h = lua.h
+    t = HarnessTransport(h, fail_at={"C8": lambda: None})  # 정리 답이 끊겨 복사본이 남음
+    run = _runner(lua, t).run(suffix="140210")
+    assert run.leftover is True
+    ops = ResolveOps(HarnessTransport(h))
+    ops.switch_timeline(uid=lua.store.load().original_uid)
+    other = h.fake.add_timeline("타임라인 2")
+    h.lua.execute("local S, t = ...; S.timeline = t; S.page = 'color'; t.current_tc = '01:02:03:04'", h.fake, other)
+    _fresh_log(h)
+    r = delete_leftover(ops, lua.store, confirmed=True)
+    assert r.deleted is True and "AI 도우미 점검용 140210" not in _names(h)
+    assert h.fake.timeline.name == "타임라인 2" and h.fake.page == "color"
+    assert h.fake.timeline.current_tc == "01:02:03:04"
+    assert h.logged("SetCurrentTimeline") == [] and h.logged("OpenPage") == []
+    assert h.logged("SetCurrentTimecode") == []
+    # 점검용 소리 클립은 복사본을 지운 뒤에 지운다
+    assert len(h.logged("MediaPool.DeleteClips")) == 1 and r.detail["detail"]["clip_deleted"] is True
+
+
+def test_leftover_delete_on_the_original_timeline_keeps_page_and_playhead(lua):
+    """원래 타임라인에서 페어라이트 화면·다른 재생 위치: 점검 때(C1)의 화면·재생 위치로 되돌리지 않는다."""
+    h = lua.h
+    h.lua.execute("local S = ...; S.timeline.current_tc = '01:00:10:00'", h.fake)
+    t = HarnessTransport(h, fail_at={"C3": lambda: None, "C8": lambda: None})
+    _runner(lua, t).run(suffix="140210")
+    ops = ResolveOps(HarnessTransport(h))
+    ops.switch_timeline(uid=lua.store.load().original_uid)
+    h.lua.execute("local S = ...; S.page = 'fairlight'; S.timeline.current_tc = '01:03:00:00'", h.fake)
+    _fresh_log(h)
+    r = delete_leftover(ops, lua.store, confirmed=True)
+    assert r.deleted is True
+    assert h.fake.page == "fairlight" and h.fake.timeline.current_tc == "01:03:00:00"
+    assert h.logged("OpenPage") == [] and h.logged("SetCurrentTimecode") == []
+    assert h.logged("SetCurrentTimeline") == []
+
+
+def test_leftover_delete_with_fingerprint_mismatch_changes_nothing(lua):
+    """지문이 달라 지우지 않을 때도 타임라인·화면을 옮기지 않는다."""
+    h = lua.h
+
+    def leave_disabled():
+        h.lua.execute("local S = ...; S.timeline.tracks.audio[1].items[1].enabled = false", h.fake)
+
+    t = HarnessTransport(h, fail_at={"C3": leave_disabled})
+    run = _runner(lua, t).run(suffix="140210")
+    assert run.cleanup["detail"]["reason"] == "fingerprint_mismatch"
+    other = h.fake.add_timeline("타임라인 2")
+    h.lua.execute("local S, t = ...; S.timeline = t; S.page = 'color'", h.fake, other)
+    _fresh_log(h)
+    r = delete_leftover(ResolveOps(HarnessTransport(h)), lua.store, confirmed=True)
+    assert r.deleted is False and r.reason == "fingerprint_mismatch"
+    assert h.fake.timeline.name == "타임라인 2" and h.fake.page == "color"
+    assert h.logged("SetCurrentTimeline") == [] and h.logged("OpenPage") == []
+
+
+def test_leftover_copy_open_switches_only_to_the_recorded_original(lua):
+    """복사본이 열려 있으면 (지울 수 있게) 적어 둔 원래 타임라인으로만 옮긴다. 화면·재생 위치는 그대로."""
+    h = lua.h
+    t = HarnessTransport(h, fail_at={"C8": lambda: None})
+    _runner(lua, t).run(suffix="140210")
+    assert h.fake.timeline.name == "AI 도우미 점검용 140210"
+    h.lua.execute("local S = ...; S.page = 'fairlight'", h.fake)
+    _fresh_log(h)
+    r = delete_leftover(ResolveOps(HarnessTransport(h)), lua.store, confirmed=True)
+    assert r.deleted is True and h.fake.timeline.name == "타임라인 1"
+    assert [x[0] for x in h.logged("SetCurrentTimeline")] == ["타임라인 1"]
+    assert h.fake.page == "fairlight" and h.logged("OpenPage") == [] and h.logged("SetCurrentTimecode") == []
+
+
+def test_run_cleanup_keeps_probe_clip_while_the_copy_is_kept(lua):
+    """C7의 답을 못 받아 복사본이 남으면, 그 복사본이 쓰는 점검용 클립도 지우지 않는다 (복사본을 바꾸지 않게)."""
+    h = lua.h
+
+    class LostC7(HarnessTransport):
+        def request(self, op, args=None, *, timeout=None, cancel=None):
+            res = super().request(op, args, timeout=timeout, cancel=cancel)
+            if (args or {}).get("stage") == "C7":
+                raise BridgeTimeout(op)  # 리졸브는 했는데 답이 끊김
+            return res
+
+    run = _runner(lua, LostC7(h)).run(suffix="140210")
+    detail = run.cleanup["detail"]
+    assert detail["deleted"] is False and detail["reason"] == "fingerprint_mismatch"
+    assert detail["clip_deleted"] is None and detail["clip_kept"] is True
+    assert h.logged("MediaPool.DeleteClips") == []
+    copy = next(h.fake.timelines[i] for i in range(1, len(h.fake.timelines) + 1)
+                if h.fake.timelines[i].name == "AI 도우미 점검용 140210")
+    names = [copy.tracks.audio[i].name for i in range(1, len(copy.tracks.audio) + 1)]
+    assert "AI 도우미 점검" in names
+    state = lua.store.load()
+    assert state.clip_path and state.has_copy  # 나중에 복사본을 지울 때 클립도 지울 수 있게 남긴다
+
+
+def test_leftover_in_another_project_keeps_records_and_touches_nothing(lua):
+    """다른 프로젝트가 열려 있으면 '없음'으로 보지 않는다: 기록을 지우지 않고, 원래 프로젝트에서 다시 지울 수 있다."""
+    h = lua.h
+    t = HarnessTransport(h, fail_at={"C8": lambda: None})
+    _runner(lua, t).run(suffix="140210")
+    state = lua.store.load()
+    assert state.project_uid == "proj-1" and state.project_name == "시험 프로젝트"
+    h.lua.execute("local S = ...; S.project.GetUniqueId = function() return 'proj-2' end; "
+                  "S.project.name = '다른 프로젝트'", h.fake)
+    _fresh_log(h)
+    ops = ResolveOps(HarnessTransport(h))
+    r = delete_leftover(ops, lua.store, confirmed=True)
+    assert r.deleted is False and r.reason == "other_project"
+    assert r.detail["detail"]["recorded_project"] == "시험 프로젝트"
+    assert lua.store.load() is not None and len(h.fake.timelines) == 2
+    assert h.logged("SetCurrentTimeline") == [] and h.logged("DeleteTimelines") == []
+    assert h.logged("MediaPool.DeleteClips") == []
+    # 원래 프로젝트로 돌아오면 지울 수 있다
+    h.lua.execute("local S = ...; S.project.GetUniqueId = function() return 'proj-1' end; "
+                  "S.project.name = '시험 프로젝트'", h.fake)
+    r = delete_leftover(ops, lua.store, confirmed=True)
+    assert r.deleted is True and lua.store.load() is None
+
+
+def test_unreadable_timeline_list_is_not_treated_as_gone(lua):
+    h = lua.h
+    t = HarnessTransport(h, fail_at={"C8": lambda: None})
+    _runner(lua, t).run(suffix="140210")
+    ops = ResolveOps(HarnessTransport(h))
+    ops.switch_timeline(uid=lua.store.load().original_uid)
+    h.lua.execute("local S = ...; S.project.GetTimelineCount = function() return nil end", h.fake)
+    r = delete_leftover(ops, lua.store, confirmed=True)
+    assert r.deleted is False and r.reason == "timelines_unreadable"
+    assert r.detail["detail"]["copy_found"] is None
+    assert lua.store.load() is not None  # 기록은 그대로
+
+
+def test_name_only_leftover_record_blocks_a_new_probe(lua):
+    """복사본 번호(GetUniqueId)를 못 읽어 이름만 적힌 기록도 새 점검을 막는다 (기록을 덮어쓰지 않게)."""
+    lua.store.save(ProbeState(copy_uid=None, copy_name="AI 도우미 점검용 120000", last_fp="1:2:3"))
+    t = HarnessTransport(lua.h)
+    run = _runner(lua, t).run(suffix="140210")
+    assert run.refused == "leftover" and run.leftover is True
+    assert "C1" not in t.sent
+    assert lua.store.load().copy_name == "AI 도우미 점검용 120000"

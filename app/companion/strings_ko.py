@@ -133,6 +133,7 @@ SETTINGS_PREVIEW = "버튼 아래 요약: {summary}"
 SETTINGS_NOT_READY = "이 일은 아직 준비 중이에요. 저장하면 버튼에 '준비 중'으로 보여요"
 SETTINGS_SAVED = "'{name}' 설정을 저장했어요"
 SETTINGS_UNCHANGED = "바뀐 것이 없어요"
+SETTINGS_SAVE_FAILED = "버튼 설정을 저장하지 못했어요: {error}"
 SETTINGS_RESTORED = "'{name}'을 이전 설정으로 되돌렸어요"
 SETTINGS_MOVED = "버튼 순서를 바꿨어요"
 PARAM_LABELS = {
@@ -238,6 +239,12 @@ RECEIPT_REPLACED = "이전 {color_word} 표시 {n}개를 뺐어요"
 RECEIPT_NO_READBACK = "리졸브에서 다시 읽지 못해 넣었다는 답만 적었어요"
 RECEIPT_DUR_DIFF = "표시 길이가 보낸 것과 조금 달라요 (결과 파일에 적었어요)"
 RECEIPT_UNDONE = "↶ {at} 뺐어요 · {color_word} 표시 {n}개"
+RECEIPT_UNKNOWN = "들어갔는지 아직 몰라요"
+CLEAR_RECEIPT_UNKNOWN = "지워졌는지 아직 몰라요"
+RECEIPT_UNKNOWN_DETAIL = "리졸브의 답이 끊겼어요. 도우미 꼬리표로 다시 확인해서 이 카드와 되돌리기 목록을 고칠게요"
+RECEIPT_CHECKING = "확인하는 중…"
+BTN_RECHECK = "다시 확인"
+SLOT_RECEIPT_UNKNOWN = "? 확인 중"
 UNDO_SKIPPED = "이미 없어서 건너뛴 것 {n}개"
 UNDO_LEFT = "{n}개는 빼지 못했어요"
 UNDO_FAILED = "빼지 못했어요: {reason}"
@@ -256,6 +263,8 @@ PLAN_REFUSED = {
     "no_in_out": "리졸브에서 In~Out 구간을 정해 주세요 (I/O 키). 또는 ⚙에서 적용 범위를 '전체'로 바꿔 주세요",
     "not_ready": "이 일은 아직 준비 중이에요",
     "range_outside": "말씀하신 구간이 타임라인 밖이에요",
+    "unmapped_tracks": "소리 클립 {n}개가 녹화 파일의 몇 번째 소리인지 알 수 없어요. 녹화 파일을 넣을 때 생긴 소리 트랙을 "
+                       "모두 그대로 두고(따로 지우거나 자르지 않고) 다시 눌러 주세요",
 }
 BTN_PICK_AGAIN = "목소리 다시 고르기"
 
@@ -328,6 +337,8 @@ CHAT_REPLIES = {
                      "도우미 표시 지우기 · 재생 위치 옮기기 · 되돌리기 · 자동화 버튼에 저장"),
     "not_ready": "원래 클립을 켜고 끄는 일은 아직 안 돼요. '소리 고르게'가 준비되면 같이 해 드릴게요",
     "subtitles_later": "자막 만들기는 아직 준비 중이에요",
+    "own_markers": "직접 넣으신 표시는 도우미가 지우지 않아요. 도우미가 넣은 표시만 지울 수 있어요:",
+    "find_track": "트랙을 골라서 찾기는 아직 안 돼요. 트랙 없이 말씀하시면 목소리로 고른 소리에서 찾아요:",
     "audio_not_ready": "소리 조절은 아직 안 돼요. 시간을 같이 말씀해 주시면 그 자리에 노란 표시를 해 둘 수 있어요",
     "balance_not_ready": "소리 고르게는 아직 준비 중이에요 (자동화 3)",
     "time_outside": "그 시간은 타임라인 밖이에요 (타임라인 길이 {length})",
@@ -348,6 +359,8 @@ CHAT_QUESTIONS = {
     "mark_where": "어디에 표시할까요? 시간이나 '여기'를 같이 말씀해 주세요:",
     "tc_ambiguous": "'{raw}'을 영상 시간({elapsed})과 리졸브 시간({tc})으로 둘 다 읽을 수 있어요. 어느 쪽인가요?",
     "over_gain": "한 번에 키울 수 있는 건 12dB까지예요. 12dB로 할까요?",
+    "undo_all": "되돌리기는 방금 넣은 것 하나씩만 해요. 도우미가 넣은 것을 모두 빼려면 이렇게 말해 주세요:",
+    "recent_clear": "방금 넣은 것을 통째로 뺄까요, 그 표시를 모두 지울까요? 하나를 골라 다시 말씀해 주세요:",
 }
 BTN_OVER_GAIN_YES = "12dB로"
 CHAT_HELP = (
@@ -368,6 +381,7 @@ CHAT_JUMP_PAGE = "리졸브가 미디어나 퓨전 화면이면 재생 위치를
 CHAT_JUMP_OUTSIDE = "그 시간은 타임라인 밖이라 옮기지 않았어요"
 CHAT_JUMP_UNCONFIRMED = "옮기라고 했는데 다시 읽어 보니 재생 위치가 {readback}이에요. 리졸브에서 {tc}를 직접 입력해 주세요"
 CHAT_JUMP_FAILED = "재생 위치를 옮기지 못했어요: {reason}"
+CHAT_JUMP_OTHER_TIMELINE = "이 표시는 '{name}'에 있어요. 그 타임라인을 열고 다시 눌러 주세요"
 CHAT_UNDO_NONE = "이 타임라인에는 뺄 것이 없어요"
 CHAT_OFFER_DECLINED = "알겠어요. 리졸브는 그대로예요"
 CHAT_REFUSED_ALSO = "함께 말씀하신 것 가운데: {text}"
@@ -383,8 +397,14 @@ CHIPS = {
     "example:clear_at": "{time}에 있는 도우미 표시 지워줘",
     "example:clear_ours": "도우미가 넣은 파란 표시 지워줘",
     "example:jump_time": "{time}로 가줘",
+    "example:remove_all": "도우미가 넣은 거 모두 빼줘",
 }
 CHIP_LEFTOVER = "나머지도 다시 말하기"
+# 때에 맞춘 예문 (설계 B1.5): 연결된 뒤, 넣은 뒤. 누르면 입력 칸만 채운다
+CHAT_TRY_CONNECTED = "연결됐어요. 이렇게 적어 볼 수 있어요"
+CHIPS_AFTER_CONNECT = ("여기 표시해줘", "2초 넘게 쉰 곳 표시", "튀는 소리 표시해줘")
+CHAT_TRY_AFTER_APPLY = "빼고 싶으면 이렇게 적어도 돼요"
+CHIPS_AFTER_APPLY = ("방금 거 취소", "표시만 다 지워줘")
 CHIP_TC_ELAPSED = "영상 {time}"
 CHIP_TC_RESOLVE = "리졸브 시간 {tc}"
 SPOKEN_HMS = "{h}시간 {m}분 {s}초"
@@ -408,6 +428,8 @@ CARD_NOTES = {
     "clipped_end": "타임라인 끝까지만 봤어요",
     "around": "말씀하신 시각 앞뒤 {seconds}초 안에서 찾아요",
     "gain_clamped": "한 번에 줄일 수 있는 건 {max}dB까지라 {max}dB로 적었어요",
+    "min_s_clamped": "쉰 길이는 {lo}~{hi}초 사이로만 찾을 수 있어서 말씀하신 {said}초 대신 {used}초로 찾아요",
+    "above_clamped": "튀는 정도는 {lo}~{hi}dB 사이로만 찾을 수 있어서 말씀하신 {said}dB 대신 {used}dB로 찾아요",
     "too_many_marks": "표시는 한 번에 {cap}개까지만 넣어요 ({n}개 가운데)",
     "count_kept": "말씀하신 대로 큰 것부터 {kept}곳만 넣어요 ({found}곳 가운데)",
 }
@@ -553,11 +575,15 @@ BTN_START = "시작"
 BTN_CANCEL = "취소"
 BTN_DELETE = "지우기"
 LEFTOVER_CONFIRM_TITLE = "점검용 복사본"
-LEFTOVER_CONFIRM = "점검용 복사본 '{name}'을 지울까요?"
+LEFTOVER_CONFIRM = ("점검용 복사본 '{name}'을 지울까요?\n"
+                    "그 복사본이 지금 열려 있으면 원래 타임라인으로 옮긴 뒤 지워요. 다른 것은 바꾸지 않아요")
 LEFTOVER_DELETED = "점검용 복사본을 지웠어요"
 LEFTOVER_CHANGED = "이 복사본은 점검 때와 달라져 있어서 지우지 않았어요. 필요 없으면 직접 지워 주세요"
 LEFTOVER_NO_STATE = "점검 기록이 없어 도우미가 지우지 않아요. 필요 없으면 리졸브에서 직접 지워 주세요"
 LEFTOVER_OTHER = "복사본을 지우지 못했어요 ({reason}). 필요 없으면 리졸브에서 직접 지워 주세요"
+LEFTOVER_OTHER_PROJECT = "점검용 복사본은 '{project}' 프로젝트에 있어요. 그 프로젝트를 연 뒤 다시 눌러 주세요"
+LEFTOVER_UNKNOWN = "리졸브의 타임라인 목록을 읽지 못해 지우지 않았어요. 잠시 뒤 다시 눌러 주세요"
+LEFTOVER_OPEN_PROJECT = "다른 프로젝트"
 PROBE_SAVING = "기능 점검 전에 결과를 먼저 저장하는 중…"
 PROBE_RUNNING = "기능 점검 중… {stage}"
 PROBE_STAGE_NAMES = {
@@ -594,6 +620,12 @@ OLD_SCRIPT_LOG = f"리졸브에서 예전 스크립트({{version}})가 돌고 �
 AUTO_NOTE_UNREAD = "Fusion.prefs가 바뀌었는데 답을 읽지 못해 자동 확인을 멈춤"
 RECONCILED = "지난번에 넣다가 멈춘 것을 확인했어요: {summary}"
 RECONCILED_UNDONE = "넣다가 멈춘 것은 들어가지 않았어요"
+RECONCILED_APPLIED = "모두 들어가 있었어요 ({found}개)"
+RECONCILED_PARTIAL = "일부만 들어갔어요 ({found}/{expected}개). 카드나 되돌리기 목록에서 빼거나 이어서 넣을 수 있어요"
+RECONCILED_CLEAR = "지난번에 지우다가 멈춘 것을 확인했어요: {summary}"
+RECONCILED_CLEAR_APPLIED = "모두 지워져 있었어요 ({found}개)"
+RECONCILED_CLEAR_PARTIAL = "일부만 지워졌어요 ({found}/{expected}개). 되돌리기로 다시 넣을 수 있어요"
+RECONCILED_CLEAR_UNDONE = "지우다가 멈춘 것은 지워지지 않았어요"
 SETTINGS_MOVED_BAD = "설정 파일을 읽지 못해 옮겨 두고 기본값으로 시작했어요: {path}"
 
 STEP_TITLES = {

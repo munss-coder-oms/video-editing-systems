@@ -494,7 +494,7 @@ class ProposalCard(Card):
         self.guard = guard
         self.save_slots = list(save_slots) if save_slots else None
         self.slot_name = slot_name
-        self.state = "proposal"  # proposal / receipt / undone / closed
+        self.state = "proposal"  # proposal / receipt / checking(답이 끊겨 모름) / undone / closed
         self.outcome = None
         self.more_btn: Optional[QToolButton] = None
         self.more_list: Optional[QWidget] = None
@@ -770,6 +770,15 @@ class ProposalCard(Card):
         else:
             self.set_buttons([])
 
+    def show_unknown(self, outcome) -> None:
+        """답이 끊겨 들어갔는지 모름 (일지는 "넣는 중"): [다시 확인]. 연결 확인이 꼬리표로 맞춰 보면 영수증이 된다."""
+        self.outcome = outcome
+        self.state = "checking"
+        self.clear_body()
+        self.voice_btn = self.save_combo = None
+        self.more_btn = self.more_list = None
+        _unknown_body(self, S.RECEIPT_UNKNOWN, outcome)
+
     def show_undone(self, undo, at: str) -> None:
         self.state = "undone"
         self.clear_body()
@@ -805,6 +814,14 @@ class ProposalCard(Card):
     def reopened(self, note: str) -> None:
         """지우기를 되돌려 표시가 다시 들어옴: 영수증으로 돌아가지는 않고 한 줄만 적는다."""
         self.add_line(note, "secondary")
+
+
+def _unknown_body(card: Card, title: str, outcome) -> None:
+    card.title.setText(title)
+    card.add_line(S.RECEIPT_UNKNOWN_DETAIL, "warning")
+    if getattr(outcome, "error", None):
+        card.add_line(S.RECEIPT_ERROR.format(reason=outcome.error), "secondary")
+    card.set_buttons([("recheck", S.BTN_RECHECK, False)], blocked_while_busy=("recheck",))
 
 
 # ── 도우미 표시 지우기 카드 ────────────────────────────────────────────
@@ -950,6 +967,14 @@ class ClearCard(Card):
             self.set_buttons([("undo", S.BTN_UNDO_ONE, False)], blocked_while_busy=("undo",))
         else:
             self.set_buttons([])
+
+    def show_unknown(self, outcome) -> None:
+        """답이 끊겨 지워졌는지 모름 (일지는 "지우는 중"): [다시 확인]."""
+        self.outcome = outcome
+        self.state = "checking"
+        self.clear_body()
+        self.more_btn = self.more_list = None
+        _unknown_body(self, S.CLEAR_RECEIPT_UNKNOWN, outcome)
 
     def show_undone(self, undo, at: str) -> None:
         self.state = "undone"

@@ -3,7 +3,7 @@
 
 - Enter 보내기, Shift+Enter 줄 바꿈, Esc 지우기.
 - 한글 입력 중(IME 조합 글자가 있을 때) Enter는 글자만 확정하고 보내지 않는다.
-- 입력 칸은 44에서 세 줄까지 커진다. 대화 목록은 접을 수 있다 (입력 칸은 늘 보인다).
+- 입력 칸은 44에서 세 줄까지 커진다 (긴 한 줄이 접혀도 센다). 대화 목록은 접을 수 있다 (입력 칸은 늘 보인다).
 - 도우미 답 아래의 예문(칩)은 누르면 입력 칸을 채우기만 한다. 보내지 않는다 (고친 뒤 [보내기]).
 - 맨 아래에 늘 "답하는 쪽: 기본 도우미 (AI 아님) · 무료".
 """
@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QInputMethodEvent, QKeyEvent
+from PySide6.QtGui import QGuiApplication, QInputMethodEvent, QKeyEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -159,8 +159,9 @@ class ChatInput(QPlainTextEdit):
         key = event.key()
         if key in (Qt.Key_Return, Qt.Key_Enter):
             if self.preedit:
-                # 한글 조합 중: 글자만 확정한다 (보내지 않음)
-                super().keyPressEvent(event)
+                # 한글 조합 중: 글자만 확정한다 (보내지도, 줄을 바꾸지도 않는다). 확정은 입력기에 맡긴다
+                QGuiApplication.inputMethod().commit()
+                event.accept()
                 return
             if event.modifiers() & Qt.ShiftModifier:
                 self.insertPlainText("\n")
@@ -173,10 +174,18 @@ class ChatInput(QPlainTextEdit):
         super().keyPressEvent(event)
 
     def _fit(self) -> None:
-        lines = max(1, min(MAX_INPUT_LINES, self.document().blockCount()))
+        # 보이는 줄 수 (긴 한 문단이 접혀 두 줄이 되면 두 줄): QPlainTextDocumentLayout의 높이는 줄 수다
+        lines = int(round(self.document().size().height())) or self.document().blockCount()
+        lines = max(1, min(MAX_INPUT_LINES, lines))
         line_h = self.fontMetrics().lineSpacing()
         extra = theme.INPUT_H - line_h  # 한 줄일 때 44가 되게
-        self.setFixedHeight(max(theme.INPUT_H, extra + line_h * lines))
+        height = max(theme.INPUT_H, extra + line_h * lines)
+        if height != self.height():
+            self.setFixedHeight(height)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit()  # 창 너비가 바뀌면 접히는 줄 수도 바뀐다
 
 
 class ChatView(QWidget):

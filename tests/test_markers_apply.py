@@ -12,7 +12,7 @@ import pytest
 from engine.edits import apply as ap
 from engine.edits.journal import Journal, key_for
 from engine.edits.proposal import MarkerRow, Proposal, build_specs, new_proposal_id
-from engine.resolve_link.bridge import BridgeTimeout
+from engine.resolve_link.bridge import BridgeCancelled, BridgeTimeout
 from engine.resolve_link.ops import Item, ResolveOps, TimelineInfo
 from engine.timeline.snapshot import TimelineSnapshot
 from tests.fakes import FakeResolve, audio_item, obs_items, timeline_info
@@ -119,6 +119,85 @@ def test_late_answer_twice_leaves_a_partial_entry(tmp_path, monkeypatch):
     sent = [a["markers"] for op, a in zip(fake.requests, fake.args) if op == "add_markers"]
     assert [len(x) for x in sent] == [50] and sent[0][0]["custom"] == p.specs[100].custom
     assert _journal(fake, tmp_path).entry(p.id)["status"] == "applied"
+
+
+@pytest.mark.parametrize("lost", [BridgeCancelled, BridgeTimeout])
+def test_lost_answer_and_readback_leave_the_entry_applying_for_reconcile(tmp_path, monkeypatch, lost):
+    """창을 닫거나 답이 끊겼고 다시 읽기도 못 함: 리졸브는 넣었을 수 있다. 일지를 닫지 않고("넣는 중")
+    다음 연결 확인이 꼬리표로 맞춰 본다. 그 뒤 되돌리기로 뺄 수 있다 (검토: 끊긴 넣기가 'undone'으로 닫힘)."""
+    fake = _fake()
+    p = _proposal(fake)
+    real_add, real_get = fake._op_add_markers, fake._op_get_markers
+
+    def add_then_lose(a):
+        real_add(a)  # 리졸브는 요청을 받아 넣었다
+        raise lost("add_markers")
+
+    def no_readback(a):
+        raise lost("get_markers")
+
+    monkeypatch.setattr(fake, "_op_add_markers", add_then_lose)
+    monkeypatch.setattr(fake, "_op_get_markers", no_readback)
+    out = ap.apply_markers(ResolveOps(fake), p, root=tmp_path)
+    assert out.status == "unknown" and out.receipt["unknown"] is True and out.receipt["readback"] is False
+    assert len(_ours(fake, p.id)) == 3
+    j = _journal(fake, tmp_path)
+    assert j.entry(p.id)["status"] == "applying" and [e["proposal_id"] for e in j.pending()] == [p.id]
+    assert j.entry(p.id)["after_fingerprint"] == p.fingerprint
+    # 다음 연결 확인: 꼬리표로 맞춰 보면 다 들어가 있었다
+    monkeypatch.setattr(fake, "_op_get_markers", real_get)
+    assert j.pending_prefixes() == [f"aih:{p.id}:"]
+    rec = j.reconcile(ResolveOps(fake).get_markers(f"aih:{p.id}:"))
+    assert [(r.status, r.found, r.expected, r.op) for r in rec] == [("applied", 3, 3, "mark_pauses")]
+    assert ap.undo_proposal(ResolveOps(fake), p.id, root=tmp_path).deleted == 3
+
+
+def test_reconcile_during_an_apply_leaves_the_running_entry_alone(tmp_path, monkeypatch):
+    """넣는 중에 [연결 확인]이 맞춰 보기를 해도 그 제안은 건드리지 않고, 영수증도 지워지지 않는다."""
+    fake = _fake()
+    p = _proposal(fake)
+    real_add = fake._op_add_markers
+    seen = {}
+
+    def add_with_a_connect_check_in_between(a):
+        j2 = _journal(fake, tmp_path)  # 연결 확인 쪽 (다른 스레드의 일지)
+        seen["pending"] = [e["proposal_id"] for e in j2.pending()]
+        seen["rec"] = j2.reconcile(ResolveOps(fake).get_markers("aih:"))
+        return real_add(a)
+
+    monkeypatch.setattr(fake, "_op_add_markers", add_with_a_connect_check_in_between)
+    out = ap.apply_markers(ResolveOps(fake), p, root=tmp_path)
+    assert seen == {"pending": [], "rec": []}
+    assert out.status == "applied"
+    e = _journal(fake, tmp_path).entry(p.id)
+    assert e["status"] == "applied" and e["receipt"]["placed"] == 3 and e["after_fingerprint"] == p.fingerprint
+
+
+def test_stale_journal_save_keeps_the_other_threads_receipt(tmp_path):
+    """두 쪽이 같은 일지를 들고 있어도 나중에 쓰는 쪽이 먼저 쓴 쪽의 영수증을 지우지 않는다."""
+    fake = _fake()
+    p = _proposal(fake)
+    j1 = _journal(fake, tmp_path)
+    j1.begin(p.id, origin="button:1", request="쉬는 곳 표시", commands=p.commands(),
+             expected_markers=p.expected_markers())
+    j2 = _journal(fake, tmp_path)  # "넣는 중"을 읽어 둔 다른 쪽
+    j1.finish(p.id, created_markers=[{"frame": 1, "custom": p.specs[0].custom}], receipt={"placed": 1},
+              after_fingerprint="fp")
+    j2.begin("P-other", origin="chat:rule", request="", commands=[])  # 다른 줄을 적으며 파일 전체를 쓴다
+    e = _journal(fake, tmp_path).entry(p.id)
+    assert e["status"] == "partial" and e["receipt"] == {"placed": 1} and e["after_fingerprint"] == "fp"
+    assert _journal(fake, tmp_path).entry("P-other") is not None
+
+
+def test_rows_past_a_trimmed_end_fail_alone_and_later_chunks_still_go(tmp_path):
+    """카드를 만든 뒤 타임라인 끝을 잘랐다: 밖의 줄만 빠지고 나머지 묶음은 그대로 들어간다."""
+    fake = _fake()
+    p = _proposal(fake, 150, gap=300, dur=60)
+    last = p.specs[-1]
+    fake.info["end_frame"] = fake.info["start_frame"] + last.frame + 10  # 마지막 표시(길이 60)가 끝을 넘는다
+    out = ap.apply_markers(ResolveOps(fake), p, root=tmp_path, force=True)
+    assert out.status == "partial" and out.placed == 149 and out.failed == 1
+    assert fake.requests.count("add_markers") == 2 and out.error is None
 
 
 def test_taken_frames_make_a_partial_then_resume_fills_the_gap(tmp_path):

@@ -139,6 +139,18 @@ def leftover_step(bridge, out: Dict[str, Any], *, store: ProbeStateStore) -> Non
 
 # ── 창 ───────────────────────────────────────────────────────────────
 
+
+def reconciled_line(r: Dict[str, Any]) -> str:
+    """맞춰 본 결과 한 줄 (쉬운 우리말: 영어 상태 이름을 보이지 않는다)."""
+    status = r.get("status")
+    found, expected = int(r.get("found") or 0), int(r.get("expected") or 0)
+    if r.get("op") == "clear_marks":
+        summary = {"applied": S.RECONCILED_CLEAR_APPLIED, "partial": S.RECONCILED_CLEAR_PARTIAL}.get(
+            status, S.RECONCILED_CLEAR_UNDONE)
+        return S.RECONCILED_CLEAR.format(summary=summary.format(found=found, expected=expected))
+    summary = {"applied": S.RECONCILED_APPLIED, "partial": S.RECONCILED_PARTIAL}.get(status, S.RECONCILED_UNDONE)
+    return S.RECONCILED.format(summary=summary.format(found=found, expected=expected))
+
 class HelperWindow(QMainWindow):
     def __init__(
         self,
@@ -197,6 +209,7 @@ class HelperWindow(QMainWindow):
             self.queue, session=self.session, scheduler=scheduler, clock=clock, process_check=process_check,
             auto_ping_ms=auto_ping_ms, extras=self._connect_extras, parent=self,
         )
+        self._chips_shown = False  # 처음 연결됐을 때의 예문 칩을 보였는지
         self.runs = RunController(self)
         self.chat_flow = ChatController(self)
         self.controller.job_busy = lambda: self.runs.busy
@@ -498,7 +511,7 @@ class HelperWindow(QMainWindow):
             btn.setEnabled(tools)
         self.probe_btn.setEnabled(tools and c.status != conn.OLD_SCRIPT and self._supports("probe_copy"))
         st = self._probe_state
-        leftover = st is not None and bool(st.copy_uid or st.copy_name)
+        leftover = st is not None and st.has_copy
         self.check_page.leftover_btn.setVisible(leftover)
         self.check_page.leftover_btn.setEnabled(tools and leftover)
         # 되돌리기는 다른 일이 도는 동안 꺼 둔다 (설계 B10). ⚙와 대화 입력은 늘 켜 둔다.
@@ -506,6 +519,9 @@ class HelperWindow(QMainWindow):
         self.footer.set_connected(c.connected and c.status != conn.OLD_SCRIPT and not c.probe_copy_name)
         # 연결이 안 될 때 보내 주는 결과 파일이 가장 중요하므로 결과 저장은 작업 중에도 누를 수 있다.
         self.report_btn.setEnabled(not self.closing and not self.report_pending)
+        runs = getattr(self, "runs", None)
+        if runs is not None:
+            runs.sync_cards()  # 일하는 중이거나 연결이 끊기면 카드의 [리졸브에 넣기]·되돌리기를 꺼 둔다
         chat_flow = getattr(self, "chat_flow", None)
         if chat_flow is not None:
             chat_flow.idle()  # 일이 끝났으면 대화에서 남은 일·기다리던 말을 잇는다
@@ -537,7 +553,8 @@ class HelperWindow(QMainWindow):
         return [
             functools.partial(conn.extra_audio_items, known=self._items_ident),
             functools.partial(conn.extra_probe_read, store=self.caps_store),
-            functools.partial(conn.extra_reconcile, root=self.state_root),
+            # 넣기·되돌리기·지우기가 도는 동안은 맞춰 보지 않는다 (그 일의 "넣는 중"은 남은 것이 아니다)
+            functools.partial(conn.extra_reconcile, root=self.state_root, busy=lambda: self.runs.writing),
         ]
 
     @Slot()
@@ -563,11 +580,14 @@ class HelperWindow(QMainWindow):
         if out.get("caps") is not None:
             self.caps = out["caps"]
         reconciled = out.get("reconciled") or []
+        info = None
         if state is not None and out.get("state_kind") == "timeline_info" and state.get("timeline") is not None:
-            self._update_undo_menu(TimelineInfo.from_result(state), force=bool(reconciled))
+            info = TimelineInfo.from_result(state)
+            self._update_undo_menu(info, force=bool(reconciled))
         for r in reconciled:
-            text = r.get("message") or r.get("status")
-            self.chat.add_helper(S.RECONCILED.format(summary=text))
+            self.chat.add_helper(reconciled_line(r))
+        if reconciled:
+            self.runs.on_reconciled(reconciled, info)
 
     @property
     def journal_key(self) -> Optional[str]:
@@ -602,10 +622,18 @@ class HelperWindow(QMainWindow):
         if self._timeline_info is not None:
             self._update_undo_menu(self._timeline_info, force=force)
 
+    def _connected_chips(self) -> None:
+        """처음 연결됐을 때 한 번: 예문 칩 (설계 B1.5 "After connect")."""
+        if self._chips_shown or self.controller.status != conn.CONNECTED or self.controller.probe_copy_name:
+            return
+        self._chips_shown = True
+        self.chat.add_helper(S.CHAT_TRY_CONNECTED, [(t, t) for t in S.CHIPS_AFTER_CONNECT])
+
     @Slot(str, object)
     def _on_answered(self, name: str, out: Dict[str, Any]) -> None:
         if self.closing:
             return
+        self._connected_chips()
         self._remember(out)
         self._show_info()
         ok, summary = steps.summarize("connect", out)
@@ -807,7 +835,7 @@ class HelperWindow(QMainWindow):
         if self.busy or self.closing:
             return
         st = self._probe_state = self.probe_store.load()
-        if st is None or not (st.copy_uid or st.copy_name):
+        if st is None or not st.has_copy:
             self.show_message(S.LEFTOVER_NO_STATE)
             self._refresh()
             return
@@ -826,6 +854,11 @@ class HelperWindow(QMainWindow):
             return False, S.LEFTOVER_CHANGED
         if reason in ("no_state", "no_fingerprint", "not_confirmed"):
             return False, S.LEFTOVER_NO_STATE
+        if reason == "other_project":
+            d = (r.get("detail") or {}).get("detail") or {}
+            return False, S.LEFTOVER_OTHER_PROJECT.format(project=d.get("recorded_project") or S.LEFTOVER_OPEN_PROJECT)
+        if reason == "timelines_unreadable":
+            return False, S.LEFTOVER_UNKNOWN
         return False, S.LEFTOVER_OTHER.format(reason=reason)
 
     # 자동화 버튼 (흐름은 runs.py)
@@ -883,7 +916,7 @@ class HelperWindow(QMainWindow):
         try:
             after = self.settings.configure_slot(number, kind, name, params)
         except (OSError, ValueError) as exc:
-            self.show_message(S.REPORT_FAILED.format(error=exc))
+            self.show_message(S.SETTINGS_SAVE_FAILED.format(error=exc))
             return
         changed = after.get("previous") is not None and after != before
         self._slots_changed()
@@ -897,7 +930,8 @@ class HelperWindow(QMainWindow):
             return
         try:
             self.settings.move_slot(number, index)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            self.show_message(S.SETTINGS_SAVE_FAILED.format(error=exc))
             return
         self._slots_changed()
         self.settings_page.set_order(self._slot_index(number), len(self.settings.slots))
@@ -907,7 +941,8 @@ class HelperWindow(QMainWindow):
     def _settings_restore(self, number: int) -> None:
         try:
             done = self.settings.restore_previous(number)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            self.show_message(S.SETTINGS_SAVE_FAILED.format(error=exc))
             done = False
         if not done:
             return
@@ -1039,11 +1074,12 @@ class HelperWindow(QMainWindow):
         return self.rect().contains(QRect(top_left, widget.size()))
 
     def smoke_check(self) -> List[str]:
-        """자동 검사(--helper-smoke-test): 버튼 3개, 대화 입력 칸, ⋯ 메뉴, 아래쪽이 잘리지 않고 보이는지."""
+        """자동 검사(--helper-smoke-test): 버튼 3개와 ⚙, 대화 입력 칸, ⋯ 메뉴, 아래쪽이 잘리지 않고 보이는지."""
         problems: List[str] = []
         if len(self.automation.buttons) != 3:
             problems.append(f"slots={len(self.automation.buttons)}")
         widgets = [(b, f"slot{b.number}") for b in self.automation.buttons]
+        widgets += [(g, f"gear{b.number}") for b, g in zip(self.automation.buttons, self.automation.gears)]
         widgets += [(self.chat.input, "chat_input"), (self.chat.send_btn, "send"), (self.header.more_btn, "more"),
                     (self.connect_btn, "connect"), (self.footer.undo_btn, "undo"), (self.report_btn, "report")]
         for w, label in widgets:

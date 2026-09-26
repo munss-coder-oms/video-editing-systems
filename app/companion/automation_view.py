@@ -3,8 +3,10 @@
 버튼마다 이름, 설정 요약 한 줄, 마지막 결과(또는 못 쓰는 이유) 한 줄. 준비 중인 일(소리 고르게 등)은
 "준비 중"으로 꺼 두고 풍선 도움말로 까닭을 적는다.
 
-넓은 화면: 버튼마다 한 줄(60) + ⚙(40×40). 낮은 화면: 세 칸 타일(약 116×68), ⚙는 숨긴다.
-계산하는 동안에는 그 버튼 자리가 진행 줄([멈추기] 포함)로 바뀐다 (타일이면 타일 아래 한 줄).
+넓은 화면: 버튼마다 한 줄(60) + ⚙(40×40). 낮은 화면: 세 칸 타일(약 116×68), ⚙는 타일 아래 한 줄
+(설계 B1.2 "⚙는 늘 누를 수 있다": 1080p·150%인 화면은 낮은 모양이라 숨기면 설정을 바꿀 길이 없다).
+계산하는 동안에는 그 버튼 자리가 진행 줄([멈추기] 포함)로 바뀐다. 버튼과 상관없는 일(대화의 찾기·지우기,
+되돌리기, 모두 빼기)이나 타일이면 버튼 아래 한 줄.
 진행 줄은 대화 칸을 접어도 버튼 자리에 늘 보이므로, 설계의 "접었을 때 머리말의 작은 진행 표시"는 따로 두지 않았다.
 """
 
@@ -203,25 +205,33 @@ class AutomationView(QWidget):
         for w in [*self.buttons, *self.gears, self.progress]:
             self.grid.removeWidget(w)
         n = len(self.buttons)
+        shown = self.progress.isVisibleTo(self)
+        placed = False
         for i, (btn, gear) in enumerate(zip(self.buttons, self.gears)):
             btn.set_mode(self.mode)
-            running = self.running == btn.number and self.progress.isVisibleTo(self)
+            running = self.running == btn.number and shown
             if self.mode == "rows":
                 if running:
                     # 계산하는 버튼 자리가 진행 줄로 바뀐다 (⚙는 그대로 누를 수 있다)
                     btn.setVisible(False)
                     self.grid.addWidget(self.progress, i, 0)
+                    placed = True
                 else:
                     btn.setVisible(True)
                     self.grid.addWidget(btn, i, 0)
                 self.grid.addWidget(gear, i, 1, Qt.AlignVCenter)
-                gear.setVisible(True)
             else:
                 btn.setVisible(True)
                 self.grid.addWidget(btn, 0, i)
-                gear.setVisible(False)  # 좁은 타일에서는 ⚙를 숨긴다 (설정은 넓은 화면에서)
-        if self.mode != "rows" and self.progress.isVisibleTo(self):
-            self.grid.addWidget(self.progress, 1, 0, 1, max(1, n))
+                # 좁은 타일: ⚙는 그 타일 아래 한 줄에 (늘 누를 수 있게)
+                self.grid.addWidget(gear, 1, i, Qt.AlignRight | Qt.AlignVCenter)
+            gear.setVisible(True)
+        if shown and not placed:
+            if self.mode == "rows":
+                # 버튼과 상관없는 일이면 버튼 아래 한 줄 ([멈추기]를 누를 수 있게)
+                self.grid.addWidget(self.progress, n, 0, 1, 2)
+            else:
+                self.grid.addWidget(self.progress, 2, 0, 1, max(1, n))
         for col in range(max(3, n)):
             self.grid.setColumnStretch(col, 1 if self.mode == "tiles" else 0)
         self.grid.setColumnStretch(0, 1)

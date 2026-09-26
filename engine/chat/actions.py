@@ -17,6 +17,8 @@ from .brain import DEFAULT, FOUND, SAID, SETTING, Command
 from .context import AssistContext
 
 MAIN_PARAM = {"mark_pauses": "min_s", "mark_spikes": "above_lu"}
+CLAMPED = "clamped"  # 말한 값을 한도로 맞춤 (카드는 출처를 붙이지 않고 CARD_NOTES의 줄로 알린다)
+CLAMP_NOTE = {"min_s": "min_s_clamped", "above_lu": "above_clamped"}
 
 
 def find_request(cmd: Command, ctx: AssistContext, *, text: str,
@@ -39,6 +41,16 @@ def find_request(cmd: Command, ctx: AssistContext, *, text: str,
             params[key] = cmd.params[key]
             prov[key] = cmd.provenance.get(key, SAID)
     params = kind.normalize(params)
+    # 말한 값이 쓸 수 있는 범위 밖이면 끝으로 맞춘다. 그 값은 "말씀하신 값"이 아니므로 출처를 떼고 카드에 한 줄 적는다
+    # (예: "10초 넘게 쉰 곳" → 5초. 설계 B4.4·B4.5)
+    said = cmd.params.get(main)
+    p = kind.param(main)
+    if isinstance(said, (int, float)) and not isinstance(said, bool) and p is not None \
+            and ((p.lo is not None and said < p.lo) or (p.hi is not None and said > p.hi)):
+        prov[main] = CLAMPED
+        note = (CLAMP_NOTE[main], {"said": float(said), "used": params[main], "lo": p.lo, "hi": p.hi})
+        if note not in cmd.notes:
+            cmd.notes.append(note)
     if cmd.params.get("scope") == "in_out":
         params["scope"] = "in_out"
         prov["range"] = SAID

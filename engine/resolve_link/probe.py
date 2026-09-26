@@ -4,6 +4,8 @@
 - 단계마다 받은 복사본 지문을 last_fp로 기억하고 caps\\probe_state.json에 적는다 (창을 다시 켜도 남게).
 - C8(정리)은 중간에 무엇이 실패해도 늘 부른다. Lua는 복사본의 지문이 last_fp와 같을 때만 지운다.
 - 남은 복사본은 사용자가 확인한 뒤에만, 지문이 같을 때만 지운다. probe_state.json이 없으면 지우지 않는다.
+  그때 C8은 leftover 모양으로 부른다: 복사본이 열려 있을 때만 원래 타임라인으로 옮기고, 점검 때의 화면·재생 위치로는
+  되돌리지 않는다. 기록한 프로젝트가 아니면(other_project) 아무것도 하지 않고 기록도 지우지 않는다.
 """
 
 from __future__ import annotations
@@ -76,6 +78,8 @@ class ProbeState:
 
     original_uid: Optional[str] = None
     original_name: Optional[str] = None
+    project_uid: Optional[str] = None
+    project_name: Optional[str] = None
     copy_uid: Optional[str] = None
     copy_name: Optional[str] = None
     last_fp: Optional[str] = None
@@ -100,9 +104,15 @@ class ProbeState:
         """스크립트를 다시 눌러 Lua 기록이 없을 때 C8에 알려 줄 번호·이름."""
         return {
             "original_uid": self.original_uid, "original_name": self.original_name,
+            "project_uid": self.project_uid, "project_name": self.project_name,
             "copy_uid": self.copy_uid, "copy_name": self.copy_name,
             "clip_path": self.clip_path, "clip_imported": self.clip_imported or None,
         }
+
+    @property
+    def has_copy(self) -> bool:
+        """복사본 기록이 있는지 (번호가 없고 이름만 있어도)."""
+        return bool(self.copy_uid or self.copy_name)
 
 
 class ProbeStateStore:
@@ -220,13 +230,16 @@ class ProbeRunner:
             run.refused = "on_probe_copy"
             return run
         old = self.store.load()
-        if old is not None and old.copy_uid is not None:
-            run.refused = "leftover"  # 지난 점검의 복사본 기록이 남아 있다: 먼저 정리한다
+        if old is not None and old.has_copy:
+            # 지난 점검의 복사본 기록이 남아 있다 (번호 없이 이름만 적힌 기록도): 먼저 정리한다.
+            # 새 점검을 하면 probe_state.json을 덮어써서 그 복사본을 지울 길이 없어진다.
+            run.refused = "leftover"
             run.leftover = True
             return run
 
         suffix = suffix or time.strftime("%H%M%S")
         state = ProbeState(original_uid=info.timeline_uid, original_name=info.timeline,
+                           project_uid=info.project_uid, project_name=info.project or None,
                            started_at=run.started_at)
         sent_c1 = False
         try:
@@ -234,6 +247,8 @@ class ProbeRunner:
             r1 = self._stage(run, "C1", suffix=suffix)
             state.copy_uid = r1.probe.get("copy_uid") if r1.probe else r1.detail.get("copy_uid")
             state.copy_name = (r1.probe.get("copy_name") if r1.probe else None) or r1.detail.get("copy_name")
+            state.project_uid = r1.detail.get("project_uid") or state.project_uid
+            state.project_name = r1.detail.get("project_name") or state.project_name
             self._remember(run, state, r1)
             if not r1.ok:
                 return run
@@ -253,9 +268,13 @@ class ProbeRunner:
                 if stage == "C5" and not args["C5"]["tc"]:
                     run.stages[stage] = {"ok": False, "error": "no_timecode"}
                     continue
+                if stage == "C7":
+                    # 보내기 전에 적는다: 리졸브는 가져왔는데 답이 끊겨도, 남은 복사본을 지울 때 이 클립도 지울 수 있게.
+                    # 파일 이름이 이번에 새로 만든 것이라 미디어 풀에 있던 것일 수 없다.
+                    state.clip_path, state.clip_imported = str(wav), True
+                    self._keep(state)
                 r = self._stage(run, stage, **args.get(stage, {}))
                 if stage == "C7":
-                    state.clip_path = str(wav)
                     state.clip_imported = r.detail.get("imported") is True
                 self._remember(run, state, r)
         except LinkError as exc:
@@ -280,11 +299,14 @@ class ProbeRunner:
             run.last_fp = r.fingerprint
             state.last_fp = r.fingerprint
             state.last_stage = r.stage
-        if state.copy_uid is not None or state.copy_name is not None:
-            try:
-                self.store.save(state)
-            except OSError:
-                pass
+        if state.has_copy:
+            self._keep(state)
+
+    def _keep(self, state: ProbeState) -> None:
+        try:
+            self.store.save(state)
+        except OSError:
+            pass
 
     def _cleanup(self, run: ProbeRun, state: ProbeState) -> None:
         t0 = self.clock()
@@ -295,10 +317,12 @@ class ProbeRunner:
             gone = r.detail.get("copy_found") is False
             if deleted or gone:
                 self.store.clear()
+            elif state.has_copy:
+                self._keep(state)  # 남은 복사본: 지우기 버튼이 쓸 기록 (C8이 남긴 점검용 클립 포함)
             run.leftover = not (deleted or gone)
         except LinkError as exc:
             run.cleanup = _error_dict(exc)
-            run.leftover = state.copy_uid is not None or state.copy_name is not None
+            run.leftover = state.has_copy
         run.seconds["C8"] = round(self.clock() - t0, 3)
         self._report("C8", run.cleanup or {})
 
@@ -318,15 +342,19 @@ def leftover_name(info: Optional[TimelineInfo], state: Optional[ProbeState]) -> 
 
 
 def delete_leftover(ops: ResolveOps, store: ProbeStateStore, confirmed: bool) -> LeftoverResult:
-    """남은 점검용 복사본을 지운다: 사용자가 확인했고, probe_state.json이 있고, 지문이 같을 때만."""
+    """남은 점검용 복사본을 지운다: 사용자가 확인했고, probe_state.json이 있고, 지문이 같을 때만.
+
+    leftover=True: 그 복사본이 지금 열려 있을 때만 원래 타임라인으로 옮긴다. 점검 때 적어 둔 화면·재생 위치로는
+    되돌리지 않는다 (사용자는 그 뒤로 다른 곳에서 일하고 있을 수 있다).
+    """
     if not confirmed:
         return LeftoverResult(False, "not_confirmed", {})
     state = store.load()
-    if state is None or (state.copy_uid is None and state.copy_name is None):
+    if state is None or not state.has_copy:
         return LeftoverResult(False, "no_state", {})
     if not state.last_fp:
         return LeftoverResult(False, "no_fingerprint", {})
-    r = ops.probe_copy("C8", expect_fingerprint=state.last_fp, **state.c8_args())
+    r = ops.probe_copy("C8", expect_fingerprint=state.last_fp, leftover=True, **state.c8_args())
     deleted = r.detail.get("deleted") is True
     gone = r.detail.get("copy_found") is False
     if deleted or gone:

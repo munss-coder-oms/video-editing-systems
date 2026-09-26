@@ -32,7 +32,7 @@ from ..resolve_link.ops import (MARKER_COLORS, MAX_ADD_MARKERS, MAX_DELETE_CUSTO
                                 MarkerSpec, ResolveOps, TimelineInfo)
 from ..timeline.map import exact_fps
 from ..timeline.snapshot import TimelineSnapshot
-from .journal import Journal, entry_op, key_for, marker_prefix, proposal_of
+from .journal import Journal, entry_op, in_flight, key_for, marker_prefix, proposal_of
 from .proposal import MarkerRow, Proposal, marker_note, new_proposal_id
 
 OUR_PREFIX = "aih:"
@@ -258,7 +258,7 @@ def plan_clear(ops: ResolveOps, *, colors: Optional[Iterable[str]] = None, kinds
 
 @dataclass
 class ClearOutcome:
-    status: str  # applied / partial / undone / other_timeline / failed
+    status: str  # applied / partial / undone / other_timeline / failed / unknown (답이 끊겨 모름)
     proposal_id: str
     expected: int = 0
     deleted: int = 0
@@ -291,6 +291,12 @@ def apply_clear(ops: ResolveOps, plan: ClearPlan, *, root: Optional[Path] = None
         out.status = "applied"
         return out
     journal = Journal.for_timeline(info, root)
+    with in_flight(plan.id):
+        return _apply_clear(ops, plan, journal, out, cancel)
+
+
+def _apply_clear(ops: ResolveOps, plan: ClearPlan, journal: Journal, out: ClearOutcome,
+                 cancel: Optional[threading.Event]) -> ClearOutcome:
     journal.begin_clear(plan.id, origin=plan.origin, request=plan.request, commands=plan.commands(),
                         expected_deleted=plan.customs, snapshot=plan.snapshot_rows(), plan_digest=plan.digest())
     snapshot: List[Dict[str, Any]] = []
@@ -313,7 +319,15 @@ def apply_clear(ops: ResolveOps, plan: ClearPlan, *, root: Optional[Path] = None
         present = {m.get("custom") for m in ops.get_markers(OUR_PREFIX, cancel=cancel)}
         readback = True
     except (BridgeError, BridgeTimeout):
-        present = set() if out.error is None else set(customs)
+        if out.error is not None:
+            # 답이 끊겼고 다시 읽지도 못함: 몇 개가 지워졌는지 모른다. "지우는 중"으로 두고(지우며 받은 모양은 적어 둔다)
+            # 다음 연결 확인이 꼬리표로 맞춰 본다. 그래야 지운 표시를 되돌리기로 다시 넣을 수 있다.
+            out.receipt = {"deleted": None, "expected": out.expected, "readback": False, "unknown": True,
+                           "at": out.at, "error": out.error, "calls": out.calls}
+            journal.hold(plan.id, receipt=out.receipt, snapshot=snapshot)
+            out.status = "unknown"
+            return out
+        present = set()
         readback = False
     gone = [c for c in customs if c not in present]
     out.deleted = len(gone)

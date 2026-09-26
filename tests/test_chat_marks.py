@@ -12,6 +12,7 @@ import pytest
 from engine.edits import apply as ap
 from engine.edits.journal import Journal
 from engine.edits.marks import apply_clear, mark_proposal, plan_clear
+from engine.resolve_link.bridge import BridgeCancelled
 from engine.resolve_link.ops import ResolveOps, TimelineInfo
 from tests.fakes import FakeResolve, timeline_info
 
@@ -215,3 +216,34 @@ def test_interrupted_clear_is_reconciled_on_connect(tmp_path):
     u = ap.undo_proposal(ops, plan.id, root=tmp_path)
     assert u.restored and u.deleted == 1 and sorted(_ours(fake)) == [10 * FPS, 20 * FPS]
     assert a.id in {m["custom"].split(":")[1] for m in _ours(fake).values()}
+
+
+def test_lost_answer_during_clear_keeps_the_entry_pending_and_undo_restores(tmp_path, monkeypatch):
+    """지우다 답이 끊기고 다시 읽기도 못 함: "지운 것 없음"으로 닫지 않는다. 다음 연결 확인이 맞춰 보고,
+    되돌리기로 지운 표시를 다시 넣을 수 있다 (검토: 끊긴 지우기가 deleted=[]로 닫힘)."""
+    fake = _fake()
+    a = _put(fake, tmp_path, _item(10, "Blue"), _item(20, "Blue"))
+    ops = ResolveOps(fake)
+    plan = plan_clear(ops, root=tmp_path)
+    real_delete, real_get = fake._op_delete_markers, fake._op_get_markers
+
+    def delete_then_lose(args):
+        real_delete(args)
+        raise BridgeCancelled("delete_markers")
+
+    def no_readback(args):
+        raise BridgeCancelled("get_markers")
+
+    monkeypatch.setattr(fake, "_op_delete_markers", delete_then_lose)
+    monkeypatch.setattr(fake, "_op_get_markers", no_readback)
+    out = apply_clear(ops, plan, root=tmp_path)
+    assert out.status == "unknown" and out.receipt["unknown"] is True and _ours(fake) == {}
+    j = Journal.for_timeline(_info(fake), tmp_path)
+    e = j.entry(plan.id)
+    assert e["status"] == "applying" and len(e["deleted_snapshot"]) == 2 and j.pending() == [e]
+    assert j.pending_prefixes() == [f"aih:{a.id}:"]
+    monkeypatch.setattr(fake, "_op_get_markers", real_get)
+    rec = j.reconcile(ops.get_markers("aih:"))
+    assert [(r.status, r.found, r.op) for r in rec] == [("applied", 2, "clear_marks")]
+    u = ap.undo_proposal(ops, plan.id, root=tmp_path)
+    assert u.restored and u.deleted == 2 and sorted(_ours(fake)) == [10 * FPS, 20 * FPS]

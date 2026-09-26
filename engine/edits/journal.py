@@ -5,14 +5,19 @@
   (startup reconciliation): 다 있으면 applied, 일부면 partial, 하나도 없으면 undone.
 - 되돌리기는 그 일지의 타임라인에서만 한다. 다른 타임라인이 열려 있으면 거절한다 (꼬리표가 같아도).
 - 표시 꼬리표는 "aih:<P>:<n>" (P = 제안 번호). Lua는 이 밖의 꼬리표 표시는 지우지 않는다.
+- 여러 스레드(넣기 일과 연결 확인)가 같은 일지를 쓸 수 있다. 쓸 때는 한 자물쇠 안에서 파일을 다시 읽어
+  이 쪽이 바꾼 줄만 덮어쓴다 (다른 쪽이 적은 영수증을 지우지 않게). 임시 파일 이름도 쓰는 쪽마다 다르다.
+- 넣는 중인 제안(in_flight)은 맞춰 보기가 건드리지 않는다 (앱이 꺼져 남은 "넣는 중"만 맞춰 본다).
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +31,30 @@ MIGRATIONS: Dict[int, Callable[[Dict[str, Any]], Dict[str, Any]]] = {}
 
 OTHER_TIMELINE_MESSAGE = "이 되돌리기는 {name}에서 할 수 있어요"
 RECONCILED_UNDONE_MESSAGE = "넣다가 멈춘 것은 들어가지 않았어요"
+
+_LOCK = threading.RLock()  # 일지 파일 쓰기는 이 앱 안에서 한 번에 하나
+_IN_FLIGHT: Dict[str, int] = {}  # 지금 넣거나 지우는 중인 제안 번호 (맞춰 보기가 건드리지 않는다)
+
+
+@contextlib.contextmanager
+def in_flight(proposal_id: str):
+    """넣기·지우기 일이 도는 동안: 연결 확인의 맞춰 보기가 이 제안을 "앱이 꺼져 남은 것"으로 보지 않게."""
+    with _LOCK:
+        _IN_FLIGHT[proposal_id] = _IN_FLIGHT.get(proposal_id, 0) + 1
+    try:
+        yield
+    finally:
+        with _LOCK:
+            n = _IN_FLIGHT.get(proposal_id, 1) - 1
+            if n > 0:
+                _IN_FLIGHT[proposal_id] = n
+            else:
+                _IN_FLIGHT.pop(proposal_id, None)
+
+
+def is_in_flight(proposal_id: Any) -> bool:
+    with _LOCK:
+        return proposal_id in _IN_FLIGHT
 
 
 def timeline_key(
@@ -82,6 +111,7 @@ class Reconciled:
     expected: int
     found: int
     message: Optional[str] = None
+    op: Optional[str] = None  # 일지 줄의 일 (clear_marks면 found는 없어진 표시 수)
 
 
 class Journal:
@@ -96,6 +126,7 @@ class Journal:
         self.path = Path(root) / "timelines" / key / FILE_NAME
         self.data: Dict[str, Any] = {"schema_version": SCHEMA_VERSION, "timeline": dict(timeline or {}), "entries": []}
         self.moved_bad: Optional[Path] = None
+        self._base: Dict[str, Dict[str, Any]] = {}  # 읽었을(썼을) 때의 줄: 이 쪽이 바꾼 줄을 알아낸다
         self.load()
         if timeline:
             # 이름은 바뀔 수 있으니 새로 본 이름으로 덮는다 (번호는 그대로)
@@ -114,38 +145,106 @@ class Journal:
 
     # --- 파일 ---
 
-    def load(self) -> None:
+    def _read(self) -> Optional[Dict[str, Any]]:
+        """파일을 읽는다. 없으면 None, 깨졌으면 ValueError (UTF-8이 아닌 글자도)."""
         try:
-            raw = self.path.read_text(encoding="utf-8")
+            raw = self.path.read_bytes()
         except OSError:
-            return
-        try:
-            data = json.loads(raw)
-            if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
-                raise ValueError("shape")
-            version = data.get("schema_version")
-            if not isinstance(version, int) or version > SCHEMA_VERSION:
-                raise ValueError("version")
-            while version < SCHEMA_VERSION:
-                data = MIGRATIONS[version](data)
-                version = data["schema_version"]
-        except (ValueError, KeyError):
-            stamp = time.strftime("%Y%m%d-%H%M%S")
-            target = self.path.with_name(f"{FILE_NAME}.bad-{stamp}")
-            try:
-                os.replace(self.path, target)
-                self.moved_bad = target
-            except OSError:
-                pass
-            return
+            return None
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+            raise ValueError("shape")
+        version = data.get("schema_version")
+        if not isinstance(version, int) or version > SCHEMA_VERSION:
+            raise ValueError("version")
+        while version < SCHEMA_VERSION:
+            data = MIGRATIONS[version](data)
+            version = data["schema_version"]
+        if not all(isinstance(e, dict) for e in data["entries"]):
+            raise ValueError("entry")
         data.setdefault("timeline", {})
-        self.data = data
+        if not isinstance(data["timeline"], dict):
+            raise ValueError("timeline")
+        return data
+
+    def _remember_base(self) -> None:
+        self._base = {str(e.get("proposal_id")): copy.deepcopy(e) for e in self.entries}
+
+    def load(self) -> None:
+        with _LOCK:
+            try:
+                data = self._read()
+            except (ValueError, KeyError):
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                target = self.path.with_name(f"{FILE_NAME}.bad-{stamp}")
+                try:
+                    os.replace(self.path, target)
+                    self.moved_bad = target
+                except OSError:
+                    pass
+                return
+            if data is None:
+                return
+            self.data = data
+            self._remember_base()
+
+    def refresh(self) -> None:
+        """파일을 다시 읽어 다른 쪽(다른 스레드)이 그사이 적은 줄을 받는다. 이 쪽이 바꾼 줄은 그대로."""
+        with _LOCK:
+            try:
+                disk = self._read()
+            except (ValueError, KeyError):
+                return
+            if disk is None:
+                return
+            ours = {str(e.get("proposal_id")): e for e in self.entries}
+            dirty = {pid for pid, e in ours.items() if self._base.get(pid) != e}
+            self.data = self._merge(disk)
+            for e in self.entries:
+                pid = str(e.get("proposal_id"))
+                if pid not in dirty:
+                    self._base[pid] = copy.deepcopy(e)
+
+    def _merge(self, disk: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """파일에 있는 줄 + 이 쪽이 바꾸거나 새로 적은 줄. 이 쪽이 바꾸지 않은 줄은 파일의 것을 따른다."""
+        if disk is None:
+            return self.data
+        ours = {str(e.get("proposal_id")): e for e in self.entries}
+        dirty = {pid for pid, e in ours.items() if self._base.get(pid) != e}
+        entries: List[Dict[str, Any]] = []
+        on_disk = set()
+        for e in disk["entries"]:
+            pid = str(e.get("proposal_id"))
+            on_disk.add(pid)
+            mine = ours.get(pid)
+            if mine is None:
+                entries.append(e)
+            elif pid in dirty:
+                entries.append(mine)
+            else:
+                mine.clear()
+                mine.update(e)  # 다른 쪽이 적은 것을 받는다 (이 쪽이 들고 있는 같은 줄도 바뀐다)
+                entries.append(mine)
+        entries += [e for pid, e in ours.items() if pid not in on_disk]
+        timeline = dict(disk.get("timeline") or {})
+        timeline.update(self.data.get("timeline") or {})
+        merged = dict(disk)
+        merged.update({"schema_version": SCHEMA_VERSION, "timeline": timeline, "entries": entries})
+        return merged
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(FILE_NAME + ".tmp")
-        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), encoding="utf-8")
-        os.replace(tmp, self.path)
+        """자물쇠 안에서 파일을 다시 읽어 합친 뒤 쓴다 (다른 스레드가 그사이 적은 줄을 지우지 않게)."""
+        with _LOCK:
+            try:
+                disk = self._read()
+            except (ValueError, KeyError):
+                disk = None  # 깨진 파일은 이 쪽 것으로 덮는다
+            self.data = self._merge(disk)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_name(f"{FILE_NAME}.{os.getpid()}-{threading.get_ident()}.tmp")
+            tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp, self.path)
+            self._remember_base()
 
     # --- 적기 ---
 
@@ -254,6 +353,27 @@ class Journal:
         self.save()
         return e
 
+    def hold(self, proposal_id: str, *, receipt: Optional[Dict[str, Any]] = None,
+             snapshot: Iterable[Dict[str, Any]] = (), after_fingerprint: Optional[str] = None) -> Dict[str, Any]:
+        """넣기(지우기) 뒤 결과를 알 수 없음 (답이 끊기고 다시 읽기도 못 함): "넣는 중"으로 둔다.
+
+        다음 연결 확인이 꼬리표로 맞춰 본다. 알게 된 것(영수증, 지우며 받은 표시 모양)은 적어 둔다.
+        """
+        e = self.entry(proposal_id)
+        if e is None:
+            raise KeyError(proposal_id)
+        e["status"] = "applying"
+        e["receipt"] = receipt
+        if after_fingerprint is not None:
+            e["after_fingerprint"] = after_fingerprint
+        rows = {str(r.get("custom")): dict(r) for r in e.get("deleted_snapshot") or []}
+        for r in snapshot:
+            rows[str(r.get("custom"))] = dict(r)
+        if rows:
+            e["deleted_snapshot"] = list(rows.values())
+        self.save()
+        return e
+
     def mark(self, proposal_id: str, status: str) -> None:
         if status not in STATUSES:
             raise ValueError(status)
@@ -265,16 +385,29 @@ class Journal:
 
     # --- 연결할 때 맞춰 보기 ---
 
-    def pending(self) -> List[Dict[str, Any]]:
-        return [e for e in self.entries if e.get("status") == "applying"]
+    def pending(self, include_in_flight: bool = False) -> List[Dict[str, Any]]:
+        """"넣는 중"으로 남은 줄. 지금 이 앱이 넣고 있는 제안은 빼고 (include_in_flight면 넣는다)."""
+        return [e for e in self.entries if e.get("status") == "applying"
+                and (include_in_flight or not is_in_flight(e.get("proposal_id")))]
 
     def reconcile(self, markers: Iterable[Dict[str, Any]]) -> List[Reconciled]:
-        """applying으로 남은 것을 타임라인의 꼬리표로 맞춰 본다. markers = get_markers 답."""
+        """applying으로 남은 것을 타임라인의 꼬리표로 맞춰 본다. markers = get_markers 답 (그 줄들의 꼬리표를 빠짐없이).
+
+        자물쇠 안에서 파일을 다시 읽은 뒤 본다: 표시를 읽는 사이 넣기 일이 시작했거나 끝낸 줄은 건드리지 않는다.
+        """
         present: Dict[str, Dict[str, Any]] = {}
         for m in markers:
             c = m.get("custom") if isinstance(m, dict) else None
             if isinstance(c, str) and c.startswith("aih:"):
                 present[c] = m
+        with _LOCK:
+            self.refresh()
+            out = self._reconcile(present)
+            if out:
+                self.save()
+        return out
+
+    def _reconcile(self, present: Dict[str, Dict[str, Any]]) -> List[Reconciled]:
         out: List[Reconciled] = []
         for e in self.pending():
             pid = e["proposal_id"]
@@ -287,7 +420,7 @@ class Journal:
                 e["deleted"] = gone
                 e["reconciled_at"] = _now()
                 out.append(Reconciled(pid, status, len(want), len(gone),
-                                      RECONCILED_UNDONE_MESSAGE if status == "undone" else None))
+                                      RECONCILED_UNDONE_MESSAGE if status == "undone" else None, "clear_marks"))
                 continue
             expected = [m.get("custom") for m in e["expected"]["markers"]]
             prefix = marker_prefix(pid)
@@ -310,10 +443,27 @@ class Journal:
             ]
             e["reconciled_at"] = _now()
             out.append(Reconciled(pid, status, n_expected, len(found),
-                                  RECONCILED_UNDONE_MESSAGE if status == "undone" else None))
-        if out:
-            self.save()
+                                  RECONCILED_UNDONE_MESSAGE if status == "undone" else None, entry_op(e)))
         return out
+
+    def pending_prefixes(self, limit: int = 10) -> List[str]:
+        """맞춰 보기에 읽을 꼬리표 앞부분: 넣는 중인 제안마다 "aih:<P>:", 지우는 중이면 지울 표시의 제안들.
+
+        너무 많으면(limit) "aih:" 하나로 (도우미 표시만 읽는다. 사용자 표시는 읽지 않는다).
+        """
+        prefixes: List[str] = []
+        for e in self.pending():
+            if entry_op(e) == "clear_marks":
+                pids = [proposal_of(c) for c in e.get("expected_deleted") or []]
+            else:
+                pids = [str(e.get("proposal_id"))]
+            for pid in pids:
+                prefix = marker_prefix(pid) if pid else "aih:"
+                if prefix not in prefixes:
+                    prefixes.append(prefix)
+        if len(prefixes) > limit or "aih:" in prefixes:
+            return ["aih:"]
+        return prefixes
 
     # --- 되돌리기 전 확인 ---
 

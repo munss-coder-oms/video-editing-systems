@@ -289,8 +289,8 @@ class ConnectionController(QObject):
 
     def on_focus_in(self) -> bool:
         """창을 다시 볼 때: 연결돼 있고 마지막으로 물은 지 30초가 넘었을 때만 한 번."""
-        if self.closing or self.status not in ANSWERED_STATES or self.queue.pending:
-            return False
+        if self.closing or self.status not in ANSWERED_STATES or self.queue.pending or self.job_busy():
+            return False  # 자동화 일이 도는 중에는 묻지 않는다 (그 일이 리졸브와 이야기하는 중)
         if self.last_contact is not None and self.clock() - self.last_contact < self.focus_debounce:
             return False
         self.focus_pings += 1
@@ -326,6 +326,11 @@ class ConnectionController(QObject):
             self._set_status(BUSY)
         else:
             self._set_status(CONNECTED)
+
+    def note_contact(self) -> None:
+        """자동화 일(넣기·되돌리기 등)이 리졸브의 답을 받음: 마지막으로 물은 시각만 적는다 (창을 다시 볼 때 덜 묻게)."""
+        if not self.closing:
+            self.last_contact = self.clock()
 
     def note_failure(self, cause: BaseException, answered: bool, partial: Optional[Dict[str, Any]] = None) -> None:
         if self.closing:
@@ -455,20 +460,36 @@ def extra_probe_read(bridge, out: Dict[str, Any], store=None) -> None:
     out["caps"] = caps
 
 
-def extra_reconcile(bridge, out: Dict[str, Any], root=None) -> None:
-    """일지에 "넣는 중"으로 남은 것이 있을 때만: 표시를 읽어 들어갔는지 맞춰 본다 (설계 B6.2)."""
+def extra_reconcile(bridge, out: Dict[str, Any], root=None, busy: Optional[Callable[[], bool]] = None) -> None:
+    """일지에 "넣는 중"으로 남은 것이 있을 때만: 표시를 읽어 들어갔는지 맞춰 본다 (설계 B6.2).
+
+    - 넣기·되돌리기·지우기 일이 도는 중(busy)이면 하지 않는다 (그 일의 "넣는 중"은 남은 것이 아니다).
+      일지 쪽도 지금 넣는 중인 제안(in_flight)은 빼고 본다.
+    - 도우미 꼬리표만 읽는다: 제안마다 "aih:<P>:" (많으면 "aih:"). 사용자 표시는 읽지 않는다.
+    - 목록이 잘렸거나(전체 수가 받은 수보다 많음) 읽지 못하면 모르는 것이니 "넣는 중"으로 그대로 둔다.
+    """
     from engine.edits.journal import Journal
-    from engine.resolve_link.ops import TimelineInfo
+    from engine.resolve_link.ops import ResolveOps, TimelineInfo
+    from engine.resolve_link.transport import LuaTransport
 
     state = _timeline_state(out)
     if state is None:
         return
+    if busy is not None and busy():
+        out["reconcile_skipped"] = "busy"
+        return
     journal = Journal.for_timeline(TimelineInfo.from_result(state), root)
     if not journal.pending():
         return
-    listing = bridge.get_markers()
-    markers = listing.get("markers") if isinstance(listing, dict) else None
-    results = journal.reconcile(markers if isinstance(markers, list) else [])
+    ops = ResolveOps(LuaTransport(bridge))
+    markers: List[Dict[str, Any]] = []
+    for prefix in journal.pending_prefixes():
+        rows, total = ops.read_markers(prefix)
+        if total is None or total > len(rows):
+            out["reconcile_skipped"] = "truncated"
+            return
+        markers += rows
+    results = journal.reconcile(markers)
     out["reconciled"] = [r.__dict__ for r in results]
 
 

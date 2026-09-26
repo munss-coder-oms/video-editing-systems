@@ -107,6 +107,65 @@ def test_focus_in_pings_at_most_once_per_30_seconds(qapp):
     assert c.focus_pings == 1
 
 
+def test_focus_in_sends_nothing_while_a_job_runs(qapp):
+    """넣기·계산이 도는 중에 창을 다시 봐도 묻지 않는다 (그 일이 리졸브와 이야기하는 중)."""
+    bridge = FakeLuaBridge()
+    c, sched, _ = connected(bridge, Process())
+    sched.advance(conn.FOCUS_DEBOUNCE_S * 1000 + 1000)
+    before = len(bridge.requests)
+    c.job_busy = lambda: True
+    assert c.on_focus_in() is False and bridge.requests[before:] == []
+    c.job_busy = lambda: False
+    assert c.on_focus_in() is True
+
+
+def _pending_journal(bridge, root, pid="P1", n=1):
+    from engine.edits.journal import Journal
+    from engine.resolve_link.ops import TimelineInfo
+
+    j = Journal.for_timeline(TimelineInfo.from_result(bridge.info), root)
+    j.begin(pid, origin="button:1", request="쉬는 곳 표시", commands=[{"op": "mark_pauses"}],
+            expected_markers=[{"frame": 216000 + i, "custom": f"aih:{pid}:{i + 1}"} for i in range(n)])
+    return j
+
+
+def _connect_out(bridge):
+    return {"ping": {}, "state": dict(bridge.info), "state_kind": "timeline_info"}
+
+
+def test_reconcile_waits_while_an_apply_runs(tmp_path):
+    bridge = FakeLuaBridge()
+    _pending_journal(bridge, tmp_path)
+    out = _connect_out(bridge)
+    conn.extra_reconcile(bridge, out, root=tmp_path, busy=lambda: True)
+    assert out["reconcile_skipped"] == "busy" and "reconciled" not in out and bridge.requests == []
+
+
+def test_reconcile_reads_only_the_pending_tags(tmp_path):
+    """맞춰 보기는 그 제안의 꼬리표만 읽는다 (사용자 표시 전체를 읽지 않는다, 2000개 제한에 걸리지 않게)."""
+    bridge = FakeLuaBridge()
+    _pending_journal(bridge, tmp_path)
+    bridge.markers = [{"frame": 1, "custom": "", "name": "내 메모"}, {"frame": 0, "custom": "aih:P1:1"}]
+    out = _connect_out(bridge)
+    conn.extra_reconcile(bridge, out, root=tmp_path, busy=lambda: False)
+    assert [a for op, a in zip(bridge.requests, bridge.args) if op == "get_markers"] == [{"prefix": "aih:P1:"}]
+    assert out["reconciled"] == [{"proposal_id": "P1", "status": "applied", "expected": 1, "found": 1,
+                                  "message": None, "op": "mark_pauses"}]
+
+
+def test_truncated_marker_list_leaves_the_entry_pending(tmp_path):
+    """목록이 잘려 왔으면(전체 수 > 받은 수) 모르는 것이니 "넣는 중"을 그대로 둔다."""
+    bridge = FakeLuaBridge()
+    j = _pending_journal(bridge, tmp_path, n=3)
+    bridge.handlers["get_markers"] = lambda a: {"markers": [{"frame": 0, "custom": "aih:P1:1"}], "total": 3,
+                                                "next": None, "calls": {}}
+    out = _connect_out(bridge)
+    conn.extra_reconcile(bridge, out, root=tmp_path, busy=lambda: False)
+    assert out["reconcile_skipped"] == "truncated" and "reconciled" not in out
+    j.load()
+    assert j.entry("P1")["status"] == "applying"
+
+
 def test_focus_in_before_connect_sends_nothing(qapp):
     bridge = FakeLuaBridge()
     bridge.online = False

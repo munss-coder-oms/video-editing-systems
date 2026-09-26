@@ -426,7 +426,13 @@ def _ops(rig):
 
 
 def _user_marker(rig, frame: int, custom: str = "") -> None:
-    rig.bridge.request("add_marker", {"frame": frame, "color": "Green", "name": "내 표시", "custom": custom})
+    """사용자가 찍은 표시를 가짜 리졸브에 바로 둔다 (add_marker는 우리 꼬리표만 받는다)."""
+
+    def plant() -> None:
+        rig.fake.timeline.markers[frame] = rig.lua.table(color="Green", name="내 표시", note="", duration=1,
+                                                         customData=custom)
+
+    rig.in_loop(plant)
 
 
 @pytest.mark.usefixtures("obs_video")

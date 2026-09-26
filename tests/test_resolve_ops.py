@@ -117,3 +117,43 @@ def test_tasklist_parsing_and_platforms():
     assert process.resolve_running(runner=lambda n: none, platform="win32") is False
     assert process.resolve_running(runner=lambda n: None, platform="win32") is None
     assert process.resolve_running(runner=lambda n: found, platform="linux") is None
+
+
+@pytest.mark.parametrize("fps", [30, 30.0, "30"])
+def test_numeric_clip_fps_is_kept(fps):
+    """리졸브가 클립 속도를 숫자(30)로 줘도 버리지 않는다: 60fps 타임라인의 30fps 클립이 '속도 바꿈'으로 빠지지 않게."""
+    from engine.timeline.map import item_windows
+
+    row = {"uid": "a", "kind": "audio", "track": 1, "start": 1000, "end": 4600, "duration": 3600,
+           "left_offset": 600, "source_start": 300, "source_end": 2100, "clip_fps": fps}
+    item = Item.from_row(row)
+    assert item.clip_fps == "30"
+    check = item_windows([item], 60.0)
+    assert len(check.windows) == 1 and check.refused_speed == []
+    assert Item.from_row(dict(row, clip_fps=29.97)).clip_fps == "29.97"
+    assert Item.from_row(dict(row, clip_fps=True)).clip_fps is None
+
+
+def test_get_markers_follow_pages_and_stop_at_limit():
+    """표시가 많으면 Lua가 나눠 준다(next): 이어서 받고, limit을 채우면 멈춘다."""
+    rows = [{"frame": n, "custom": f"aih:P1:{n}", "color": "Blue"} for n in range(1, 251)]
+
+    def page(args):
+        off, lim = args.get("offset", 0), args.get("limit", 2000)
+        take = min(lim, 100)
+        chunk = rows[off:off + take]
+        nxt = off + len(chunk) if off + len(chunk) < len(rows) else None
+        return {"markers": chunk, "total": len(rows), "next": nxt}
+
+    rec = Recorder({"get_markers": page})
+    got, total = ResolveOps(rec).read_markers("aih:")
+    assert len(got) == 250 and total == 250
+    assert [a.get("offset", 0) for _, a in rec.sent] == [0, 100, 200]
+    rec2 = Recorder({"get_markers": page})
+    got, total = ResolveOps(rec2).read_markers("aih:", limit=150)
+    assert len(got) == 150 and total == 250 and len(rec2.sent) == 2
+    rec3 = Recorder({"get_markers": page})
+    assert ResolveOps(rec3).marker_total("aih:") == 250 and len(rec3.sent) == 1
+    # 예전 스크립트(next 없음)는 한 번에
+    rec4 = Recorder({"get_markers": {"markers": rows[:5], "total": 5}})
+    assert len(ResolveOps(rec4).get_markers("aih:")) == 5 and len(rec4.sent) == 1

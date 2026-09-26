@@ -7,6 +7,9 @@
 3. 일지에 "넣는 중"을 먼저 적고 (앞서 쓰기), add_markers를 100개씩 보낸다.
    답이 늦으면 다시 읽어서(get_markers prefix) 빠진 것만 한 번 더 보낸다 (꼬리표가 같으면 두 번 들어가지 않는다).
 4. 다시 읽은 표시로 영수증을 만들고 일지를 applied / partial / undone으로 닫는다.
+   답이 끊겼고(시간 넘김, 창을 닫음) 다시 읽기도 못 했으면 들어갔는지 모른다: 일지를 닫지 않고 "넣는 중"으로
+   둔다 (status "unknown"). 다음 연결 확인이 꼬리표로 맞춰 본다 (설계 B6.2). 넣는 동안은 in_flight로 표시해
+   같은 때 도는 연결 확인이 이 제안을 건드리지 않게 한다.
 
 되돌리기 (undo_proposal): 그 일지의 타임라인일 때만. delete_markers{prefix: "aih:<P>:"}.
 모두 빼기 (scan_ours + remove_all_ours): 지금 타임라인에서 꼬리표를 직접 찾는다 (일지가 없어도 된다).
@@ -24,7 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from ..resolve_link.bridge import BridgeError, BridgeTimeout
 from ..resolve_link.ops import MAX_ADD_MARKERS, MarkerResult, MarkerSpec, ResolveOps, TimelineInfo
 from ..timeline.snapshot import fingerprint
-from .journal import Journal, entry_op, key_for, marker_prefix
+from .journal import Journal, entry_op, in_flight, key_for, marker_prefix
 from .proposal import Proposal
 
 LEGACY_TEST_TRACK = "AI 도우미 시험"  # 1차 시험판 [소리 넣기 시험]이 만든 트랙 (app/companion/steps.TEST_NAME)
@@ -34,7 +37,7 @@ OUR_PREFIX = "aih:"
 
 @dataclass
 class ApplyOutcome:
-    status: str  # applied / partial / undone / changed / other_timeline / failed
+    status: str  # applied / partial / undone / changed / other_timeline / failed / unknown (답이 끊겨 모름)
     proposal_id: str
     expected: int = 0
     placed: int = 0
@@ -122,11 +125,12 @@ def apply_markers(ops: ResolveOps, proposal: Proposal, *, root: Optional[Path] =
     if not proposal.specs:
         out.status = "applied"
         return out
-    journal.begin(proposal.id, origin=proposal.origin, request=proposal.request, commands=proposal.commands(),
-                  expected_markers=proposal.expected_markers(), card_rows=[], plan_digest=proposal.digest())
-    total = MarkerResult()
-    error = _send_all(ops, proposal, proposal.specs, total, cancel, progress)
-    return _finish(ops, proposal, journal, out, total, error, fp, cancel)
+    with in_flight(proposal.id):
+        journal.begin(proposal.id, origin=proposal.origin, request=proposal.request, commands=proposal.commands(),
+                      expected_markers=proposal.expected_markers(), card_rows=[], plan_digest=proposal.digest())
+        total = MarkerResult()
+        error = _send_all(ops, proposal, proposal.specs, total, cancel, progress)
+        return _finish(ops, proposal, journal, out, total, error, fp, cancel)
 
 
 def resume_markers(ops: ResolveOps, proposal: Proposal, *, root: Optional[Path] = None,
@@ -147,9 +151,10 @@ def resume_markers(ops: ResolveOps, proposal: Proposal, *, root: Optional[Path] 
     missing = [s for s in proposal.specs if s.custom not in present]
     total = MarkerResult()
     total.skipped_existing = [s.custom for s in proposal.specs if s.custom in present]
-    journal.mark(proposal.id, "applying")
-    error = _send_all(ops, proposal, missing, total, cancel, progress) if missing else None
-    return _finish(ops, proposal, journal, out, total, error, fp, cancel)
+    with in_flight(proposal.id):
+        journal.mark(proposal.id, "applying")
+        error = _send_all(ops, proposal, missing, total, cancel, progress) if missing else None
+        return _finish(ops, proposal, journal, out, total, error, fp, cancel)
 
 
 def _finish(ops: ResolveOps, proposal: Proposal, journal: Journal, out: ApplyOutcome, total: MarkerResult,
@@ -185,6 +190,13 @@ def _finish(ops: ResolveOps, proposal: Proposal, journal: Journal, out: ApplyOut
         "point_fallback": out.point_fallback, "dur_ok": out.dur_ok, "at": out.at, "calls": total.calls,
         "error": error, "replaced": out.replaced,
     })
+    if markers is None and error is not None:
+        # 답이 끊겼고 다시 읽지도 못함: 리졸브는 요청을 받아 넣고 있을 수 있다. 일지를 닫지 않고 "넣는 중"으로 두어
+        # 다음 연결 확인이 꼬리표로 맞춰 보게 한다 (닫으면 들어간 표시를 되돌리기 목록이 모른다).
+        out.receipt["unknown"] = True
+        journal.hold(proposal.id, receipt=out.receipt, after_fingerprint=fp)
+        out.status = "unknown"
+        return out
     entry = journal.finish(proposal.id, created_markers=created, receipt=out.receipt, after_fingerprint=fp)
     out.status = entry["status"]
     return out

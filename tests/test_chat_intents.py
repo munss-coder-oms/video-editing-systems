@@ -197,6 +197,11 @@ MARKS = [
     ("1분에 표시해줘. 2분으로 가줘", draft(mark(pt(60.0)), jump(120.0))),
     ("끝에 표시해줘", ask("mark_where")),  # "끝에"는 시간 말이 아니다 (2.1): 넣지 않고 어디에 할지 묻는다
     ("여기서부터 끝까지 표시해줘", draft(mark((10.0, 600.0, "Green", "표시")))),
+    # "3분 20"의 생략한 초 뒤에 다른 말이 와도 3분 20초 (3분으로 줄이지 않는다)
+    ("3분 20 표시해줘", draft(mark(pt(200.0)))),
+    ("3분 20 빨간 표시", draft(mark(pt(200.0, "Red")))),
+    ("3분 20, 표시해줘", draft(mark(pt(200.0)))),  # 시간만 있는 마디가 "어디에?" 마디에 붙는다
+    ("1~2분 30초 표시해줘", draft(mark((60.0, 150.0, "Green", "표시")))),  # 1분~2분 30초
 ]
 
 # ── 쉬는 곳·튀는 소리 찾기 ─────────────────────────────────────────────
@@ -227,6 +232,19 @@ FINDS = [
     ("5분~6분에서 쉬는 곳 표시해줘, 빨간색으로", draft(pauses({"color": "Red"}, (300.0, 360.0), "said"))),
     ("쉬는 곳 표시하고 튀는 소리 표시해줘", draft(pauses(), spikes())),
     ("In~Out에서 쉬는 곳 표시해줘", reply("time_in_out")),  # 기능 점검 전
+    ("5~6분 30초 쉬는 곳 표시해줘", draft(pauses(rng=(300.0, 390.0), src="said"))),  # 5초~가 아니다
+    # "2초 (정도) 쉰 곳"은 쉰 길이 (앞 7초 안에서 찾기가 아니다). 분이 있거나 조사가 붙으면 자리
+    ("2초 정도 쉰 곳 표시해줘", draft(pauses({"min_s": 2.0}))),
+    ("2초 쉰 곳 표시해줘", draft(pauses({"min_s": 2.0}))),
+    ("3분 20초 쉬는 곳 표시해줘", draft(pauses(rng=(195.0, 205.0), src="around"))),
+    ("3초에 쉬는 곳 표시해줘", draft(pauses(rng=(0.0, 8.0), src="around"))),
+    # 마디 맨 앞의 조사 없는 "지금"은 "이제" (재생 위치 앞뒤 5초로 좁히지 않는다). "지금 위치"는 재생 위치
+    ("지금 쉬는 곳 표시해줘", draft(pauses())),
+    ("지금 위치 쉬는 곳 표시해줘", draft(pauses(rng=(5.0, 15.0), src="around"))),
+    # 트랙을 골라 찾기는 2.1에서 못 한다: 늘 막히는 카드 대신 먼저 알린다
+    ("A2에서 쉬는 곳 표시해줘", reply("find_track")),
+    ("2번 트랙 튀는 소리 표시해줘", reply("find_track")),
+    ("쉬는 곳 찾고 표시해줘", draft(pauses())),  # "찾고 표시해줘"는 한 부탁
 ]
 
 # ── 지우기 (도우미 표시만) ─────────────────────────────────────────────
@@ -241,6 +259,20 @@ CLEARS = [
     ("빨간 표시랑 파란 표시 지워줘", draft(clear({"colors": ["Blue", "Red"]}))),
     ("도우미가 넣은 거 모두 빼줘", draft(("remove_all_ours", {}))),
     ("3분 20초에 있는 거 지워줘", ask("clear_what")),  # 무엇을 지울지 모름
+    # 시간·범위를 말한 "표시 취소"는 방금 것 되돌리기가 아니라 그 자리의 도우미 표시 지우기 (범위 지킴이를 거친다)
+    ("3분에 표시 취소", draft(clear(rng=(179.5, 180.517), src="point"))),
+    ("3분에 넣은 표시 취소해줘", draft(clear(rng=(179.5, 180.517), src="point"))),
+    ("5분~6분 표시 취소", draft(clear(rng=(300.0, 360.0), src="said"))),
+    ("3분 취소", ask("clear_what")),
+    ("다 취소해줘", ask("undo_all")),  # 되돌리기는 하나씩: 모두 빼기인지 묻는다
+    ("전체 취소", ask("undo_all")),
+    # 사용자가 직접 넣은 표시는 지우지 않는다 (도우미 표시 모두 지우기로 바꾸지 않는다)
+    ("내가 찍은 표시 지워줘", reply("own_markers")),
+    ("제가 넣은 표시 지워줘", reply("own_markers")),
+    ("직접 넣은 빨간 표시 지워줘", reply("own_markers")),
+    # 방금 + 색: 방금 것 전체인지 그 색 표시 모두인지 모름 → 되묻기
+    ("방금 파란 표시 지워", ask("recent_clear")),
+    ("방금 넣은 빨간 표시 빼줘", ask("recent_clear")),
 ]
 
 # ── 재생 위치·도움말·상태·되돌리기·저장 ─────────────────────────────────
@@ -319,6 +351,30 @@ UNDER_DELIVERY = [
     ("2분으로 가줘 그리고 뭐시기 해줘", draft(jump(120.0), left=("뭐시기 해줘",))),
     # 못 하는 부탁이 섞이면 할 수 있는 줄만 (못 하는 부분은 답으로 알린다)
     ("3분에 표시하고 EQ 걸어줘", draft(mark(pt(180.0)))),
+    # "-주고"와 다른 동사 뒤의 "-고"도 나눈다 (표시가 옆 부탁의 시간을 가져가지 않는다)
+    ("3분에 표시해주고 5분으로 가줘", draft(mark(pt(180.0)), jump(300.0))),
+    ("3분에 표시 해 주고 5분으로 가줘", draft(mark(pt(180.0)), jump(300.0))),
+    ("3분 소리 키우고 5분에 표시", draft(audio(180.0, direction="up"), mark(pt(300.0)))),
+    ("3분 20초 소리 줄이고 5분에 표시", draft(audio(200.0), mark(pt(300.0)))),
+    ("3분으로 옮기고 5분에 표시", draft(jump(180.0), mark(pt(300.0)))),
+    ("3분에서 자르고 5분에 표시해줘", draft(cut(180.0), mark(pt(300.0)))),
+    ("EQ 걸고 3분에 표시", draft(mark(pt(180.0)))),
+    # 표시 규칙은 표시 동작만 쓴다: 같은 마디의 다른 동작은 못 알아들은 부분
+    ("3분으로 가줘 표시해줘", draft(mark(pt(180.0)), left=("3분으로 가줘",))),
+    ("3분 20초 소리 키워서 표시해줘", draft(mark(pt(200.0)), left=("키워서",))),
+    ("쉬는 곳 줄여줘", draft(pauses(), left=("줄여줘",))),
+    # 권하는 표시는 말한 시간마다 하나씩
+    ("3분과 5분에서 잘라줘", draft(mark((180.0, None, "Purple", "자르기 후보"), (300.0, None, "Purple", "자르기 후보"),
+                                    offer="cut"))),
+    ("3분 20초와 5분 소리 줄여줘",
+     draft(("mark", "audio", ((200.0, None, "Yellow", "여기 6dB 줄이기"), (300.0, None, "Yellow", "여기 6dB 줄이기")),
+            6.0, "down"))),
+    # 되돌리기는 시간을 쓰지 않는다: 같은 마디의 다른 부탁은 못 알아들은 부분
+    ("방금 거 취소 3분에 표시", draft(UNDO, left=("3분에 표시",))),
+    # 나눈 자리에 걸친 "찍고"·"달고"는 앞 마디의 동작 (거짓 "못 알아들은 부분"이 없다)
+    ("3분에 표시 찍고 5분으로 가줘", draft(mark(pt(180.0)), jump(300.0))),
+    ("5분에 빨간 표시 달고 6분에 파란 표시 달아줘", draft(mark(pt(300.0, "Red")), mark(pt(360.0, "Blue")))),
+    ("3분에 찍고 5분에 찍어줘", draft(mark(pt(180.0)), mark(pt(300.0)))),
 ]
 
 ALL_CASES = PART_A + MARKS + FINDS + CLEARS + OTHERS + QUESTIONS + AUDIO + UNDER_DELIVERY
@@ -422,6 +478,52 @@ def test_nothing_understood_gives_three_examples():
 def test_refused_part_is_noted_on_the_draft():
     d = _draft("3분에 표시하고 EQ 걸어줘")
     assert d.notes == [("refused", {"code": "keyframe"})]
+    d = _draft("EQ 걸고 3분에 표시")
+    assert d.notes == [("refused", {"code": "keyframe"})]
+
+
+def test_help_with_another_request_keeps_the_rest_as_a_leftover():
+    """도움말 낱말만 쓴다. 같은 마디의 "3분에 표시"는 조용히 버리지 않고 답에 실어 보낸다."""
+    r = RuleBrain().handle("도움말 3분에 표시", _ctx())
+    assert isinstance(r, Reply) and r.code == "help" and r.data["leftovers"] == ["3분에 표시"]
+    r = RuleBrain().handle("도움말", _ctx())
+    assert isinstance(r, Reply) and "leftovers" not in r.data
+
+
+def test_undo_all_and_recent_colour_questions_offer_chips():
+    q = RuleBrain().handle("다 취소해줘", _ctx())
+    assert [c.key for c in q.chips] == ["example:undo", "example:remove_all"]
+    q = RuleBrain().handle("방금 파란 표시 지워", _ctx())
+    assert q.chips[0].key == "example:undo" and q.chips[1].data["text"] == "파란 표시 지워"
+    r = RuleBrain().handle("내가 찍은 표시 지워줘", _ctx())
+    assert [c.key for c in r.chips] == ["example:clear_ours"]
+
+
+def test_find_on_a_named_track_is_refused_up_front():
+    r = RuleBrain().handle("A2에서 쉬는 곳 표시해줘", _ctx())
+    assert r.code == "find_track" and r.data == {"tracks": [2]} and r.chips[0].key == "example:pauses"
+    d = _draft("3분에 표시하고 A2에서 튀는 소리 표시해줘")
+    assert [c.op for c in d.commands] == ["mark"] and d.notes == [("refused", {"code": "find_track", "tracks": [2]})]
+
+
+@pytest.mark.parametrize("text,key,said,used,note", [
+    ("10초 넘게 쉰 곳 표시해줘", "min_s", 10.0, 5.0, "min_s_clamped"),
+    ("0.2초 넘게 쉰 곳 표시해줘", "min_s", 0.2, 0.5, "min_s_clamped"),
+    ("30dB 넘게 튀는 소리 표시해줘", "above_lu", 30.0, 20.0, "above_clamped"),
+])
+def test_clamped_find_values_are_not_called_said(text, key, said, used, note):
+    """범위 밖의 말한 값은 끝으로 맞추고, "말씀하신 값"이라 하지 않고 카드에 한 줄 적는다 (설계 B4.4, B4.5)."""
+    c = _draft(text).commands[0]
+    req, prov, _ = actions.find_request(c, _ctx(), text=text)
+    assert req.params[key] == used and prov[key] == actions.CLAMPED and prov[key] != SAID
+    lo, hi = (0.5, 5.0) if key == "min_s" else (4.0, 20.0)
+    assert (note, {"said": said, "used": used, "lo": lo, "hi": hi}) in c.notes
+    actions.find_request(c, _ctx(), text=text)  # 다시 불러도 줄은 하나
+    assert [n for n in c.notes if n[0] == note] == [(note, {"said": said, "used": used, "lo": lo, "hi": hi})]
+    # 범위 안의 값은 그대로 말씀하신 값
+    c = _draft("3초 넘게 쉰 곳 표시해줘").commands[0]
+    req, prov, _ = actions.find_request(c, _ctx(), text="")
+    assert req.params["min_s"] == 3.0 and prov["min_s"] == SAID and not c.notes
 
 
 # ── 타임라인을 알아야 할 때만 연결을 확인한다 ───────────────────────────

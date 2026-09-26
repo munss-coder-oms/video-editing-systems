@@ -22,6 +22,7 @@ from .transport import Transport
 PROBE_PREFIX = "AI 도우미 점검용"
 PROBE_STAGES = ("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8")
 MAX_ITEM_PAGES = 200  # timeline_items를 이보다 많이 나눠 받지 않는다 (2만 개)
+MAX_MARKER_PAGES = 200  # get_markers도 나눠 받는다 (한 번의 답이 너무 커지지 않게, Lua PAGE_BYTES)
 MAX_ADD_MARKERS = 100  # add_markers 한 번에 보내는 표시 수 (Lua AIH.MAX_ADD)
 MAX_DELETE_CUSTOMS = 200  # delete_markers{customs} 한 번에 (Lua AIH.MAX_SNAPSHOT과 같다)
 TC_RE = re.compile(r"^\d\d:\d\d:\d\d[:;]\d\d$")
@@ -66,6 +67,15 @@ def _str(v: Any) -> Optional[str]:
 
 def _bool(v: Any) -> Optional[bool]:
     return v if isinstance(v, bool) else None
+
+
+def _text(v: Any) -> Optional[str]:
+    """글자, 또는 숫자를 글자로 (리졸브 판에 따라 클립 속도를 60처럼 숫자로 준다)."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return str(int(v)) if float(v).is_integer() else repr(float(v))
+    return None
 
 
 @dataclass
@@ -223,7 +233,7 @@ class Item:
             name=_str(r.get("name")), start=_int(r.get("start")), end=_int(r.get("end")),
             duration=_int(r.get("duration")), left_offset=_int(r.get("left_offset")),
             source_start=_int(r.get("source_start")), source_end=_int(r.get("source_end")),
-            enabled=_bool(r.get("enabled")), path=_str(r.get("path")), clip_fps=_str(r.get("clip_fps")),
+            enabled=_bool(r.get("enabled")), path=_str(r.get("path")), clip_fps=_text(r.get("clip_fps")),
             media_uid=_str(r.get("media_uid")),
             linked_uids=[x for x in linked if isinstance(x, str)] if isinstance(linked, list) else [],
         )
@@ -442,20 +452,35 @@ class ResolveOps:
 
     def read_markers(self, prefix: Optional[str] = None, *, limit: Optional[int] = None,
                      cancel=None) -> Tuple[List[Dict[str, Any]], Optional[int]]:
-        """(표시 목록, 맞는 전체 수). 전체 수는 목록이 limit에서 잘렸어도 모두 센 값 (못 읽으면 None)."""
-        args: Dict[str, Any] = {}
-        if prefix is not None:
-            args["prefix"] = prefix
-        if limit is not None:
-            args["limit"] = int(limit)
-        r = self._req("get_markers", args or None, cancel=cancel)
-        rows = [m for m in r.get("markers", []) if isinstance(m, dict)] if isinstance(r.get("markers"), list) else []
-        total = _int(r.get("total"))
-        if total is None and "total" not in r:
-            total = len(rows)  # 1.0.0 스크립트: 거르지 않고 모두 준다
+        """(표시 목록, 맞는 전체 수). 전체 수는 목록이 limit에서 잘렸어도 모두 센 값 (못 읽으면 None).
+
+        Lua가 한 번의 답을 PAGE_BYTES 아래로 나눠 주면(next) 이어서 받는다. 예전 스크립트는 한 번에 준다.
+        """
+        rows: List[Dict[str, Any]] = []
+        total: Optional[int] = None
+        offset = 0
+        for _ in range(MAX_MARKER_PAGES):
+            args: Dict[str, Any] = {}
             if prefix is not None:
-                rows = [m for m in rows if isinstance(m.get("custom"), str) and m["custom"].startswith(prefix)]
-                total = len(rows)
+                args["prefix"] = prefix
+            if limit is not None:
+                args["limit"] = max(0, int(limit) - len(rows))
+            if offset:
+                args["offset"] = offset
+            r = self._req("get_markers", args or None, cancel=cancel)
+            page = [m for m in r.get("markers", []) if isinstance(m, dict)] if isinstance(r.get("markers"), list) \
+                else []
+            total = _int(r.get("total"))
+            if total is None and "total" not in r:
+                total = len(page)  # 1.0.0 스크립트: 거르지 않고 모두 준다
+                if prefix is not None:
+                    page = [m for m in page if isinstance(m.get("custom"), str) and m["custom"].startswith(prefix)]
+                    total = len(page)
+            rows += page
+            nxt = _int(r.get("next"))
+            if nxt is None or nxt <= offset or (limit is not None and len(rows) >= int(limit)) or not page:
+                break
+            offset = nxt
         return rows, total
 
     def marker_total(self, prefix: str, *, cancel=None) -> Optional[int]:

@@ -78,8 +78,29 @@ class SettingsError(Exception):
     pass
 
 
+REQUIRED_SECTIONS = ("automations", "ui")  # 모양이 틀리면 파일을 옮겨 두고 기본값으로
+SOFT_SECTIONS = ("voice", "perf", "chat", "behaviour", "segments")  # 모양이 틀리면 그 칸만 기본값으로
+
+
+def _repair(data: Dict[str, Any]) -> Dict[str, Any]:
+    """기억(목소리, 걸린 시간 등) 칸의 모양이 틀렸으면 그 칸만 기본값으로 (버튼 설정은 지키고 앱은 멈추지 않는다)."""
+    defaults = default_settings()
+    for key in SOFT_SECTIONS:
+        if not isinstance(data.get(key), dict):
+            data[key] = copy.deepcopy(defaults[key])
+    for key in ("by_layout", "profiles"):
+        if not isinstance(data["voice"].get(key), dict):
+            data["voice"][key] = {}
+    if not isinstance(data["perf"].get("sec_per_min"), dict):
+        data["perf"]["sec_per_min"] = {}
+    return data
+
+
 def _validate(data: Dict[str, Any]) -> None:
-    slots = data.get("automations", {}).get("slots")
+    for key in REQUIRED_SECTIONS:
+        if not isinstance(data.get(key), dict):
+            raise SettingsError(key)
+    slots = data["automations"].get("slots")
     if not isinstance(slots, list) or not slots:
         raise SettingsError("slots")
     numbers = set()
@@ -126,13 +147,13 @@ class Settings:
     def load(self) -> None:
         self.data = default_settings()
         try:
-            raw = self.path.read_text(encoding="utf-8")
+            raw = self.path.read_bytes()
         except FileNotFoundError:
             return
         except OSError:
             return
         try:
-            data = json.loads(raw)
+            data = json.loads(raw.decode("utf-8"))  # 메모장 ANSI(CP949)로 저장한 파일은 UnicodeDecodeError(ValueError)
             if not isinstance(data, dict):
                 raise SettingsError("not_object")
             version = data.get("schema_version", 0)
@@ -141,9 +162,9 @@ class Settings:
             while version < SCHEMA_VERSION:
                 data = MIGRATIONS[version](data)
                 version = data["schema_version"]
-            data = _merge_defaults(data, default_settings())
+            data = _repair(_merge_defaults(data, default_settings()))
             _validate(data)
-        except (ValueError, SettingsError, KeyError, TypeError):
+        except (ValueError, SettingsError, KeyError, TypeError, AttributeError):
             self._move_bad()
             self.data = default_settings()
             return

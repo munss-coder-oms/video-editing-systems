@@ -466,3 +466,47 @@ def test_apply_waits_while_another_job_runs(qapp, make_window, obs, shared_cache
     _idle(qapp, w)
     assert fr.mutations == [] and pc.state == "proposal" and pc.buttons["apply"].isEnabled()
     assert pc.voice_btn.isEnabled()
+
+
+def test_unmapped_tracks_say_why_without_a_pick_again_button(qapp, make_window, obs, shared_cache, obs_video):
+    """트랙이 원본의 몇 번째 소리인지 모름: 목소리 고르기를 되풀이하지 않고 까닭만 알린다."""
+    from app.companion.cards import QuestionCard
+    from app.companion.voice_picker import VoicePickerCard
+
+    fake, fr = obs
+    fr.items = [it for it in fr.items if it["track"] != 1]
+    w = _window(qapp, make_window, fake, shared_cache)
+    w.automation.buttons[0].click()
+    wait_until(qapp, lambda: not w.runs.busy and w.pending == 0, 60)
+    assert S.PLAN_REFUSED["unmapped_tracks"].format(n=3) in w.chat.log.toPlainText()
+    assert _cards(w, VoicePickerCard) == []
+    assert not any("again" in c.buttons for c in _cards(w, QuestionCard))
+    assert _mutating(fake) == []
+
+
+def test_voice_pick_waits_while_another_job_runs(qapp, make_window, obs, shared_cache, obs_video):
+    """다른 일이 도는 동안 [이걸로]는 꺼져 있고, 눌려도 말없이 사라지지 않고 까닭을 알린다."""
+    from app.companion.voice_picker import VoicePickerCard
+
+    fake, fr = obs
+    w = _window(qapp, make_window, fake, shared_cache)
+    w.automation.buttons[0].click()
+    vc = _wait_card(qapp, w, VoicePickerCard)
+    assert all(b.isEnabled() for b in vc.pick_buttons.values())
+    gate, entered = threading.Event(), threading.Event()
+
+    def slow_probe(path):
+        entered.set()
+        gate.wait(10)
+        return probe(path)
+
+    w.runs.probe_file = slow_probe
+    w.automation.buttons[1].click()
+    wait_until(qapp, lambda: entered.is_set())
+    assert not any(b.isEnabled() for b in vc.pick_buttons.values())
+    assert all(b.isEnabled() for b in vc.listen_buttons.values())  # 3초 듣기는 이 PC에서만이라 그대로
+    vc.picked.emit(1)  # 눌렸다 해도
+    assert w.message.text() == S.SLOT_DISABLED_BUSY and not vc.locked
+    gate.set()
+    _idle(qapp, w)
+    assert all(b.isEnabled() for b in vc.pick_buttons.values())

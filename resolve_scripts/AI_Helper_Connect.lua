@@ -611,6 +611,16 @@ local function timeline_ident(calls, tl)
 	return uid, name
 end
 
+-- 프로젝트의 번호(uid)와 이름 (기능 점검 기록이 어느 프로젝트의 것인지)
+local function project_ident(calls, project)
+	local uid = uid_of(calls, "Project.GetUniqueId", project)
+	local name = call(calls, "Project.GetName", project, "GetName")
+	if type(name) ~= "string" or name == "" then
+		name = nil
+	end
+	return uid, name
+end
+
 -- 번호가 둘 다 있으면 번호로, 아니면 이름으로 같은 타임라인인지 본다
 local function same_timeline(uid, name, want_uid, want_name)
 	if uid ~= nil and want_uid ~= nil then
@@ -903,6 +913,7 @@ local function probe_record()
 	return {
 		original_uid = nz(p.original_uid), original_name = nz(p.original_name),
 		copy_uid = nz(p.copy_uid), copy_name = nz(p.copy_name),
+		project_uid = nz(p.project_uid), project_name = nz(p.project_name),
 	}
 end
 
@@ -956,7 +967,9 @@ local function item_row(calls, item, track, kind)
 	local mpi = call(calls, "TimelineItem.GetMediaPoolItem", item, "GetMediaPoolItem")
 	if mpi ~= nil then
 		info.path = nz(clip_path(calls, mpi))
-		info.clip_fps = nz(call(calls, "MediaPoolItem.GetClipProperty.FPS", mpi, "GetClipProperty", "FPS"))
+		-- 판에 따라 숫자(60)로 줄 때가 있다: 타임라인 속도처럼 글자로 보낸다
+		local fps = call(calls, "MediaPoolItem.GetClipProperty.FPS", mpi, "GetClipProperty", "FPS")
+		info.clip_fps = (type(fps) == "number" or (type(fps) == "string" and fps ~= "")) and tostring(fps) or NULL
 		info.media_uid = nz(uid_of(calls, "MediaPoolItem.GetUniqueId", mpi))
 	end
 	local linked = call(calls, "TimelineItem.GetLinkedItems", item, "GetLinkedItems")
@@ -1205,6 +1218,10 @@ ops.add_marker = function(a, calls)
 	local name = str_arg(a.name, "name", "")
 	local note = str_arg(a.note, "note", "")
 	local custom = str_arg(a.custom, "custom", "")
+	-- 우리 꼬리표("aih:..." 또는 1차 시험판의 "aih_test")가 없는 표시는 넣지 않는다 (지울 수 없는 표시가 생기지 않게)
+	if not our_custom(custom) then
+		fail("bad_args", "custom")
+	end
 	local _, tl = need_timeline(calls)
 	local tried = array()
 	for k = 0, 5 do
@@ -1226,19 +1243,22 @@ ops.add_marker = function(a, calls)
 	return { added = false, frame = frame, requested_frame = frame, tried = tried, calls = calls }
 end
 
--- 표시 목록. prefix가 있으면 custom data가 그것으로 시작하는 것만, limit개까지 (total은 맞는 전체 수)
+-- 표시 목록. prefix가 있으면 custom data가 그것으로 시작하는 것만 (total은 맞는 전체 수).
+-- 프레임 순서로 offset번째부터 limit개까지, 답(JSON)이 PAGE_BYTES를 넘지 않게 나눈다.
+-- 더 남았으면 next = 다음 offset (창이 이어서 부른다). 한 번에 너무 커서 too_large가 되는 일이 없게.
 ops.get_markers = function(a, calls)
 	local prefix = nil
 	if a.prefix ~= nil then
 		prefix = str_arg(a.prefix, "prefix")
 	end
 	local limit = a.limit == nil and AIH.MAX_MARKERS or math.min(int_arg(a.limit, "limit", 0), AIH.MAX_MARKERS)
+	local offset = a.offset == nil and 0 or int_arg(a.offset, "offset", 0)
 	local _, tl = need_timeline(calls)
 	local markers = call(calls, "Timeline.GetMarkers", tl, "GetMarkers")
 	local list = array()
 	local total = NULL
+	local nxt = NULL
 	if type(markers) == "table" then
-		total = 0
 		local frames = {}
 		for f, m in pairs(markers) do
 			if type(f) == "number" and type(m) == "table" then
@@ -1250,17 +1270,27 @@ ops.get_markers = function(a, calls)
 		end
 		table.sort(frames)
 		total = #frames
-		for i = 1, #frames do
-			local m = markers[frames[i]]
-			if #list < limit then
-				list[#list + 1] = {
-					frame = frames[i], color = m.color, name = m.name, note = m.note,
-					duration = m.duration, custom = m.customData,
-				}
+		local bytes = 0
+		for i = offset + 1, #frames do
+			if #list >= limit then
+				nxt = i - 1
+				break
 			end
+			local m = markers[frames[i]]
+			local row = {
+				frame = frames[i], color = m.color, name = m.name, note = m.note,
+				duration = m.duration, custom = m.customData,
+			}
+			local size = #AIH.json(row) + 1
+			if #list > 0 and bytes + size > AIH.PAGE_BYTES then
+				nxt = i - 1
+				break
+			end
+			list[#list + 1] = row
+			bytes = bytes + size
 		end
 	end
-	return { markers = list, total = total, calls = calls }
+	return { markers = list, total = total, offset = offset, ["next"] = nxt, calls = calls }
 end
 
 -- custom data가 custom인 표시의 프레임 목록. GetMarkers를 못 쓰면 nil
@@ -1466,7 +1496,8 @@ end
 
 -- 표시 여러 개 넣기 (자동화 버튼의 카드에서 [리졸브에 넣기]를 누른 뒤에만 불린다).
 -- markers: {frame(타임라인 시작부터 센 프레임), dur, color, name, note, custom} 목록, 100개까지.
--- 모두 먼저 검사하고(하나라도 틀리면 아무것도 넣지 않음), GetMarkers는 넣기 전에 한 번만 읽는다.
+-- 모두 먼저 검사하고(모양이 하나라도 틀리면 아무것도 넣지 않음), GetMarkers는 넣기 전에 한 번만 읽는다.
+-- 타임라인 끝을 넘는 줄은 그 줄만 failed에 err = "outside"로 적는다.
 -- 같은 꼬리표가 이미 있으면 넣지 않는다 (답을 못 받아 다시 보내도 두 번 들어가지 않게).
 -- 그 프레임에 표시가 있으면 +1..+5 프레임으로 옮긴다 (끝은 그대로 두고 길이를 줄인다).
 -- 길이 있는 표시(dur>1)를 리졸브가 거절하면 길이 1로 다시 넣고 point_fallback을 켠다 (그 뒤는 모두 1).
@@ -1511,11 +1542,8 @@ ops.add_markers = function(a, calls)
 		fail("timeline_length_unknown", "Timeline.GetEndFrame")
 	end
 	local length = last - first
-	for i = 1, #rows do
-		if rows[i].frame + rows[i].dur > length then
-			fail("bad_args", "frame")
-		end
-	end
+	-- 타임라인 밖의 줄은 그 줄만 넣지 않는다 (err = "outside"). 한 줄 때문에 나머지를 버리지 않는다
+	-- (카드를 만든 뒤 타임라인 끝을 잘랐을 수 있다).
 	local existing = call(calls, "Timeline.GetMarkers", tl, "GetMarkers")
 	if type(existing) ~= "table" then
 		fail("markers_unreadable", "Timeline.GetMarkers")
@@ -1911,8 +1939,10 @@ probe_stages.C1 = function(a, calls)
 		and find_timeline(calls, project, old.copy_uid, old.copy_name) ~= nil then
 		fail("leftover_copy", "probe_copy")
 	end
+	local puid, pname = project_ident(calls, project)
 	st.probe = {
 		original_uid = uid, original_name = name,
+		project_uid = puid, project_name = pname,
 		page = current_page(calls),
 		tc = call(calls, "Timeline.GetCurrentTimecode", tl, "GetCurrentTimecode"),
 	}
@@ -1937,6 +1967,7 @@ probe_stages.C1 = function(a, calls)
 	local switched = same_timeline(nuid, nname, st.probe.copy_uid, st.probe.copy_name)
 	local detail = {
 		original_uid = nz(uid), original_name = nz(name), copy_uid = nz(cuid), copy_name = nz(st.probe.copy_name),
+		project_uid = nz(puid), project_name = nz(pname),
 		name_tagged = is_probe_name(st.probe.copy_name), switched = switched,
 		page = nz(st.probe.page), tc = nz(st.probe.tc),
 	}
@@ -2238,13 +2269,19 @@ end
 
 -- 정리: 원래 타임라인으로 돌아가서, 복사본의 지문이 expect_fingerprint와 같을 때만 복사본을 지운다.
 -- 스크립트를 다시 눌러 기록(st.probe)이 없으면 창이 알려 준 번호·이름을 쓴다 (이름 꼬리표와 지문 검사는 같다).
+-- leftover = true ([남은 점검용 복사본 지우기]): 점검이 끝난 지 오래일 수 있으므로, 복사본이 지금 열린
+-- 타임라인일 때만 원래 타임라인으로 옮기고, 점검 때 적어 둔 화면과 재생 위치로는 되돌리지 않는다.
+-- 기록한 프로젝트와 지금 프로젝트가 다르면 아무것도 하지 않고 reason = "other_project" (기록은 그대로 둔다).
+-- 점검용 소리 클립은 복사본을 지웠거나 복사본이 없을 때만 지운다 (남은 복사본이 아직 그 클립을 쓴다).
 probe_stages.C8 = function(a, calls)
 	local expect = str_arg(a.expect_fingerprint, "expect_fingerprint", "")
+	local leftover = a.leftover == true
 	local rec = st.probe
 	if rec == nil then
 		rec = {
 			original_uid = a.original_uid, original_name = a.original_name,
 			copy_uid = a.copy_uid, copy_name = a.copy_name,
+			project_uid = a.project_uid, project_name = a.project_name,
 			clip_path = a.clip_path, clip_imported = a.clip_imported == true,
 		}
 	end
@@ -2255,34 +2292,63 @@ probe_stages.C8 = function(a, calls)
 	if project == nil then
 		fail("no_project", "ProjectManager.GetCurrentProject")
 	end
-	local detail = { steps = {} }
+	local detail = { steps = {}, leftover = leftover, deleted = false, clip_deleted = NULL }
 	local function step(name, fn)
 		local ok, err = pcall(fn)
 		detail.steps[name] = ok and "ok" or ("err:" .. short(type(err) == "table" and err.code or err))
 	end
+	-- 다른 프로젝트가 열려 있으면 그 프로젝트에서 찾지 않는다 (복사본은 기록한 프로젝트에 남아 있다)
+	local puid, pname = project_ident(calls, project)
+	detail.project_uid, detail.project_name = nz(puid), nz(pname)
+	local other = false
+	if puid ~= nil and rec.project_uid ~= nil then
+		other = puid ~= rec.project_uid
+	elseif pname ~= nil and rec.project_name ~= nil then
+		other = pname ~= rec.project_name
+	end
+	if other then
+		detail.reason = "other_project"
+		detail.copy_found = NULL
+		detail.recorded_project = nz(rec.project_name)
+		return { stage = "C8", ok = false, detail = detail, fingerprint = NULL }
+	end
 	local fp_before = nil
+	local copy_is_current = false
 	step("read_current", function()
 		local cur = call(calls, "Project.GetCurrentTimeline", project, "GetCurrentTimeline")
 		if cur ~= nil then
 			local uid, name = timeline_ident(calls, cur)
 			if same_timeline(uid, name, rec.copy_uid, rec.copy_name) then
+				copy_is_current = true
 				fp_before = AIH.fingerprint(cur)
 			end
 		end
 	end)
+	detail.switched = false
 	step("switch_back", function()
+		if leftover and not copy_is_current then
+			return -- 사용자가 보고 있는 타임라인은 그대로 둔다
+		end
 		local original = find_timeline(calls, project, rec.original_uid, rec.original_name)
 		detail.original_found = original ~= nil
 		if original ~= nil then
 			call(calls, "Project.SetCurrentTimeline", project, "SetCurrentTimeline", original)
+			detail.switched = true
 		end
 	end)
 	local copy, fp = nil, nil
+	local listed = false
 	step("find_copy", function()
+		-- 타임라인 목록을 못 읽으면 "없음"이 아니라 "모름" (기록을 지우지 않는다)
+		listed = type(call(calls, "Project.GetTimelineCount.check", project, "GetTimelineCount")) == "number"
 		copy = find_timeline(calls, project, rec.copy_uid, rec.copy_name)
 	end)
-	detail.copy_found = copy ~= nil
-	detail.deleted = false
+	if copy == nil and not listed then
+		detail.copy_found = NULL
+		detail.reason = "timelines_unreadable"
+	else
+		detail.copy_found = copy ~= nil
+	end
 	if copy ~= nil then
 		step("check_copy", function()
 			local uid, name = timeline_ident(calls, copy)
@@ -2308,11 +2374,11 @@ probe_stages.C8 = function(a, calls)
 				detail.deleted = find_timeline(calls, project, rec.copy_uid, rec.copy_name) == nil
 			end
 		end)
-	else
+	elseif detail.copy_found == false then
 		detail.reason = "copy_gone"
 	end
-	detail.clip_deleted = NULL
-	if rec.clip_path ~= nil and rec.clip_imported == true and AIH.ours(rec.clip_path) then
+	local copy_done = detail.deleted or detail.copy_found == false
+	if copy_done and rec.clip_path ~= nil and rec.clip_imported == true and AIH.ours(rec.clip_path) then
 		step("delete_clip", function()
 			local pool = call(calls, "Project.GetMediaPool", project, "GetMediaPool")
 			local bin = pool ~= nil and find_bin(calls, pool, true) or nil
@@ -2336,21 +2402,25 @@ probe_stages.C8 = function(a, calls)
 				end
 			end
 		end)
+	elseif rec.clip_path ~= nil and rec.clip_imported == true then
+		detail.clip_kept = true -- 남은 복사본이 쓰는 클립: 복사본을 지울 때 함께 지운다
 	end
-	step("restore", function()
-		if rec.page ~= nil and current_page(calls) ~= rec.page then
-			call(calls, "Resolve.OpenPage.restore", st.R, "OpenPage", rec.page)
-		end
-		local cur = call(calls, "Project.GetCurrentTimeline.restore", project, "GetCurrentTimeline")
-		if type(rec.tc) == "string" and cur ~= nil and PLAYHEAD_PAGES[current_page(calls) or "edit"] then
-			call(calls, "Timeline.SetCurrentTimecode.restore", cur, "SetCurrentTimecode", rec.tc)
-		end
-	end)
-	if detail.deleted or not detail.copy_found then
+	if not leftover then
+		step("restore", function()
+			if rec.page ~= nil and current_page(calls) ~= rec.page then
+				call(calls, "Resolve.OpenPage.restore", st.R, "OpenPage", rec.page)
+			end
+			local cur = call(calls, "Project.GetCurrentTimeline.restore", project, "GetCurrentTimeline")
+			if type(rec.tc) == "string" and cur ~= nil and PLAYHEAD_PAGES[current_page(calls) or "edit"] then
+				call(calls, "Timeline.SetCurrentTimecode.restore", cur, "SetCurrentTimecode", rec.tc)
+			end
+		end)
+	end
+	if copy_done then
 		st.probe = nil
 	end
 	return {
-		stage = "C8", ok = (detail.deleted or not detail.copy_found) and true or false,
+		stage = "C8", ok = copy_done and true or false,
 		detail = detail, fingerprint = nz(fp),
 	}
 end

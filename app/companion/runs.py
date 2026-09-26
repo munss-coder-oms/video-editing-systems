@@ -28,12 +28,14 @@ from engine.analysis_cache import AnalysisCache
 from engine.automation.kinds import is_ready
 from engine.automation.plan import (PlanEnv, PlanRefused, SlotRequest, VoiceMemory, VoiceOverride, VoiceQuestion,
                                     plan_slot)
-from engine.edits.apply import (OUR_PREFIX, active_entries, apply_markers, remove_all_ours, resume_markers,
-                                scan_ours, undo_proposal)
+from engine.edits.apply import (OUR_PREFIX, ApplyOutcome, active_entries, apply_markers, remove_all_ours,
+                                resume_markers, scan_ours, undo_proposal)
 from engine.edits.journal import Journal
+from engine.edits.marks import ClearOutcome
 from engine.edits.proposal import Proposal
 from engine.edits.scope import check_proposal
 from engine.probe import probe as probe_media
+from engine.resolve_link.bridge import BridgeTimeout
 from engine.resolve_link.ops import MAX_ADD_MARKERS, ResolveOps
 from engine.resolve_link.transport import LuaTransport
 
@@ -45,8 +47,25 @@ from .cards import Card, ClearCard, ProposalCard, QuestionCard
 from .jobs import JobRunner
 from .voice_picker import VoicePickerCard
 
+WRITE_JOBS = ("apply", "undo", "clear", "remove_all")  # 리졸브와 일지를 바꾸는 일 (도는 동안 맞춰 보기를 쉰다)
 DEFAULT_SEC_PER_MIN = 6.0  # 처음 잴 때 1분에 몇 초 걸릴지 (첫 측정 전 어림)
 MIN_PERF_MEDIA_S = 30.0  # 이보다 짧은 파일은 걸린 시간을 기록하지 않는다 (어림이 흔들리므로)
+
+
+class NoAnswer(Exception):
+    """넣기·되돌리기·지우기 전에 먼저 한 ping에 답이 없음. 리졸브에는 아무것도 보내지 않았다."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+def ping_first(ops: ResolveOps) -> None:
+    """바꾸는 일은 먼저 짧게 ping (설계 B4.1 "ApplyJob: ping", B7.5): 끊겼으면 30초씩 기다리지 않고 바로 알린다."""
+    try:
+        ops.ping(timeout=steps.PING_TIMEOUT)
+    except BridgeTimeout as exc:
+        raise NoAnswer(exc) from exc
 
 
 @dataclass
@@ -98,23 +117,64 @@ class RunController(QObject):
     def busy(self) -> bool:
         return self.jobs.busy
 
+    @property
+    def writing(self) -> bool:
+        """넣기·되돌리기·지우기·모두 빼기가 도는 중 (연결 확인의 일지 맞춰 보기를 쉰다, 설계 B6.2·B10)."""
+        return self.jobs.name in WRITE_JOBS
+
     def _jobs_changed(self) -> None:
-        busy = self.jobs.busy
-        if not busy:
+        if not self.jobs.busy:
             self.running_slot = None
             self.w.automation.hide_progress()
+        self.w._refresh()  # 카드 단추도 여기서 (sync_cards)
+
+    def cards_blocked(self) -> bool:
+        """카드의 [리졸브에 넣기]·되돌리기를 꺼 둘 때: 다른 일이 도는 중이거나 리졸브와 이어져 있지 않음."""
+        c = getattr(self.w, "controller", None)
+        return self.jobs.busy or (c is not None and not c.connected)
+
+    def sync_cards(self) -> None:
+        blocked = self.cards_blocked()
         for card in list(self.cards):
             try:
-                card.set_busy(busy)
+                if card.busy != blocked:
+                    card.set_busy(blocked)
             except RuntimeError:
                 self.cards.remove(card)  # 오래돼서 지운 카드
-        self.w._refresh()
 
     def _add_card(self, card: Card) -> Card:
         self.cards.append(card)
-        card.set_busy(self.jobs.busy)
+        card.set_busy(self.cards_blocked())
         self.w.chat.add_card(card)
         return card
+
+    def start_write(self, name: str, work: Callable[[ResolveOps, Any], Any], on_done: Callable[[Any], None],
+                    on_failed: Callable[[BaseException], None], on_progress=None) -> bool:
+        """리졸브를 바꾸는 일(넣기·되돌리기·지우기·모두 빼기): 먼저 ping, 멈출 수 없음.
+
+        답을 받으면 마지막으로 물은 시각을 적고, ping에 답이 없으면 연결 상태를 "연결 안 됨"으로 고친다.
+        """
+        bridge = self.w.bridge
+
+        def job(ctx):
+            ops = self.make_ops(bridge)
+            ping_first(ops)
+            return work(ops, ctx)
+
+        def done(out) -> None:
+            if not self.w.closing:
+                self.w.controller.note_contact()
+            on_done(out)
+
+        def failed(exc: BaseException) -> None:
+            if not self.w.closing:
+                if isinstance(exc, NoAnswer):
+                    self.w.controller.note_failure(exc.cause, False)
+                elif not steps.is_disconnect(exc):
+                    self.w.controller.note_contact()
+            on_failed(exc)
+
+        return self.jobs.start(name, job, done, failed, on_progress, cancellable=False)
 
     def _say(self, text: str) -> None:
         self.w.chat.add_helper(text)
@@ -132,6 +192,8 @@ class RunController(QObject):
     def _explain(self, exc: BaseException) -> str:
         if isinstance(exc, ffmpeg.FFmpegError):
             return str(exc)
+        if isinstance(exc, NoAnswer):
+            return steps.explain(exc.cause, answered=False)  # 먼저 한 ping에 답이 없음: 연결 안 됨 안내
         return steps.explain(exc, answered=True)
 
     def _record(self, row: Dict[str, Any]) -> None:
@@ -233,6 +295,9 @@ class RunController(QObject):
                 self._add_card(card)
                 self.w.show_message(text)
             else:
+                if exc.code == "unmapped_tracks":
+                    # 다시 골라도 소용없으니 [목소리 다시 고르기]를 주지 않는다
+                    text = text.format(n=int(exc.detail.get("n") or 0))
                 self._say(text)
             self._receipt(state.number, None)
             self._record({**row, "status": "refused", "code": exc.code, "detail": _jsonable(exc.detail)})
@@ -413,6 +478,7 @@ class RunController(QObject):
 
     def _voice_picked(self, state: RunState, q: VoiceQuestion, stream: int, card: VoicePickerCard) -> None:
         if self.jobs.busy:
+            self.w.show_message(S.SLOT_DISABLED_BUSY)  # 끝나면 다시 눌러 주세요 (카드는 그대로)
             return
         choice = next((c for c in q.streams if c.index == stream), None)
         try:
@@ -463,16 +529,65 @@ class RunController(QObject):
             self.undo(pid, card=card)
         elif key == "resume":
             self.apply(state, card, resume=True)
+        elif key == "recheck":
+            self.recheck()
+
+    def recheck(self) -> bool:
+        """답이 끊겨 넣었는지(지웠는지) 모를 때: 연결 확인 한 번. 그 확인이 꼬리표로 맞춰 보고 카드를 고친다."""
+        if self.w.closing:
+            return False
+        self.w.show_message(S.RECEIPT_CHECKING)
+        return self.w.controller.check_now("connect")
+
+    def on_reconciled(self, results: List[Dict[str, Any]], info) -> None:
+        """연결 확인이 "넣는 중"을 맞춰 봄: 확인 중이던 카드를 영수증으로 바꾼다 (다시 읽은 수로)."""
+        at = time.strftime("%H:%M")
+        for r in results:
+            pid = r.get("proposal_id")
+            card = self.by_pid.get(pid)
+            try:
+                if card is None or card.state != "checking":
+                    continue
+            except RuntimeError:
+                continue
+            status = str(r.get("status") or "")
+            expected, found = int(r.get("expected") or 0), int(r.get("found") or 0)
+            receipt = {"readback": True, "reconciled": True}
+            if isinstance(card, ClearCard):
+                outcome = ClearOutcome(status=status, proposal_id=pid, expected=expected, deleted=found, at=at,
+                                       left=max(0, expected - found), receipt=receipt)
+            else:
+                created: List[Dict[str, Any]] = []
+                try:
+                    e = Journal.for_timeline(info, self.w.state_root).entry(pid) if info is not None else None
+                    created = list(((e or {}).get("created") or {}).get("markers") or [])
+                except OSError:
+                    pass
+                outcome = ApplyOutcome(status=status, proposal_id=pid, expected=expected, placed=found, at=at,
+                                       created=created, receipt=receipt)
+            try:
+                card.show_receipt(outcome)
+            except RuntimeError:
+                continue
+            number = getattr(card.proposal, "slot", None)
+            if status == "applied" and not isinstance(card, ClearCard):
+                self._receipt(number, S.SLOT_RECEIPT.format(at=at, color_word=fmt.color_word(card.proposal.color),
+                                                            n=found))
+            elif status == "partial" and not isinstance(card, ClearCard):
+                self._receipt(number, S.SLOT_RECEIPT_PARTIAL.format(at=at, placed=found, expected=expected))
+            elif not isinstance(card, ClearCard):
+                self._receipt(number, S.SLOT_RECEIPT_FAILED)
+            self._record({"stage": "reconcile", "proposal_id": pid, "status": status, "expected": expected,
+                          "found": found})
 
     def apply(self, state: RunState, card: ProposalCard, *, force: bool = False, resume: bool = False) -> bool:
         if self.jobs.busy or self.w.closing:
             return False
         p = card.proposal
-        bridge, root = self.w.bridge, self.w.state_root
+        root = self.w.state_root
         replace = [] if resume else list(state.replace)
 
-        def job(ctx):
-            ops = self.make_ops(bridge)
+        def work(ops, ctx):
             prog = (lambda i, n: ctx.progress(0, i / max(1, n), {"i": i, "n": n}))
             if resume:
                 return resume_markers(ops, p, root=root, progress=prog)
@@ -480,13 +595,12 @@ class RunController(QObject):
 
         chunks = max(1, math.ceil(p.count / MAX_ADD_MARKERS))
         t0 = time.monotonic()
-        started = self.jobs.start(
-            "apply", job, lambda out: self._applied(state, card, out, time.monotonic() - t0, force, resume),
+        started = self.start_write(
+            "apply", work, lambda out: self._applied(state, card, out, time.monotonic() - t0, force, resume),
             lambda exc: self._apply_failed(state, card, exc),
             lambda _s, frac, info: self._progress(state.number, S.APPLYING.format(i=info.get("i", 1),
                                                                                   n=info.get("n", chunks)),
-                                                  frac, False),
-            cancellable=False)
+                                                  frac, False))
         if started:
             card.lock()
             self._progress(state.number, S.APPLYING.format(i=1, n=chunks), 0.0, False)
@@ -523,6 +637,16 @@ class RunController(QObject):
             return
         if state.number is not None and self.pending.get(state.number) is card:
             self.pending.pop(state.number, None)
+        if out.status == "unknown":
+            # 답이 끊겨 들어갔는지 모름: 일지는 "넣는 중"으로 남았다. 곧바로 한 번 맞춰 본다 (설계 B6.2)
+            card.show_unknown(out)
+            self._receipt(state.number, S.SLOT_RECEIPT_UNKNOWN)
+            self.w.show_message(S.RECEIPT_UNKNOWN)
+            self.w.refresh_undo(force=True)
+            if state.chat is not None:
+                self.w.chat_flow.applied(card, out)
+            self.recheck()
+            return
         card.show_receipt(out)
         for old_pid in out.replaced:
             old_card = self.by_pid.get(old_pid)
@@ -541,6 +665,8 @@ class RunController(QObject):
         if state.chat is not None:
             self.w.chat_flow.applied(card, out)
         if out.placed:
+            # 넣은 뒤의 예문 칩 (설계 B1.5 "After apply"): 누르면 입력 칸만 채운다
+            self.w.chat.add_helper(S.CHAT_TRY_AFTER_APPLY, [(t, t) for t in S.CHIPS_AFTER_APPLY])
             self.ask_manual("M3")
             if p.kind == "mark_spikes":
                 self.ask_manual("M2")
@@ -565,13 +691,13 @@ class RunController(QObject):
         card = card or self.by_pid.get(pid)
         key = card.proposal.timeline.get("key") if card is not None else self.w.journal_key
         number = card.proposal.slot if card is not None else None
-        bridge, root = self.w.bridge, self.w.state_root
+        root = self.w.state_root
 
-        def job(ctx):
-            return undo_proposal(self.make_ops(bridge), pid, root=root, journal_key=key)
+        def work(ops, ctx):
+            return undo_proposal(ops, pid, root=root, journal_key=key)
 
-        started = self.jobs.start("undo", job, lambda out: self._undone(pid, card, number, request, out),
-                                  lambda exc: self._undo_failed(pid, card, exc), None, cancellable=False)
+        started = self.start_write("undo", work, lambda out: self._undone(pid, card, number, request, out),
+                                   lambda exc: self._undo_failed(pid, card, exc))
         if started:
             if card is not None:
                 card.lock()
@@ -650,9 +776,8 @@ class RunController(QObject):
     def remove_all(self) -> bool:
         if self.jobs.busy or self.w.closing:
             return False
-        bridge = self.w.bridge
-        started = self.jobs.start("scan", lambda ctx: scan_ours(self.make_ops(bridge)), self._scanned,
-                                  lambda exc: self._remove_failed("scan", exc), None, cancellable=False)
+        started = self.start_write("scan", lambda ops, ctx: scan_ours(ops), self._scanned,
+                                   lambda exc: self._remove_failed("scan", exc))
         if started:
             self._progress(None, S.SCANNING, None, False)
         return started
@@ -680,14 +805,13 @@ class RunController(QObject):
         elif self.w.choose(S.REMOVE_ALL_TITLE, text, [S.BTN_REMOVE, S.BTN_CANCEL]) != 0:
             self._record({"stage": "remove_all", "status": "cancelled", "page": scan.page, "total": scan.total})
             return
-        bridge, root = self.w.bridge, self.w.state_root
+        root = self.w.state_root
 
-        def job(ctx):
-            return remove_all_ours(self.make_ops(bridge), scan, root=root, remove_track=remove_track,
-                                   switch_page=switch_page)
+        def work(ops, ctx):
+            return remove_all_ours(ops, scan, root=root, remove_track=remove_track, switch_page=switch_page)
 
-        if self.jobs.start("remove_all", job, lambda out: self._removed(scan, out, switch_page, remove_track),
-                           lambda exc: self._remove_failed("remove_all", exc), None, cancellable=False):
+        if self.start_write("remove_all", work, lambda out: self._removed(scan, out, switch_page, remove_track),
+                            lambda exc: self._remove_failed("remove_all", exc)):
             self._progress(None, S.UNDOING, None, False)
 
     def _removed(self, scan, out, switch_page: bool, remove_track: bool) -> None:

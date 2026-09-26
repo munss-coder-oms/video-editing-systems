@@ -294,6 +294,23 @@ def test_only_items_on_enabled_tracks_and_enabled_clips_count(obs_video, cache_d
 
 
 @requires_ffmpeg
+def test_unmapped_tracks_are_refused_without_a_voice_picker_loop(obs_video, cache_dir):
+    """녹화의 A1(전체 소리) 클립을 지워 순서 규칙이 안 맞고 연결 정보도 없음: 목소리를 골라도 넣을 곳이 없다.
+    고르기 카드를 되풀이하지 않고 까닭을 알린다 (검토: no_voice_items 되풀이)."""
+    fake = _resolve(str(obs_video))
+    fake.items = [it for it in fake.items if it["track"] != 1]
+    with pytest.raises(PlanRefused) as e:
+        plan_slot(_req(), _env(fake, cache_dir), VoiceMemory())
+    assert e.value.code == "unmapped_tracks" and e.value.detail["n"] == 3
+    sig = _sig(obs_video)
+    for stream in (1, 2, 3):  # 예전에 고른 것이 있어도 같은 까닭
+        with pytest.raises(PlanRefused) as e:
+            plan_slot(_req(), _env(fake, cache_dir), VoiceMemory(), override=VoiceOverride(sig, stream))
+        assert e.value.code == "unmapped_tracks"
+    _no_mutations(fake)
+
+
+@requires_ffmpeg
 def test_missing_second_file_is_a_warning(obs_video, cache_dir):
     fake = _resolve(str(obs_video))
     fake.items.append(audio_item("x", 4, TL0 + 600, 300, "C:/없음.wav", clip_fps="30"))
