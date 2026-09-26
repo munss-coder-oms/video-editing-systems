@@ -1,7 +1,8 @@
 """미리보기 만들기: 녹화 흉내 → 가짜 리졸브와 진짜 도우미 창 → 단계마다 누르고 찍기 → steps.json, index.html.
 
 - 창은 이 PC의 설정·기록을 건드리지 않게 임시 폴더(설정, 기록, 결과 파일, APPDATA 등)에서 띄운다.
-- 소리를 트는 일만 막는다 (listen.PLAYER). 나머지는 창이 하는 그대로 (계산, 카드, 넣기, 되돌리기).
+- 소리를 트는 일과 새 판 받기의 검은 창만 막는다 (listen.PLAYER, start_update). 나머지는 창이 하는 그대로
+  (계산, 카드, 넣기, 되돌리기). ⋯ > 새 판 받기는 윈도우에서처럼 켜 둔다.
 - 녹화 흉내와 소리 계산 결과는 출력 폴더의 cache에 두고 다시 쓴다 (올릴 것은 index.html, steps.json, img).
 - 화면 배율 150% 단계는 배율이 다른 Qt가 필요해서 이 모듈을 따로 띄워(--scaled-shot) 찍는다.
 """
@@ -21,6 +22,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from PySide6.QtWidgets import QApplication
 
 import engine
+from app import update as updater
 from app.companion import listen
 from app.companion import strings_ko as S
 from app.companion.cards import ProposalCard
@@ -76,10 +78,15 @@ def qt_env(folder: Path, display_scale: float = 1.0) -> Dict[str, str]:
 
 @contextlib.contextmanager
 def sandbox(played: Optional[List[Any]] = None) -> Iterator[Path]:
-    """임시 폴더와 환경 변수 (창의 설정·기록·결과 파일이 이 PC에 남지 않게). 소리는 틀지 않는다."""
+    """임시 폴더와 환경 변수 (창의 설정·기록·결과 파일이 이 PC에 남지 않게). 소리는 틀지 않는다.
+
+    ⋯ > 새 판 받기는 윈도우에만 켜지므로, 다른 곳에서 만들어도 윈도우의 창처럼 켜 둔다 (누르면 묻는 창까지).
+    """
     tmp = Path(tempfile.mkdtemp(prefix="aih-preview-"))
     saved = {k: os.environ.get(k) for k in ENV_KEYS}
     old_player = listen.PLAYER
+    old_supported = updater.supported
+    updater.supported = lambda platform=None: True
     os.environ["APPDATA"] = str(tmp / "Roaming")
     os.environ["PROGRAMDATA"] = str(tmp / "ProgramData")
     os.environ["LOCALAPPDATA"] = str(tmp / "Local")
@@ -89,6 +96,7 @@ def sandbox(played: Optional[List[Any]] = None) -> Iterator[Path]:
         yield tmp
     finally:
         listen.PLAYER = old_player
+        updater.supported = old_supported
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -103,8 +111,14 @@ def open_window(tmp: Path, world: World, cache: Optional[Path] = None) -> Helper
                           auto_ping_ms=AUTO_PING_MS, state_root=tmp / "state", process_check=world.is_running)
     if cache is not None:
         window.runs.cache = AnalysisCache(cache / "analysis")
+    window.start_update = _no_update
     window.show()
     return window
+
+
+def _no_update(**_kwargs: Any) -> None:
+    """미리보기에서는 새 판 받기의 검은 창을 띄우지 않는다 (묻는 창에서 [취소]만 누른다)."""
+    raise updater.UpdateError("launch", "미리보기에서는 띄우지 않음")
 
 
 def close_window(app: QApplication, window: Optional[HelperWindow]) -> None:

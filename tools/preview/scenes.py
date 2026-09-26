@@ -6,7 +6,7 @@ strings_ko나 창에서 그대로 가져오고, 설명에 적은 문구가 창�
 붙이지 않는다 (문구마다 받침이 달라서): "맨 위: '...'"처럼 적는다.
 
 - 안내의 한 줄이 창에서 여러 번 누르는 일이면 단계를 나눈다 (같은 안내 번호).
-- 안내에 없는 것(연결 전, 옛 스크립트, 리졸브를 껐을 때, 작은 화면)은 따로 모았다 (안내 번호 없음).
+- 안내에 없는 것(연결 전, 옛 스크립트, 리졸브를 껐을 때, 새 판 받기, 작은 화면)은 따로 모았다 (안내 번호 없음).
 - 미리보기에서 할 수 없는 것(소리 듣기, 리졸브의 Ctrl+Z와 자르기)은 알아 둘 것에 적는다.
 - 찍으면서 잰 창의 문제(잘린 단추, 흐린 글씨 등)는 찾은 문제(issues)에 적는다.
 """
@@ -262,11 +262,15 @@ def s_more_menu(f: Flow) -> Step:
     w = f.w
     labels = [a.text() for a in w.more_menu.actions() if a.text()]
     image = f.d.menu(w.header.more_btn, w.more_menu, S.MENU_CHECK_PAGE, "⋯ 메뉴")
-    f.expect(" ".join(labels), S.MENU_CHECK_PAGE, S.MENU_REPORT, S.MENU_SETTINGS, S.MENU_HELP)
+    f.expect(" ".join(labels), S.MENU_CHECK_PAGE, S.MENU_REPORT, S.MENU_SETTINGS, S.MENU_HELP, S.MENU_UPDATE)
+    if not w.update_action.isEnabled():
+        raise f.d.fail(f"메뉴 줄이 꺼져 있음: {S.MENU_UPDATE}")
     return Step(
         do=f"창 오른쪽 위 {btn(S.BTN_MORE)} → {S.MENU_CHECK_PAGE}",
-        see=f"메뉴 줄: {S.MENU_CHECK_PAGE} · {S.MENU_REPORT} · {S.MENU_SETTINGS} ▸ · {S.MENU_HELP}",
+        see=(f"메뉴 줄: {S.MENU_CHECK_PAGE} · {S.MENU_REPORT} · {S.MENU_SETTINGS} ▸ · {S.MENU_HELP}, "
+             f"가는 줄 아래 {S.MENU_UPDATE}"),
         images=[image],
+        note=f"{S.MENU_UPDATE}는 이번 판에 새로 생긴 줄이에요 ('이럴 때는'의 새 판 단계에 따로 찍었어요).",
     )
 
 
@@ -1110,6 +1114,33 @@ def s_resolve_quit(f: Flow) -> Step:
              + slots),
         images=[image],
         note="창은 5초마다 윈도우 작업 목록에서 리졸브가 켜져 있는지만 봐요 (리졸브에는 묻지 않아요).",
+    )
+
+
+@scene("update", "trouble", None, "새 판이 나왔을 때 (새 판 받기)", media=False)
+def s_update(f: Flow) -> Step:
+    w = f.w
+    shots: List[Image] = []
+
+    def open_menu() -> None:
+        shots.append(f.d.menu(w.header.more_btn, w.more_menu, S.MENU_UPDATE, "⋯ 메뉴: 새 판 받기"))
+
+    dialog = f.d.dialog(open_menu, S.BTN_CANCEL, "새 판 받기를 묻는 창", timeout=30)
+    dlg = dict(f.d.last_dialog)
+    f.d.settle(0.2)
+    f.expect(dlg["title"], S.UPDATE_CONFIRM_TITLE)
+    f.expect(dlg["text"], S.UPDATE_CONFIRM)
+    if w.closing or not w.isVisible():
+        raise f.d.fail(f"{btn(S.BTN_CANCEL)}를 눌렀는데 창이 닫힘")
+    return Step(
+        do=(f"{btn(S.BTN_MORE)} → {S.MENU_UPDATE} → 묻는 창의 글을 읽고 {btn(S.BTN_UPDATE)} "
+            f"(미리보기에서는 {btn(S.BTN_CANCEL)})"),
+        see=f"묻는 창 제목: {q(dlg['title'])}. 글: {q(dlg['text'])}. 단추: {buttons_of(dlg['buttons'])}.",
+        images=[*shots, dialog],
+        note=(f"{btn(S.BTN_UPDATE)}를 누르면 창이 닫히고, 검은 창이 새 판을 받아 지금 폴더에 넣은 뒤 창을 다시 "
+              "열어요 (몇 분). 미리보기에서는 검은 창을 띄우지 않고 취소했어요. 리졸브에 넣거나 빼는 중에는 받지 "
+              f"않아요 (맨 위 알림: {q(S.UPDATE_BUSY)}). 0.2.0에는 이 메뉴가 없어서, 이 판은 한 번 더 ZIP으로 "
+              "설치해야 해요."),
     )
 
 
