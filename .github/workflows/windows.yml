@@ -131,7 +131,10 @@ jobs:
           call "%CONDA%\condabin\conda.bat" activate video-editing
           python -m pip install lupa || exit /b 1
           python -c "import lupa.luajit21 as l; print(l.LuaRuntime().eval('jit.version'))" || exit /b 1
-          python -m pytest -q -rs tests/test_lua_script.py tests/test_bridge_roundtrip.py tests/test_resolve_link.py tests/test_probe_leftover.py tests/test_resolve_ops.py || exit /b 1
+          rem LuaJIT raises its own Windows exception (0xe24c4a02) for every Lua error. pytest's faulthandler
+          rem prints every thread's stack for each one while the other threads keep running, and that
+          rem printing itself crashed the run once (access violation). The tests do not need it.
+          python -m pytest -q -rs -p no:faulthandler tests/test_lua_script.py tests/test_bridge_roundtrip.py tests/test_resolve_link.py tests/test_probe_leftover.py tests/test_resolve_ops.py || exit /b 1
 
       - name: 새 판 받기 준비 (지금 코드로 ZIP 만들기, 지워질 파일과 사용자 파일 심기)
         shell: pwsh
