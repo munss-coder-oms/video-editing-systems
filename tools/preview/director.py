@@ -9,10 +9,13 @@
 - 대화 칸은 창이 스스로 굴린 자리 그대로 찍는다 (새 카드를 따라 내려가는지도 보인다). 대화 칸보다 큰 카드는
   위(창이 멈춘 자리)와 아래를 한 장씩. 예전 카드를 다시 볼 때만 사용자처럼 위로 굴린다.
 - 묻는 창의 글씨 대비는 그려진 그림에서 잰다 (스타일시트 바탕은 팔레트에 없다).
+- 결과 파일 경로: 미리보기는 임시 폴더에 저장하므로, 찍는 동안만 창의 글 속 그 경로를 윈도우에서 보일 모양
+  (C:\\Users\\(이름)\\Desktop\\…)으로 바꿔 찍고 되돌린다. 그런 그림이 있는 단계에는 그 말을 알아 둘 것에 붙인다.
 """
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -21,7 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QImage, QInputMethodEvent, QPainter, QPixmap
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QAbstractButton, QApplication, QLabel, QMenu, QMessageBox, QWidget
+from PySide6.QtWidgets import QAbstractButton, QApplication, QLabel, QMenu, QMessageBox, QPlainTextEdit, QWidget
 
 from app.companion import theme
 from app.companion.window import HelperWindow
@@ -41,6 +44,10 @@ ISSUE_NOT_SHOWN = "새 카드가 대화 칸에 보이지 않는 자리에서 멈
 ISSUE_FAINT = ("묻는 창의 글씨가 바탕과 거의 같은 색이라 잘 안 읽혀요 (글씨 {fg}, 바탕 {bg}, 대비 {ratio:.1f}:1). "
                "창에 적힌 글은 '보이는 것'에 옮겨 적었어요.")
 ISSUE_FAINT_AGAIN = "이 묻는 창도 글씨가 흐려요 ({first}단계에 적은 문제와 같아요, 대비 {ratio:.1f}:1)."
+
+WINDOWS_DESKTOP = "C:\\Users\\(이름)\\Desktop"  # 결과 파일 경로를 찍을 때 임시 폴더 대신 보이는 모양
+TEMP_PATH_NOTE = ("그림 속 결과 파일 경로는 윈도우에서 보일 모양(C:\\Users\\(이름)\\Desktop\\…)으로 바꿔 찍었어요 "
+                  "(미리보기는 임시 폴더에 저장해요). 원드라이브를 쓰면 …\\OneDrive\\바탕 화면\\…처럼 보여요.")
 
 
 class SceneError(RuntimeError):
@@ -152,6 +159,18 @@ class Director:
             # 다 들어가면 아래를 맞춰 앞의 말도 보이게, 안 들어가면 위를 맞춘다
             value = bottom - view + margin if widget.height() + 2 * margin <= view else top - margin
             bar.setValue(max(0, min(bar.maximum(), value)))
+        log.horizontalScrollBar().setValue(0)
+        self.settle(0.05)
+
+    def show_from_top(self, widget: QWidget) -> None:
+        """대화 칸 안의 것의 맨 위가 칸의 맨 위에 오게 굴린다 (그 뒤에 온 것도 이어서 보이게)."""
+        log = self.w.chat.log
+        if not log.inner.isAncestorOf(widget):
+            return
+        self.settle(0.02)
+        top = widget.mapTo(log.inner, QPoint(0, 0)).y()
+        bar = log.verticalScrollBar()
+        bar.setValue(max(0, min(bar.maximum(), top - 8)))
         log.horizontalScrollBar().setValue(0)
         self.settle(0.05)
 
@@ -276,15 +295,63 @@ class Director:
         size = pixmap.deviceIndependentSize()
         return Image(f"img/{path.name}", kind, int(round(size.width())), int(round(size.height())), alt, caption)
 
+    def masked(self, text: str) -> str:
+        """글 속 결과 파일 경로(임시 폴더)를 윈도우에서 보일 모양으로: C:\\Users\\(이름)\\Desktop\\AI도우미_결과_….txt"""
+        folder = getattr(self.w, "report_dir", None)
+        if folder is None or not text or str(folder) not in text:
+            return text
+        pattern = re.escape(str(folder)) + r"([^\s'\"]*)"
+        return re.sub(pattern, lambda m: WINDOWS_DESKTOP + m.group(1).replace("/", "\\"), text)
+
+    def _grab(self, widget: QWidget) -> QPixmap:
+        """widget을 찍는다. 찍는 동안만 창의 글 속 임시 폴더 경로를 윈도우 경로 모양으로 바꾼다."""
+        undo: List[Callable[[], None]] = []
+        for label in self.w.findChildren(QLabel):
+            text = label.text()
+            shown = self.masked(text)
+            if shown != text and _in_shot(label, widget):
+                label.setText(shown)
+                undo.append(lambda lb=label, t=text: lb.setText(t))
+        edits = []
+        for edit in self.w.findChildren(QPlainTextEdit):
+            text = edit.toPlainText()
+            shown = self.masked(text)
+            if shown != text and _in_shot(edit, widget):
+                bar = edit.verticalScrollBar()
+                edits.append((edit, bar.value() >= bar.maximum(), bar.value()))
+                edit.setPlainText(shown)
+                undo.append(lambda ed=edit, t=text: ed.setPlainText(t))
+        if undo:
+            if TEMP_PATH_NOTE not in self.notes:
+                self.notes.append(TEMP_PATH_NOTE)
+            self._keep_scroll(edits)
+        pixmap = widget.grab()
+        if undo:
+            for fn in undo:
+                fn()
+            self._keep_scroll(edits)
+        return pixmap
+
+    def _keep_scroll(self, edits) -> None:
+        """글을 바꾼 뒤 자리를 다시 잡고, 기록 칸의 굴린 자리를 그대로 (맨 아래였으면 맨 아래)."""
+        for _ in range(3):  # 줄 수가 바뀐 글: 높이를 다시 재는 데 몇 번 돈다
+            self.settle(0.03)
+            for layout in [w.layout() for w in [self.w, *self.w.findChildren(QWidget)] if w.layout() is not None]:
+                layout.activate()
+        for edit, at_end, value in edits:
+            bar = edit.verticalScrollBar()
+            bar.setValue(bar.maximum() if at_end else value)
+        self.settle(0.03)
+
     def shot(self, alt: str, name: str = "window", caption: str = "") -> Image:
         """창 전체."""
         self.settle(0.1)
-        return self._save(self.w.grab(), name, "window", alt, caption)
+        return self._save(self._grab(self.w), name, "window", alt, caption)
 
     def widget_shot(self, widget: QWidget, alt: str, name: str = "card", caption: str = "") -> Image:
         """카드 한 장만 (대화 칸에 다 들어가지 않을 때)."""
         self.settle(0.05)
-        return self._save(widget.grab(), name, "card", alt, caption)
+        return self._save(self._grab(widget), name, "card", alt, caption)
 
     def card_cut(self, card: QWidget) -> bool:
         """카드가 대화 칸 안에서 다 보이지 않는지 (잘렸으면 카드만 따로 찍는다)."""
@@ -303,7 +370,7 @@ class Director:
 
     def _compose(self, top: QPixmap, offset: QPoint, *, title: Optional[str] = None) -> QPixmap:
         """창 그림 위 offset(창 기준, 논리 픽셀) 자리에 top을 겹친다. 넘치면 그림을 넓힌다."""
-        base = self.w.grab()
+        base = self._grab(self.w)
         dpr = base.devicePixelRatio()
         bw, bh = base.deviceIndependentSize().width(), base.deviceIndependentSize().height()
         tw, th = top.deviceIndependentSize().width(), top.deviceIndependentSize().height()
@@ -474,6 +541,13 @@ class Director:
         self.settle(0.15)
         if (self.w.width(), self.w.height()) != (width, height):
             raise self.fail(f"창 크기가 {width}×{height}이 되지 않음 ({self.w.width()}×{self.w.height()})")
+
+
+def _in_shot(widget: QWidget, root: QWidget) -> bool:
+    """찍을 그림(root)에 보이는 것인지: 보이고, root 안에 있고, 부모(대화 칸 등)에 가려 잘리지 않음."""
+    if not widget.isVisible() or not (widget is root or root.isAncestorOf(widget)):
+        return False
+    return not widget.visibleRegion().isEmpty()
 
 
 def drawn_colors(img: QImage) -> Tuple[QColor, QColor]:

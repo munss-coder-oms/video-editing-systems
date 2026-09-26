@@ -213,7 +213,9 @@ def test_settings_then_rerun_offers_replace_or_add(qapp, make_window, obs, share
     wait_until(qapp, lambda: any(c.title.text() == S.RERUN_QUESTION.format(color_word="파란", n=2)
                                  for c in _cards(w, QuestionCard)[asked:]) and not w.runs.busy, 60)
     q = _cards(w, QuestionCard)[-1]
-    assert set(q.buttons) == {"replace", "add"}
+    # 잘못 눌렀을 때 나갈 길 [취소], 어느 일로 넣은 표시인지 (버튼 이름과 시각)
+    assert set(q.buttons) == {"replace", "add", "cancel"}
+    assert S.RERUN_FROM.split("{")[0] in q.plain_text() and "'쉬는 곳 표시'" in q.plain_text()
     q.buttons["replace"].click()
     second = _cards(w, ProposalCard)[-1]
     assert second is not first and S.RESOLVE_REPLACE.format(color_word="파란", n=2) in second.plain_text()
@@ -346,7 +348,9 @@ def test_remove_all_asks_about_the_edit_page(qapp, make_window, tmp_path, shared
     _idle(qapp, w)
     title, text, options = asked[0]
     assert title == S.REMOVE_ALL_TITLE and options == [S.BTN_SWITCH_REMOVE, S.BTN_MARKERS_ONLY, S.BTN_CANCEL]
-    assert text.startswith(S.EDIT_PAGE_QUESTION) and S.REMOVE_ALL_CONFIRM.format(n=4) in text
+    # 물음은 하나 (모두 뺄까요?), 맨 앞에. 편집 화면 이야기는 단추마다 무엇을 하는지로
+    assert text.startswith(S.REMOVE_ALL_CONFIRM.format(n=4)) and text.count("?") == 1
+    assert S.EDIT_PAGE_DETAIL in text and S.EDIT_PAGE_SWITCH in text and S.EDIT_PAGE_MARKERS in text
     parts = S.REMOVE_ALL_PART_SEP.join([S.REMOVE_ALL_PART_MARKERS.format(n=1), S.REMOVE_ALL_PART_LEGACY.format(n=2),
                                         S.REMOVE_ALL_PART_TRACKS.format(n=1)])
     assert S.REMOVE_ALL_DETAIL.format(parts=parts) in text and S.REMOVE_ALL_KEEP in text
@@ -356,18 +360,22 @@ def test_remove_all_asks_about_the_edit_page(qapp, make_window, tmp_path, shared
         return
     assert sorted(fr.markers) == [100]  # 사용자 표시만 남는다
     log = w.chat.log.toPlainText()
-    done = S.REMOVE_ALL_PART_SEP.join([S.REMOVE_ALL_PART_MARKERS.format(n=1), S.REMOVE_ALL_PART_LEGACY.format(n=2)])
-    assert S.REMOVE_ALL_DONE.format(parts=done) in log
+    markers = [S.REMOVE_ALL_PART_MARKERS.format(n=1), S.REMOVE_ALL_PART_LEGACY.format(n=2)]
     if answer == 0:
         assert LEGACY_TEST_TRACK not in tracks and fr.opened_pages == ["edit", "color"]
-        assert S.REMOVE_ALL_TRACK_DONE in log
+        # 뺀 것 한 줄에 트랙까지 (확인 창과 같은 "옛 시험 트랙"으로). 대화와 머리말 알림에 같은 줄
+        done = S.REMOVE_ALL_DONE.format(parts=S.REMOVE_ALL_PART_SEP.join(markers + [S.REMOVE_ALL_PART_TRACKS.format(n=1)]))
+        assert done in log and w.message.text() == done
         # 트랙을 뺐으니 머리말 요약을 조용히 다시 읽는다 (소리 트랙 5개 → 4개). 알림 줄은 그대로
         wait_until(qapp, lambda: w.header.summary.text().endswith("4개") and w.pending == 0)
         assert "timeline_info" in fake.requests[fake.requests.index("remove_audio"):]
-        assert w.message.text() == S.REMOVE_ALL_DONE.format(parts=done)
+        assert w.message.text() == done
     else:
         assert LEGACY_TEST_TRACK in tracks and "remove_audio" not in fake.requests
-        assert S.REMOVE_ALL_TRACK_KEPT in log
+        # 트랙을 남겼으면 "모두"라 하지 않고, 트랙이 남은 까닭까지 같은 한 줄에 (대화를 접어도 머리말에서 보인다)
+        done = S.REMOVE_ALL_LINE_SEP.join([S.REMOVE_ALL_DONE_SOME.format(parts=S.REMOVE_ALL_PART_SEP.join(markers)),
+                                           S.REMOVE_ALL_TRACK_KEPT])
+        assert done in log and w.message.text() == done
         assert w.header.summary.text().endswith("5개")
 
 
@@ -417,7 +425,9 @@ def test_slot_order_and_restore_previous(qapp, make_window, tmp_path, shared_cac
     btn = w.automation.button(3)
     assert btn.name == "소리 고르게" and not btn.isEnabled() and btn.receipt.text() == S.SLOT_DISABLED_NOT_READY
     assert w.stack.currentWidget() is w.panel
-    assert S.fill(S.SETTINGS_RESTORED, name="소리 고르게") in w.message.text()
+    # 바뀐 버튼(3)이 이전 설정(소리 고르게)으로 돌아갔다
+    assert w.message.text() == S.fill(S.SETTINGS_RESTORED, n=3, name="소리 고르게")
+    assert w.message.text() == "버튼 3을 이전 설정(소리 고르게)으로 되돌렸어요"
     # 설정 바꾸기는 리졸브에 묻지 않는다
     assert _mutating(fake) == []
 

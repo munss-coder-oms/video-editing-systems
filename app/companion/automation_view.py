@@ -3,8 +3,10 @@
 버튼마다 "번호 · 이름", 설정 요약 한 줄, 마지막 결과(또는 못 쓰는 이유) 한 줄. 준비 중인 일(소리 고르게 등)은
 "준비 중"으로 꺼 두고 풍선 도움말로 까닭을 적는다. 꺼 둔 버튼은 점선 테두리와 흐린 이름으로 보인다.
 
-넓은 화면: 버튼마다 한 줄(60) + ⚙(40×40). 낮은 화면: 세 칸 타일(약 116×68), ⚙는 타일 아래 한 줄
-(설계 B1.2 "⚙는 늘 누를 수 있다": 1080p·150%인 화면은 낮은 모양이라 숨기면 설정을 바꿀 길이 없다).
+넓은 화면: 버튼마다 한 줄(60) + ⚙(40×40). 낮은 화면: 세 칸 타일(약 116×68), ⚙는 타일의 오른쪽 위 모서리에
+겹쳐 둔다 (설계 B1.2 "⚙는 늘 누를 수 있다": 1080p·150%인 화면은 낮은 모양이라 숨기면 설정을 바꿀 길이 없다.
+타일 아래에 한 줄을 따로 두면 640 높이 창에서 대화 칸이 그만큼 준다). ⚙는 버튼의 자식이 아니라서
+버튼을 꺼 두어도(준비 중, 연결 안 됨) 누를 수 있다. 타일의 이름은 ⚙ 자리만큼 오른쪽을 비운다.
 계산하는 동안에는 그 버튼 자리가 진행 줄([멈추기] 포함)로 바뀐다. 버튼과 상관없는 일(대화의 찾기·지우기,
 되돌리기, 모두 빼기)이나 타일이면 버튼 아래 한 줄.
 진행 줄은 대화 칸을 접어도 버튼 자리에 늘 보이므로, 설계의 "접었을 때 머리말의 작은 진행 표시"는 따로 두지 않았다.
@@ -96,14 +98,17 @@ class SlotButton(QPushButton):
     def set_mode(self, mode: str) -> None:
         tiles = mode != "rows"
         if tiles:
-            # 좁은 타일: 이름은 조금 작게(14/600), 이름과 이유는 줄을 바꿔 잘리지 않게
+            # 좁은 타일: 이름은 조금 작게(14/600), 이름과 이유는 줄을 바꿔 잘리지 않게.
+            # 오른쪽 위 모서리의 ⚙와 겹치지 않게 이름 줄 오른쪽을 비운다 (버튼 안쪽 여백 10을 빼고)
             self._min_h = theme.TILE_H
             self.setMinimumSize(theme.TILE_W - 20, theme.TILE_H)
             self.setMaximumHeight(theme.TILE_H + 8)
+            self.title.setContentsMargins(0, 0, theme.TILE_GEAR - 10, 0)
         else:
             self._min_h = theme.SLOT_ROW_H
             self.setMinimumSize(0, theme.SLOT_ROW_H)
             self.setMaximumHeight(theme.SLOT_ROW_H + 16)
+            self.title.setContentsMargins(0, 0, 0, 0)
         self.updateGeometry()
         self.summary.setVisible(not tiles)
         self.title.setProperty("role", "tile-title" if tiles else "slot-title")
@@ -170,6 +175,17 @@ class ProgressRow(QWidget):
         self.stop_btn.setEnabled(can_stop)
 
 
+def _gear_mode(gear: QToolButton, tile: bool) -> None:
+    """⚙ 크기: 줄 모양은 40×40, 타일은 모서리의 작은 칸 (스타일의 box="tile")."""
+    want = "tile" if tile else None
+    if gear.property("box") != want:
+        gear.setProperty("box", want)
+        gear.style().unpolish(gear)
+        gear.style().polish(gear)
+    size = theme.TILE_GEAR if tile else theme.GEAR
+    gear.setFixedSize(size, size)
+
+
 class AutomationView(QWidget):
     slot_clicked = Signal(int)
     settings_clicked = Signal(int)
@@ -207,7 +223,6 @@ class AutomationView(QWidget):
             gear.setText(S.SLOT_SETTINGS)
             gear.setToolTip(S.TIP_SLOT_SETTINGS)
             gear.setAccessibleName(f"{btn.name} {S.TIP_SLOT_SETTINGS}")
-            gear.setFixedSize(theme.GEAR, theme.GEAR)
             gear.clicked.connect(lambda _=False, n=btn.number: self.settings_clicked.emit(n))
             self.buttons.append(btn)
             self.gears.append(gear)
@@ -244,15 +259,17 @@ class AutomationView(QWidget):
             else:
                 btn.setVisible(True)
                 self.grid.addWidget(btn, 0, i)
-                # 좁은 타일: ⚙는 그 타일 아래 한 줄에 (늘 누를 수 있게)
-                self.grid.addWidget(gear, 1, i, Qt.AlignRight | Qt.AlignVCenter)
+                # 좁은 타일: ⚙는 그 타일의 오른쪽 위 모서리에 겹쳐 (따로 한 줄을 쓰지 않게, 늘 누를 수 있게)
+                self.grid.addWidget(gear, 0, i, Qt.AlignRight | Qt.AlignTop)
+            _gear_mode(gear, self.mode != "rows")
             gear.setVisible(True)
+            gear.raise_()  # 타일 위에 그린다
         if shown and not placed:
             if self.mode == "rows":
                 # 버튼과 상관없는 일이면 버튼 아래 한 줄 ([멈추기]를 누를 수 있게)
                 self.grid.addWidget(self.progress, n, 0, 1, 2)
             else:
-                self.grid.addWidget(self.progress, 2, 0, 1, max(1, n))
+                self.grid.addWidget(self.progress, 1, 0, 1, max(1, n))
         for col in range(max(3, n)):
             self.grid.setColumnStretch(col, 1 if self.mode == "tiles" else 0)
         self.grid.setColumnStretch(0, 1)

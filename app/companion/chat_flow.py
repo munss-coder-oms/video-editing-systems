@@ -75,7 +75,7 @@ class ChatController(QObject):
 
     def _say(self, text: str, chips: Optional[List[Tuple[str, str]]] = None, **extra: Any) -> None:
         self.w.chat.add_helper(text, chips)
-        self.w.show_message(text)
+        self.w.show_message(text, echo=self.w.chat.last_line)  # 대화 칸에 보이는 동안은 머리말에 되풀이하지 않는다
         self.session.add("helper", text, tl_key=self.w.journal_key, **extra)
 
     @property
@@ -439,15 +439,15 @@ class ChatController(QObject):
             if out.status == "other_timeline":
                 text = S.fill(S.OTHER_TIMELINE_APPLY, name=out.timeline_name or "")
                 card.show_message(text)
-                self.w.show_message(text)
+                self.w.show_message(text, echo=card)
             elif out.status == "unknown":
                 # 답이 끊겨 지워졌는지 모름: 일지는 "지우는 중". 곧바로 한 번 맞춰 본다 (설계 B6.2)
                 card.show_unknown(out)
-                self.w.show_message(S.CLEAR_RECEIPT_UNKNOWN)
+                self.w.show_message(S.CLEAR_RECEIPT_UNKNOWN, echo=card)
                 self.w.runs.recheck()
             else:
                 card.show_receipt(out)
-                self.w.show_message(card.title.text())
+                self.w.show_message(card.title.text(), echo=card)
                 at = fmt.clock_time(time.strftime("%H:%M"))
                 for pid in out.closed:
                     other = self.w.runs.by_pid.get(pid)
@@ -474,7 +474,7 @@ class ChatController(QObject):
                 return
             text = S.APPLY_FAILED.format(reason=self.w.runs._explain(exc))
             card.show_message(text)
-            self.w.show_message(text)
+            self.w.show_message(text, echo=card)
             self._record({"event": "clear", "proposal_id": plan.id, "status": "error", "error": f"{exc}"})
             self.w.refresh_undo(force=True)
 
@@ -526,8 +526,8 @@ class ChatController(QObject):
                           "calls": r.get("calls")})
             if r.get("ok") is True:
                 done_text = S.fill(S.CHAT_JUMP_DONE, at=at, tc=tc)
-                self.w.show_message(done_text)
                 self.w.chat.add_helper(done_text)
+                self.w.show_message(done_text, echo=self.w.chat.last_line)
             elif r.get("reason") == "other_timeline":
                 self._say(S.CHAT_JUMP_OTHER_TIMELINE.format(name=want_name or ""))
             elif r.get("reason") == "page":
@@ -655,8 +655,8 @@ class ChatController(QObject):
             return False
         self.w._slots_changed()
         dropped = (p.scope or {}).get("kind") == "range"
-        self.w.show_message(S.fill(S.SAVE_DONE, n=number))
         self.w.chat.add_helper(S.fill(S.SAVE_DONE, n=number))
+        self.w.show_message(S.fill(S.SAVE_DONE, n=number), echo=self.w.chat.last_line)
         if dropped:
             self.w.chat.add_helper(self._range_dropped(p))
         self._record({"event": "save_slot", "slot": int(number), "kind": kind, "params": params,
@@ -666,17 +666,16 @@ class ChatController(QObject):
 
     def _slot_name(self, number: int, kind: str) -> str:
         """저장할 버튼 이름: 같은 일이면 지금 이름(직접 지은 이름)을 두고, 아니면 일 이름.
-        다른 버튼과 이름이 같아지면 번호를 붙인다 ("쉬는 곳 표시 3") — 버튼 셋을 가려 볼 수 있게."""
+
+        다른 버튼과 이름이 같아도 번호를 붙이지 않는다: 버튼은 "3 · 쉬는 곳 표시"처럼 제 번호를 달고 있고,
+        이름 뒤의 "3"은 개수나 다른 버튼 번호로 읽힌다. 버튼 셋은 요약 줄(몇 초, 무슨 색)로 가려 본다."""
         try:
             current = self.w.settings.slot(number)
         except KeyError:
             current = {}
         if current.get("kind") == kind and current.get("name"):
             return str(current["name"])
-        name = S.KIND_NAMES.get(kind, kind)
-        others = [s.get("name") or S.SLOT_DEFAULT_NAMES.get(s.get("slot"), "")
-                  for s in self.w.settings.slots if s.get("slot") != number]
-        return S.SAVE_SLOT_NAME.format(name=name, n=number) if name in others else name
+        return S.KIND_NAMES.get(kind, kind)
 
     # ── 카드의 단추 (runs.py가 넘겨준다) ────────────────────────────────
 

@@ -1,4 +1,9 @@
-"""머리말: 연결 불빛과 낱말, [연결 확인], ⋯, 타임라인 한 줄 요약(▸ 자세히), 점검용 복사본 경고 (설계 B1.1)."""
+"""머리말: 연결 불빛과 낱말, [연결 확인], ⋯, 타임라인 한 줄 요약(▸ 자세히), 점검용 복사본 경고 (설계 B1.1).
+
+- 타임라인 길이는 "7분"처럼 (영수증의 시각 "오후 9:50"과 헷갈리지 않게 "7:00"으로 쓰지 않는다).
+- 연결이 끊기면 (리졸브를 끔 포함) 요약 줄과 자세히 칸을 비우고 숨긴다: 상태 줄과 안내가 할 일을 말한다.
+- 알림 줄: 상태 안내와 같은 말이거나 대화 칸에 같은 말이 보이면(set_echoed) 숨긴다. 글은 그대로 둔다.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +26,7 @@ from PySide6.QtWidgets import (
 from engine.resolve_link.ops import TimelineInfo
 
 from . import connection as conn
+from . import fmt
 from . import strings_ko as S
 from . import theme
 
@@ -47,12 +53,10 @@ def file_name(path: Any) -> str:
 
 
 def _length_text(seconds: Optional[float]) -> str:
+    """타임라인 길이 "7분", "18분 46초" (카드의 "전체 7분"과 같은 말)."""
     if seconds is None:
         return S.SUMMARY_LENGTH_UNKNOWN
-    total = int(round(seconds))
-    h, rest = divmod(total, 3600)
-    m, s = divmod(rest, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+    return fmt.length(seconds)
 
 
 def timeline_of(state: Optional[Dict[str, Any]], kind: Optional[str]) -> Optional[TimelineInfo]:
@@ -83,6 +87,8 @@ class HeaderView(QWidget):
         self.mode = "full"
         self._hint = ""
         self._summary = S.SUMMARY_NONE
+        self._known = False  # 리졸브에서 읽은 타임라인 요약이 있음 (연결이 끊기면 False: 요약 줄을 숨긴다)
+        self._echoed = False  # 알림과 같은 말이 대화 칸에 보임
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
@@ -185,11 +191,29 @@ class HeaderView(QWidget):
         self._hint = hint
         self.check_btn.setText(S.BTN_RETRY if status == conn.BUSY else S.BTN_CHECK_CONNECTION)
         self._apply_mode()
+        self._sync_message()
 
     def set_message(self, text: str) -> None:
         self.message.setText(text)
         self.message.setToolTip(text)
-        self.message.setVisible(bool(text))
+        self._sync_message()
+
+    def set_echoed(self, echoed: bool) -> None:
+        """알림과 같은 말(카드 제목, 대화 줄)이 대화 칸에 보이는 동안 알림 줄을 숨긴다 (글은 그대로)."""
+        if echoed != self._echoed:
+            self._echoed = echoed
+            self._sync_message()
+
+    def _sync_message(self) -> None:
+        text = self.message.text()
+        shown = bool(text) and not self._echoed and text != self._hint
+        if self.message.isVisibleTo(self) != shown:
+            self.message.setVisible(shown)
+
+    @property
+    def message_shown(self) -> bool:
+        """알림 줄이 보이는지 (숨기지 않았는지)."""
+        return not self.message.isHidden()
 
     def show_info(self, ping: Optional[Dict[str, Any]], state: Optional[Dict[str, Any]], kind: Optional[str],
                   audio_items: Optional[List[Dict[str, Any]]] = None) -> None:
@@ -199,6 +223,9 @@ class HeaderView(QWidget):
             self.info["version"].setText(f"{ping.get('product') or S.INFO_RESOLVE} {version}")
         if not isinstance(state, dict):
             return
+        if not self._known:
+            self._known = True
+            self._apply_mode()
         self._summary = summary_text(state, kind)
         self.summary.setText(self._summary)
         self.summary.setToolTip(self._summary)
@@ -240,11 +267,19 @@ class HeaderView(QWidget):
         self.info["first_clip"].setText(first or S.INFO_EMPTY)
 
     def clear_summary(self) -> None:
-        """연결이 끊김: 지난 타임라인 요약 대신 "아직 몰라요"."""
-        if self._summary != S.SUMMARY_NONE:
-            self._summary = S.SUMMARY_NONE
-            self.summary.setText(S.SUMMARY_NONE)
-            self.summary.setToolTip(S.SUMMARY_NONE)
+        """연결이 끊김 (리졸브를 끔 포함): 지난 타임라인 요약과 자세히 칸을 비우고 숨긴다.
+
+        남겨 두면 "리졸브가 꺼졌어요" 아래에 지난 프로젝트·타임라인이 그대로 보여 서로 어긋난다."""
+        self._summary = S.SUMMARY_NONE
+        self.summary.setText(S.SUMMARY_NONE)
+        self.summary.setToolTip(S.SUMMARY_NONE)
+        for label in self.info.values():
+            label.setText(S.INFO_EMPTY)
+        if self._known:
+            self._known = False
+            if self.details_btn.isChecked():
+                self.details_btn.setChecked(False)
+            self._apply_mode()
 
     def set_probe_copy(self, name: Optional[str], can_switch: bool) -> None:
         self.warning_row.setVisible(bool(name))
@@ -265,16 +300,17 @@ class HeaderView(QWidget):
     def _apply_mode(self) -> None:
         mode = self.mode
         hint = self._hint
+        known = self._known
         if mode == "full":
             self.hint.setText(hint)
             self.hint.setVisible(bool(hint))
-            self.summary_row.setVisible(True)
+            self.summary_row.setVisible(known)
             self.hint.setWordWrap(True)
         elif mode == "tiles":
             # 두 줄: 안내가 있으면 안내, 없으면 요약
             self.hint.setText(hint)
             self.hint.setVisible(bool(hint))
-            self.summary_row.setVisible(not hint)
+            self.summary_row.setVisible(known and not hint)
         else:
             # 한 줄. 연결 전에는 스크립트를 누르라는 안내가 가장 중요해서 그 줄만 남긴다
             self.hint.setText(hint)

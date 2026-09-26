@@ -8,7 +8,8 @@
 - 표시: 리졸브 표시 색. 도우미 표시(aih)는 채운 깃발, 직접 찍은 표시는 속이 빈 깃발.
   길이 있는 표시는 깃발 아래의 가는 막대 (아주 짧아도 보이게 최소 너비).
 - 재생 위치: 흰 세로줄과 눈금 글씨 아래의 세모.
-- 범례: 깃발 모양은 색과 상관없이 회색으로, 옛 시험 표시(노랑)는 있을 때만.
+- 범례: 줄에 그린 것과 같은 깃발을 그 표시들의 실제 색으로 (도우미 표시가 빨강·파랑이면 빨강·파랑 깃발).
+  옛 시험 표시(노랑)와 길이 있는 표시의 막대는 그림에 있을 때만 적는다 (막대가 무엇인지 모르면 그리다 만 것처럼 보여서).
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ COUNTS_LEGACY = "도우미 표시 {ours}개 · 옛 시험 표시 {legacy}개 · 
 LEGEND_OURS = "도우미가 넣은 표시"
 LEGEND_USER = "직접 찍은 표시"
 LEGEND_LEGACY = "옛 시험 표시"
+LEGEND_RANGE = "길이 있는 표시 (막대가 길이)"
 LEGEND_PLAYHEAD = "재생 위치 {tc}"
 MINUTE = "{m}분"
 
@@ -41,7 +43,8 @@ MARKER_RGB = {
 }
 BG, RULER_BG, LANE_BG = "#16171a", "#1f2125", "#25272c"
 TEXT, MUTED, TICK = "#e4e6eb", "#9a9ea8", "#5d616b"
-NEUTRAL = "#b8bcc6"  # 범례의 깃발 모양 (색은 표시마다 다르므로 회색)
+NEUTRAL = "#b8bcc6"  # 범례에 그릴 색이 없을 때 (그 표시가 그림에 없음)
+SWATCH_MAX = 3  # 범례 한 칸에 그리는 깃발 수 (색이 더 많으면 앞의 셋)
 RANGE_Y, RANGE_H, RANGE_MIN_W = 60, 4, 3.0  # 길이 있는 표시의 막대: 깃발 아래
 PLAYHEAD_TOP = 40  # 세모가 눈금 글씨(25~37)와 겹치지 않게
 KOREAN = ["Noto Sans CJK KR", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", "sans-serif"]
@@ -168,24 +171,30 @@ def render(markers: Dict[int, Dict[str, Any]], info: Dict[str, Any], path: Path,
                                  QPointF(x, PLAYHEAD_TOP + 6)]))
         p.setBrush(Qt.NoBrush)
 
-    # 범례
+    # 범례: 줄에 그린 것과 같은 깃발, 그 표시들의 색으로
     y = 100
     p.setFont(_font(KOREAN, 11))
     x = float(PAD)
-    legend = [(True, NEUTRAL, LEGEND_OURS), (False, NEUTRAL, LEGEND_USER)]
+    ours_colors = _colors([m for m in markers.values() if is_ours(m) and not is_legacy(m)]) or ["Blue", "Red"]
+    user_colors = _colors([m for m in markers.values() if not is_ours(m)]) or [None]
+    legend = [(True, ours_colors, LEGEND_OURS, False), (False, user_colors, LEGEND_USER, False)]
     if legacy:
-        legend.append((True, MARKER_RGB["Yellow"], LEGEND_LEGACY))
-    for filled, rgb, text in legend:
-        swatch = QRectF(x, y + 2, 9, 9)
-        if filled:
-            p.fillRect(swatch, QColor(rgb))
-        else:
-            p.setPen(QPen(QColor(rgb), 1.4))
-            p.drawRect(swatch)
+        legend.append((True, ["Yellow"], LEGEND_LEGACY, False))
+    ranged = [m for m in markers.values() if int(m.get("duration") or 1) > 1]
+    if ranged:
+        legend.append((True, _colors(ranged)[:1], LEGEND_RANGE, True))
+    for filled, colors, text, bar in legend:
+        for color in colors[:SWATCH_MAX]:
+            rgb = QColor(MARKER_RGB.get(str(color), NEUTRAL))
+            _legend_flag(p, x + 4, y, rgb, filled)
+            if bar:
+                p.fillRect(QRectF(x + 4, y + 13, 16, RANGE_H - 1), rgb)
+                x += 16
+            x += 11
         p.setPen(QColor(MUTED))
         w = p.fontMetrics().horizontalAdvance(text)
-        p.drawText(QRectF(x + 14, y - 1, w + 4, 15), Qt.AlignLeft | Qt.AlignVCenter, text)
-        x += 14 + w + 18
+        p.drawText(QRectF(x + 4, y - 1, w + 4, 15), Qt.AlignLeft | Qt.AlignVCenter, text)
+        x += 4 + w + 18
     p.setPen(QPen(QColor("#f5f6f8"), 1.5))
     p.drawLine(QPointF(x + 4, y), QPointF(x + 4, y + 13))
     p.setPen(QColor(MUTED))
@@ -196,6 +205,30 @@ def render(markers: Dict[int, Dict[str, Any]], info: Dict[str, Any], path: Path,
     if not img.save(str(path), "PNG"):
         raise OSError(f"그림을 저장하지 못했어요: {path}")
     return WIDTH, HEIGHT
+
+
+def _colors(markers) -> list:
+    """표시들의 색 (많은 것부터, 같으면 이름 순)."""
+    counts: Dict[str, int] = {}
+    for m in markers:
+        c = str(m.get("color") or "")
+        if c:
+            counts[c] = counts.get(c, 0) + 1
+    return sorted(counts, key=lambda c: (-counts[c], c))
+
+
+def _legend_flag(p: QPainter, x: float, y: float, color: QColor, filled: bool) -> None:
+    """범례의 깃발 하나 (줄의 깃발과 같은 모양): 도우미 표시는 채움, 직접 찍은 표시는 속이 빔."""
+    flag = QPolygonF([QPointF(x - 4, y + 1), QPointF(x + 4, y + 1), QPointF(x + 4, y + 9), QPointF(x, y + 13),
+                      QPointF(x - 4, y + 9)])
+    if filled:
+        p.setPen(QPen(QColor(BG), 0.8))
+        p.setBrush(color)
+    else:
+        p.setPen(QPen(color, 1.6))
+        p.setBrush(QColor(BG))
+    p.drawPolygon(flag)
+    p.setBrush(Qt.NoBrush)
 
 
 def colors_of(markers: Dict[int, Dict[str, Any]], ours_only: bool = True) -> Iterable[str]:

@@ -7,6 +7,8 @@
 - 값을 바꾸면 아래 "버튼 아래 요약" 줄이 바로 바뀐다. [저장]을 눌러야 버튼에 들어간다.
 - 숫자 칸은 작은 화살표 대신 누르기 쉬운 [−] [+] (40×40)를 옆에 둔다. 색은 "파랑·빨강"처럼 색 이름으로.
 - 할 일·버튼 이름·설정 항목은 한 표(QFormLayout)에 두어 이름 칸 너비가 같다.
+- 표와 아래 단추들은 같은 왼쪽·오른쪽 줄에 선다 (쪽의 여백 하나만). 표는 내용만큼만 높고 (FitScrollArea),
+  남는 자리는 맨 아래로 간다: 마지막 설명과 "버튼 아래 요약" 사이에 빈 띠가 생기지 않게. 창이 낮으면 표만 굴린다.
 작업 중에도 열 수 있다 (설계 B10).
 """
 
@@ -15,7 +17,7 @@ from __future__ import annotations
 import copy
 from typing import Any, Dict, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -44,6 +46,35 @@ from . import theme
 from .automation_view import kind_name, slot_summary
 
 FIXED_ROWS = 3  # 표의 처음 세 줄(할 일, 버튼 이름, 준비 중 안내)은 그대로 두고 그 아래 설정 항목만 새로 그린다
+PAGE_MARGINS = (12, 10, 12, 8)  # 본 쪽(panel)과 같은 여백
+
+
+class FitScrollArea(QScrollArea):
+    """내용만큼만 높은 굴림 칸 (QScrollArea는 내용과 상관없이 늘 큰 크기를 바란다). 자리가 모자라면 줄고 굴린다.
+
+    높이는 지금 너비에서 잰다 (설명 줄은 너비에 따라 줄 수가 바뀐다. 기본 크기 힌트로 재면 줄이 더 잡혀
+    마지막 설명 아래가 빈다). 너비가 바뀌면 다시 잰다."""
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt 이름
+        inner = self.widget()
+        if inner is None:
+            return super().sizeHint()
+        hint = inner.sizeHint()
+        width = self.viewport().width()
+        if width > 0 and inner.hasHeightForWidth():
+            height = inner.heightForWidth(width)
+            if height > 0:
+                hint.setHeight(height)
+        f = 2 * self.frameWidth()
+        return QSize(hint.width() + f, hint.height() + f)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if event.size().width() != event.oldSize().width():
+            self.updateGeometry()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, min(self.sizeHint().height(), 4 * theme.HIT_MIN))
 
 
 def _decimals(step: Optional[float]) -> int:
@@ -100,6 +131,7 @@ class SlotSettingsPage(QWidget):
         self._params_by_kind: Dict[str, Dict[str, Any]] = {}
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(*PAGE_MARGINS)
         root.setSpacing(6)
         top = QHBoxLayout()
         self.back_btn = QPushButton(S.BTN_BACK)
@@ -111,15 +143,17 @@ class SlotSettingsPage(QWidget):
         top.addWidget(self.title, 1)
         root.addLayout(top)
 
-        self.scroll = QScrollArea()
+        self.scroll = FitScrollArea()
         self.scroll.setObjectName("settingsScroll")
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         inner = QWidget()
         inner.setObjectName("settingsInner")
         self.inner_box = QVBoxLayout(inner)
-        self.inner_box.setContentsMargins(8, 8, 8, 8)
+        # 옆 여백은 0: 쪽의 여백 하나로 표와 아래 단추들의 왼쪽·오른쪽 끝을 맞춘다
+        self.inner_box.setContentsMargins(0, 4, 0, 4)
         self.inner_box.setSpacing(6)
         self.form = QFormLayout()
         self.form.setRowWrapPolicy(QFormLayout.WrapLongRows)
@@ -143,7 +177,7 @@ class SlotSettingsPage(QWidget):
         self.inner_box.addLayout(self.form)
         self.inner_box.addStretch(1)
         self.scroll.setWidget(inner)
-        root.addWidget(self.scroll, 1)
+        root.addWidget(self.scroll)
 
         self.preview = QLabel("")
         self.preview.setWordWrap(True)
@@ -176,6 +210,7 @@ class SlotSettingsPage(QWidget):
         bottom.addWidget(self.cancel_btn)
         bottom.addWidget(self.save_btn)
         root.addLayout(bottom)
+        root.addStretch(1)  # 남는 자리는 맨 아래로 (표와 요약 줄 사이가 아니라)
 
     # ── 열기 ──────────────────────────────────────────────────────────
 
@@ -242,6 +277,7 @@ class SlotSettingsPage(QWidget):
                 self.form.addRow(note)
             self.fields[p.key] = widget
         self._update_preview()
+        self.scroll.updateGeometry()  # 항목 수가 바뀌면 표 높이도
 
     def _field(self, p: Param, value: Any) -> QWidget:
         unit = S.PARAM_UNITS.get(p.key, "")

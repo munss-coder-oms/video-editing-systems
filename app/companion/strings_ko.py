@@ -35,10 +35,10 @@ BTN_MORE = "⋯"
 TIP_MORE = "점검 도구, 결과 저장, 설정, 도움말, 새 판 받기"
 TIP_CHECK_CONNECTION = "리졸브와 이어져 있는지 지금 확인해요"
 
-SUMMARY_NONE = "리졸브에서 열린 타임라인을 아직 몰라요"
+SUMMARY_NONE = "리졸브에서 열린 타임라인을 아직 몰라요"  # 연결되기 전 (끊긴 뒤에는 요약 줄을 숨긴다)
 SUMMARY_NO_PROJECT = "열린 프로젝트 없음 → 리졸브에서 프로젝트를 열어 주세요"
 SUMMARY_NO_TIMELINE = "열린 타임라인 없음 → 리졸브에서 타임라인을 열어 주세요"
-SUMMARY_LINE = "{timeline} · {length} · {fps}fps · 소리 트랙 {audio}개"
+SUMMARY_LINE = "{timeline} · 길이 {length} · {fps}fps · 소리 트랙 {audio}개"  # 길이는 "7분" (시각 "7:00"과 헷갈리지 않게)
 SUMMARY_LENGTH_UNKNOWN = "길이 모름"
 DETAILS_SHOW = "자세히 ▸"
 DETAILS_HIDE = "접기 ▾"
@@ -74,9 +74,14 @@ KIND_NAMES = {
     "duck_music": "배경음악 낮추기",
 }
 KIND_NOT_READY = "{name} (준비 중)"
+# 버튼 요약, 카드의 할 일, "찾은 곳이 없어요"가 같은 말을 쓰게 한 곳에서 (설정 한 가지에 말은 한 가지)
+PLACE_PHRASES = {
+    "mark_pauses": "{min_s}초 넘게 쉰 곳",
+    "mark_spikes": "평소보다 {above_lu}dB 넘게 튄 곳",
+}
 SLOT_SUMMARY = {
-    "mark_pauses": "{min_s}초 넘게 쉰 곳에 {color_word} 표시",
-    "mark_spikes": "평소보다 {above_lu}dB 넘게 튄 곳에 {color_word} 표시",
+    "mark_pauses": PLACE_PHRASES["mark_pauses"] + "에 {color_word} 표시",
+    "mark_spikes": PLACE_PHRASES["mark_spikes"] + "에 {color_word} 표시",
     "balance_voice": "목소리 크기를 고르게 맞추기",
 }
 SLOT_SUMMARY_NOT_READY = "{name} · 준비 중"
@@ -100,7 +105,7 @@ TIP_SLOT_NOT_READY = "'{name}'은(는) 아직 준비 중이에요. ⚙에서 다
 SLOT_RECEIPT = "✓ {at} · {color_word} 표시 {n}개"
 SLOT_RECEIPT_PARTIAL = "! {at} · {placed}/{expected}개만 넣음"
 SLOT_RECEIPT_UNDONE = "↶ {at} 뺐어요"
-SLOT_RECEIPT_CLEARED = "✕ {at} 지웠어요"
+SLOT_RECEIPT_CLEARED = "↶ {at} 지웠어요"  # 대화의 지우기로 뺌 (실패가 아니다)
 SLOT_TITLE = "{n} · {name}"
 SLOT_RECEIPT_STOPPED = "멈췄어요"
 SLOT_RECEIPT_NONE = "{at} · 찾은 곳 없음"
@@ -137,10 +142,10 @@ SETTINGS_NOT_READY = "이 일은 아직 준비 중이에요. 저장하면 버튼
 SETTINGS_SAVED = "'{name}' 설정을 저장했어요"
 SETTINGS_UNCHANGED = "바뀐 것이 없어요"
 SETTINGS_SAVE_FAILED = "버튼 설정을 저장하지 못했어요: {error}"
-SETTINGS_RESTORED = "'{name}'을(를) 이전 설정으로 되돌렸어요"
+SETTINGS_RESTORED = "버튼 {n}을(를) 이전 설정({name})으로 되돌렸어요"
 SETTINGS_MOVED = "버튼 순서를 바꿨어요"
 PARAM_LABELS = {
-    "min_s": "쉰 길이", "pad_s": "앞뒤 여유", "below_lu": "조용하다고 볼 기준", "as_range": "구간으로 표시",
+    "min_s": "쉰 길이", "pad_s": "앞뒤 여유", "below_lu": "조용하다고 볼 기준", "as_range": "길이 있는 표시로",
     "color": "표시 색", "name": "표시 이름", "max": "최대 개수", "scope": "적용 범위", "above_lu": "튀는 정도",
     "merge_s": "하나로 셀 간격", "target_lufs": "목표 크기", "true_peak": "가장 큰 소리", "peaks": "튀는 소리 누르기",
     "lift": "작은 소리 올리기", "originals": "원래 클립", "mark_tamed": "누른 곳 표시", "marker_color": "표시 색",
@@ -149,7 +154,7 @@ PARAM_HELP = {
     "min_s": "말이 이보다 오래 끊긴 곳만 찾아요 (0.5~5초)",
     "pad_s": "표시 앞뒤로 이만큼 남겨요",
     "below_lu": "평소 말소리보다 이만큼(dB) 작으면 쉰 것으로 봐요",
-    "as_range": "끄면 시작 자리에 점 표시만 넣어요",
+    "as_range": "켜면 쉰 동안만큼 길이 있는 표시, 끄면 시작 자리에 길이 없는 점 표시",
     "name": "표시 이름 앞부분 (예: 쉼 2.4초)",
     "scope": "In~Out은 리졸브에서 I/O 키로 정한 구간이에요",
     "above_lu": "3dB: 조금 · 6dB: 확실히 · 10dB: 절반쯤으로 들려요",
@@ -181,8 +186,8 @@ TIP_IN_OUT_LOCKED = "⋯ → 점검 도구 → [기능 점검]에서 In~Out 읽�
 # ── 카드 (설계 B4.5) ───────────────────────────────────────────────
 CARD_TITLE_FOUND = "다 찾았어요. 넣을까요?"
 CARD_TITLE_NONE = "찾은 곳이 없어요"
-CARD_NONE_PAUSES = "{min_s}초 넘게 쉰 곳이 없어요. ⚙에서 쉰 길이를 줄여 볼 수 있어요"
-CARD_NONE_SPIKES = "평소 말소리보다 {above_lu}dB 넘게 튀는 곳이 없어요"
+CARD_NONE_PAUSES = PLACE_PHRASES["mark_pauses"] + "이 없어요. ⚙에서 쉰 길이를 줄여 볼 수 있어요"
+CARD_NONE_SPIKES = PLACE_PHRASES["mark_spikes"] + "이 없어요"
 ROW_WHAT = "할 일"
 ROW_WHEN = "언제"
 ROW_HOW = "얼마나"
@@ -192,8 +197,8 @@ ROW_RESOLVE = "리졸브에 넣을 것"
 ROW_KEEP = "안 바뀌는 것"
 ROW_CLEAR = "리졸브에서 지울 것"
 ROW_VOICE = "목소리"
-WHAT_PAUSES = "{min_s}초 넘게 쉰 곳 표시"
-WHAT_SPIKES = "평소 말소리보다 {above_lu}dB 넘게 튀는 곳 표시"
+WHAT_PAUSES = PLACE_PHRASES["mark_pauses"] + " 표시"
+WHAT_SPIKES = PLACE_PHRASES["mark_spikes"] + " 표시"
 WHEN_WHOLE = "전체 {length}"
 WHEN_RANGE = "{a}~{b} 안쪽만"
 HOW_PAUSES = "쉰 길이 합계 {total}"
@@ -201,8 +206,9 @@ HOW_SPIKES = "가장 크게 튄 곳 +{max}dB"
 COUNT_LINE = "{n}곳"
 COUNT_MORE = "▸ {n}곳 더 보기"
 COUNT_LESS = "▾ 접기"
-RESOLVE_RANGE = "{color_word} 표시 {n}개 (구간)"
-RESOLVE_POINT = "{color_word} 표시 {n}개 (점)"
+# "구간"은 In~Out 같은 시간 범위에만 쓴다. 길이가 있는 리졸브 표시는 "길이 있는 표시"
+RESOLVE_RANGE = "길이 있는 {color_word} 표시 {n}개"
+RESOLVE_POINT = "{color_word} 점 표시 {n}개"
 RESOLVE_REPLACE = "이전 {color_word} 표시 {n}개는 빼고 넣어요"
 KEEP_MARKERS = "소리·클립·직접 찍으신 표시는 그대로예요. 자르지 않아요"
 LEN_MIN_SEC = "{m}분 {s}초"
@@ -248,6 +254,10 @@ TIMELINE_CHANGED = "계산할 때와 타임라인이 달라졌어요"
 OTHER_TIMELINE_APPLY = "계산할 때 연 타임라인 '{name}'이(가) 지금 열려 있지 않아요. 그 타임라인을 열고 다시 눌러 주세요"
 RERUN_QUESTION = "이전 {color_word} 표시 {n}개를 새것으로 바꿀까요?"
 RERUN_EXPLAIN = "[바꾸기]: 이전 표시를 빼고 새로 넣어요 · [더하기]: 이전 표시는 두고 새로 찾은 곳만 더해요"
+RERUN_FROM = "이전 표시: {entries}으로(로) 넣은 것"  # 어느 일로 넣은 표시인지 (버튼 이름 또는 대화에 적은 말)
+RERUN_FROM_ENTRY = "{at} '{request}'"
+RERUN_FROM_MORE = " 외 {n}번"
+RERUN_FROM_SEP = ", "
 RERUN_ADD_SKIP = "이미 표시가 있는 {n}곳은 빼고 {m}곳만 더해요"
 RERUN_ADD_NONE = "새로 찾은 곳이 모두 이미 표시돼 있어요. 더할 곳이 없어요"
 
@@ -317,7 +327,7 @@ LISTEN_NO_PLAYER = "이 PC에서 소리를 틀지 못했어요"
 
 # ── 확인 질문 (설계 B7.3 M2, M3) ───────────────────────────────────
 M3_STEP = "확인 부탁: (시험용 프로젝트에서만, 안 해도 돼요) 리졸브 타임라인의 빈 곳 클릭 → Ctrl+Z 한 번"
-M3_QUESTION = "도우미 표시가 어떻게 됐나요?"
+M3_QUESTION = "도우미가 넣은 표시가 어떻게 됐나요?"
 M3_ANSWERS = {"all_gone": "모두 사라졌어요", "some": "일부만 사라졌어요", "same": "그대로예요",
               "other": "다른 것이 되돌아갔어요"}
 M2_QUESTION = "평소 하시는 방법으로 앞부분 한 곳을 잘라 낸 뒤, 뒤쪽 빨간 표시가 같이 움직였나요?"
@@ -431,7 +441,7 @@ CHIP_LEFTOVER = "나머지도 다시 말하기"
 CHAT_TRY_CONNECTED = "연결됐어요. 이렇게 적어 볼 수 있어요:"
 CHIPS_AFTER_CONNECT = ("여기 표시해줘", "2초 넘게 쉰 곳 표시해줘", "튀는 소리 표시해줘")
 CHAT_TRY_AFTER_APPLY = "빼고 싶으면 이렇게 적어도 돼요:"
-CHIPS_AFTER_APPLY = ("방금 거 취소", "도우미 표시 다 지워줘")
+CHIPS_AFTER_APPLY = ("방금 거 취소", "도우미가 넣은 표시 다 지워줘")
 CHIP_TC_ELAPSED = "영상 {time}"
 CHIP_TC_RESOLVE = "리졸브 시간 {tc}"
 SPOKEN_HMS = "{h}시간 {m}분 {s}초"
@@ -473,8 +483,9 @@ WHEN_SPAN = "{a}~{b}"
 WHEN_ITEMS = "{a}부터 {b}까지 {n}곳"
 WHEN_AROUND = "{a}~{b} (앞뒤 5초)"
 HOW_POINT = "점 표시 (길이 없음)"
-HOW_SPAN = "구간 표시, 길이 {length}"
-HOW_MIXED = "점 {points}개 · 구간 {spans}개"
+HOW_SPAN = "길이 {length}짜리 표시"
+HOW_SPANS = "길이 있는 표시, 모두 합쳐 {length}"
+HOW_MIXED = "점 표시 {points}개 · 길이 있는 표시 {spans}개"
 TRACK_NONE = "트랙과 상관없는 타임라인 표시"
 RESOLVE_MARKS = "{colors} 표시 {n}개"
 COLOR_JOIN = "·"
@@ -498,7 +509,7 @@ BTN_VIEW = "리졸브에서 보기"
 BTN_VIEW_SHORT = "이동"
 TIP_VIEW = "리졸브의 재생 위치만 이곳으로 옮겨요 (편집이 아니에요)"
 EDITED = "고침"
-SAVE_ROW = "이대로 자동화 버튼에 저장 ▸"
+SAVE_ROW = "이대로 자동화 버튼에 저장"
 SAVE_SLOT_CHOICE = "자동화 {n} ({name})"
 SAVE_DONE = "자동화 {n}을(를) 바꿨어요"
 SAVE_RANGE_DROPPED = "구간({a}~{b})은 저장하지 않아요. 버튼은 전체(또는 In~Out)에 적용돼요"
@@ -506,7 +517,6 @@ SAVE_NOTHING = "저장할 카드가 없어요. 쉬는 곳이나 튀는 소리 �
 SAVE_CONFIRM = "자동화 {n}을(를) '{what}'으로(로) 바꿔요. 지금 설정: {now}"
 SAVE_CHOOSE = "어느 버튼에 저장할까요?"
 SAVE_KIND_NAME = "{name} ({summary})"
-SAVE_SLOT_NAME = "{name} {n}"
 OFFER_TITLES = {
     "cut": "무료판 리졸브에서는 도우미가 클립을 직접 자르거나 옮길 수 없어요. 그 자리에 보라 표시를 해 둘까요?",
     "audio": "구간 소리 조절은 아직 안 돼요. 그 자리에 노란 표시를 해 둘까요?",
@@ -516,12 +526,14 @@ BTN_OFFER_NO = "괜찮아요"
 CLEAR_WHAT_ALL = "도우미가 넣은 표시 지우기"
 CLEAR_WHAT_FILTER = "도우미가 넣은 {what} 지우기"
 CLEAR_COLORS = "{colors} 표시"
+CLEAR_COLOR_FALLBACK = "도우미"  # 색을 모를 때 "도우미 표시 3개"
 CLEAR_KINDS = {"mark_pauses": "쉬는 곳 표시", "mark_spikes": "튀는 소리 표시", "mark": "대화로 넣은 표시"}
-CLEAR_RESOLVE = "도우미 표시 {n}개를 지워요"
-CLEAR_KEEP = "직접 찍으신 표시와 고르지 않은 도우미 표시는 그대로예요"
+CLEAR_RESOLVE = "{colors} 표시 {n}개"  # "리졸브에서 지울 것" 줄의 값: 넣을 때의 "파란 표시 9개"와 같은 말
+CLEAR_KEEP = "직접 찍으신 표시는 그대로예요"
+CLEAR_KEEP_OTHERS = "직접 찍으신 표시와 나머지 도우미 표시 {n}개는 그대로예요"
 CLEAR_STRADDLE = "구간에 걸친 도우미 표시 {n}개는 그대로 둬요"
 CLEAR_NONE = "말씀하신 도우미 표시가 없어요 (이 타임라인의 도우미 표시 {n}개)"
-CLEAR_RECEIPT = "✓ {at} 지웠어요 · 도우미 표시 {n}개"
+CLEAR_RECEIPT = "✓ {at} 지웠어요 · {colors} 표시 {n}개"
 CLEAR_RECEIPT_PARTIAL = "{expected}개 중 {n}개만 지웠어요"
 CLEAR_RECEIPT_NONE = "지우지 못했어요. 리졸브는 그대로예요"
 CLEAR_CLOSED = "버튼이나 대화로 넣었던 표시도 이걸로 다 지워졌어요 (넣은 일 {n}개)"
@@ -542,9 +554,11 @@ UNDO_NOTHING = "되돌릴 것이 없어요"
 UNDO_ENTRY = "{at} {request} ({status})"
 UNDO_STATUS = {"applying": "넣는 중", "applied": "넣음", "partial": "일부 넣음", "undone": "뺌",
                "undo_failed": "빼지 못함"}
-UNDO_STATUS_CLEAR = {"applying": "지우는 중", "applied": "지움", "partial": "일부 지움", "undone": "다시 넣음",
+UNDO_STATUS_CLEAR = {"applying": "지우는 중", "applied": "지움", "partial": "일부 지움", "undone": "지운 것 다시 넣음",
                      "undo_failed": "다시 넣지 못함"}
-UNDO_STATUS_CLOSED = {"remove_all": "모두 빼기로 끝남", "clear": "지워짐"}
+# 넣은 일이 다른 일로 끝남: 무엇이 그 표시를 뺐는지. 지우기 요청 줄의 "지움"과 헷갈리지 않게 "넣었다가"로 시작
+UNDO_STATUS_CLOSED = {"remove_all": "넣었다가 모두 빼기로 뺌", "clear": "넣었다가 나중에 지움"}
+UNDO_STATUS_CLEAR_CLOSED = "지움 · 이제 되돌릴 수 없음"  # 지우기 뒤 모두 빼기: 다시 넣을 표시가 없다
 UNDO_ALL = "도우미가 넣은 것 모두 빼기"
 UNDO_HINT = "도우미가 넣은 것은 리졸브의 Ctrl+Z 말고 여기서 빼 주세요"
 UNDO_HINT_WARN = "리졸브의 Ctrl+Z는 직접 하신 편집을 되돌릴 수 있어요"
@@ -560,20 +574,24 @@ REMOVE_ALL_PART_MARKERS = "도우미 표시 {n}개"
 REMOVE_ALL_PART_LEGACY = "옛 시험 표시 {n}개"
 REMOVE_ALL_PART_TRACKS = "옛 시험 트랙 {n}개"
 REMOVE_ALL_PART_SEP = " · "
-REMOVE_ALL_LEGACY_NOTE = "옛 시험 표시·트랙은 예전 [표시 찍기 시험]·[소리 넣기 시험]이 넣은 것이에요"
-REMOVE_ALL_KEEP = "직접 찍으신 표시와 클립은 그대로예요"
+REMOVE_ALL_LEGACY_NOTE = "옛 시험 표시·트랙은 예전 [표시\u00a0찍기\u00a0시험]·[소리\u00a0넣기\u00a0시험]으로 넣은\u00a0거예요."
+REMOVE_ALL_KEEP = "직접 찍으신 표시와 클립은 그대로예요."
 REMOVE_ALL_NOTHING = "이 타임라인에는 도우미가 넣은 것이 없어요"
-EDIT_PAGE_QUESTION = "편집(Edit) 화면으로 바꿔서 뺄까요?"
-EDIT_PAGE_DETAIL = "옛 시험 소리 트랙 'AI 도우미 시험'은 편집 화면에서만 뺄 수 있어요. 빼고 나면 원래 화면으로 돌아가요"
+# 편집 화면이 아닐 때: 물음은 모두 빼기 하나만. 단추마다 무엇을 하는지 한 줄씩
+EDIT_PAGE_DETAIL = "옛 시험 트랙은 리졸브의 편집(Edit) 화면에서만 뺄 수 있어요."
+EDIT_PAGE_SWITCH = "[바꿔서\u00a0빼기]: 편집 화면으로 잠깐 바꿔 모두 빼고, 원래 화면으로 돌아와요."
+EDIT_PAGE_MARKERS = "[표시만\u00a0빼기]: 화면은 그대로 두고 표시만 빼요. 옛 시험 트랙은 남아요."
 BTN_SWITCH_REMOVE = "바꿔서 빼기"
 BTN_MARKERS_ONLY = "표시만 빼기"
-REMOVE_ALL_DONE = "도우미가 넣은 것을 뺐어요: {parts}"
-REMOVE_ALL_TRACK_DONE = "'AI 도우미 시험' 트랙도 뺐어요"
-REMOVE_ALL_TRACK_LEFT = "빈 'AI 도우미 시험' 트랙은 직접 지워 주세요"
-REMOVE_ALL_TRACK_KEPT = "'AI 도우미 시험' 트랙은 그대로 뒀어요 (표시만 뺐어요)"
-REMOVE_ALL_TRACK_PAGE = "편집 화면이 아니어서 'AI 도우미 시험' 트랙은 빼지 못했어요"
-REMOVE_ALL_TRACK_FAILED = "'AI 도우미 시험' 트랙을 빼지 못했어요 ({reason})"
-REMOVE_ALL_TRACK_NOT_OURS = "'AI 도우미 시험' 트랙에 도우미 것이 아닌 클립이 있어서 그대로 뒀어요"
+# 모두 빼기의 결과: 한 줄에 다 (머리말 알림과 대화에 같은 줄. 트랙도 확인 창과 같은 "옛 시험 트랙"으로)
+REMOVE_ALL_DONE = "도우미가 넣은 것을 모두 뺐어요 ({parts})"
+REMOVE_ALL_DONE_SOME = "도우미가 넣은 것 가운데 일부를 뺐어요 ({parts})"
+REMOVE_ALL_TRACK_LEFT = "빈 옛 시험 트랙('AI 도우미 시험')은 직접 지워 주세요"
+REMOVE_ALL_TRACK_KEPT = "옛 시험 트랙('AI 도우미 시험')은 그대로 뒀어요"
+REMOVE_ALL_TRACK_PAGE = "편집 화면이 아니어서 옛 시험 트랙('AI 도우미 시험')은 빼지 못했어요"
+REMOVE_ALL_TRACK_FAILED = "옛 시험 트랙('AI 도우미 시험')을 빼지 못했어요 ({reason})"
+REMOVE_ALL_TRACK_NOT_OURS = "옛 시험 트랙('AI 도우미 시험')에 도우미 것이 아닌 클립이 있어서 그대로 뒀어요"
+REMOVE_ALL_LINE_SEP = ". "
 REMOVE_ALL_LEFT = "도우미 표시 {n}개는 빼지 못했어요"
 REMOVE_ALL_OTHER = "확인할 때와 다른 타임라인이 열려 있어서 아무것도 빼지 않았어요"
 BTN_REPORT = "결과 저장"
@@ -634,35 +652,37 @@ TIP_TEST_CLEANUP = "도우미 창이 넣은 시험 표시와 시험 오디오 �
 LOG_PLACEHOLDER = "한 일과 결과가 여기에 나와요."
 BTN_DELETE_LEFTOVER = "남은 점검용 복사본 지우기"
 PROBE_CONFIRM_TITLE = "기능 점검"
-PROBE_CONFIRM = ("기능 점검은 무료판 리졸브에서 도우미가 쓰는 기능(구간 표시, 재생 위치 옮기기 등)이 되는지 확인해요. "
-                 "그 결과로 In~Out 같은 설정이 켜져요.\n"
+PROBE_CONFIRM = ("기능 점검은 무료판 리졸브에서 도우미가 쓰는 기능(길이 있는 표시, 재생 위치 옮기기 등)이 되는지 "
+                 "확인해요. 그 결과로 In~Out 같은 설정이 켜져요.\n"
                  "타임라인의 점검용 복사본을 잠깐 만들었다가 지워요 (1~2분). 지금 타임라인은 건드리지 않지만, "
-                 "혹시 모르니 시험용 프로젝트에서 눌러 주세요")
+                 "혹시 모르니 시험용 프로젝트에서 눌러 주세요.")
 BTN_START = "시작"
 BTN_CANCEL = "취소"
 BTN_DELETE = "지우기"
 LEFTOVER_CONFIRM_TITLE = "점검용 복사본"
 LEFTOVER_CONFIRM = ("점검용 복사본 '{name}'을(를) 지울까요?\n"
-                    "그 복사본이 지금 열려 있으면 원래 타임라인으로 옮긴 뒤 지워요. 다른 것은 바꾸지 않아요")
-LEFTOVER_DELETED = "점검용 복사본을 지웠어요"
-LEFTOVER_CHANGED = "이 복사본은 점검 때와 달라져 있어서 지우지 않았어요. 필요 없으면 직접 지워 주세요"
-LEFTOVER_NO_STATE = "점검 기록이 없어 도우미가 지우지 않아요. 필요 없으면 리졸브에서 직접 지워 주세요"
-LEFTOVER_OTHER = "복사본을 지우지 못했어요 ({reason}). 필요 없으면 리졸브에서 직접 지워 주세요"
-LEFTOVER_OTHER_PROJECT = "점검용 복사본은 '{project}' 프로젝트에 있어요. 그 프로젝트를 연 뒤 다시 눌러 주세요"
-LEFTOVER_UNKNOWN = "리졸브의 타임라인 목록을 읽지 못해 지우지 않았어요. 잠시 뒤 다시 눌러 주세요"
+                    "그 복사본이 지금 열려 있으면 원래 타임라인으로 옮긴 뒤 지워요. 다른 것은 바꾸지 않아요.")
+LEFTOVER_DELETED = "점검용 복사본을 지웠어요."
+LEFTOVER_CHANGED = "이 복사본은 점검 때와 달라져 있어서 지우지 않았어요. 필요 없으면 직접 지워 주세요."
+LEFTOVER_NO_STATE = "점검 기록이 없어 도우미가 지우지 않아요. 필요 없으면 리졸브에서 직접 지워 주세요."
+LEFTOVER_OTHER = "복사본을 지우지 못했어요 ({reason}). 필요 없으면 리졸브에서 직접 지워 주세요."
+LEFTOVER_OTHER_PROJECT = "점검용 복사본은 '{project}' 프로젝트에 있어요. 그 프로젝트를 연 뒤 다시 눌러 주세요."
+LEFTOVER_UNKNOWN = "리졸브의 타임라인 목록을 읽지 못해 지우지 않았어요. 잠시 뒤 다시 눌러 주세요."
 LEFTOVER_OPEN_PROJECT = "다른 프로젝트"
 PROBE_SAVING = "기능 점검 전에 결과를 먼저 저장하는 중…"
-PROBE_SAVED_FIRST = "점검 전에 결과를 먼저 저장했어요 (멈춰도 남게): {path}"
+PROBE_SAVED_FIRST = "점검 전에 지금까지의 결과를 파일에 먼저 저장했어요. 점검 중에 리졸브가 멈춰도 이 파일은 남아요: {path}"
 PROBE_RUNNING = "기능 점검 중… {stage}"
+# 읽기 점검도 한 단계로 센다: 번호의 끝(9)과 마친 뒤의 "9개"가 같게
 PROBE_STAGE_NAMES = {
-    "read": "읽기 점검", "C1": "1/8 복사본 만들기", "C2": "2/8 트랙 끄기", "C3": "3/8 클립 끄기",
-    "C4": "4/8 구간 표시", "C5": "5/8 재생 위치", "C6": "6/8 다시 넣기", "C7": "7/8 새 소리 가져오기",
-    "C8": "8/8 정리",
+    "read": "1/9 읽기 점검", "C1": "2/9 복사본 만들기", "C2": "3/9 트랙 끄기", "C3": "4/9 클립 끄기",
+    "C4": "5/9 길이 있는 표시", "C5": "6/9 재생 위치", "C6": "7/9 다시 넣기", "C7": "8/9 새 소리 가져오기",
+    "C8": "9/9 정리",
 }
-PROBE_DONE = "기능 점검을 마쳤어요. 됨 {ok}개 · 안 됨 {bad}개"
+PROBE_DONE_ALL = "기능 점검을 마쳤어요. {n}가지 모두 됐어요."
+PROBE_DONE_SOME = "기능 점검을 마쳤어요. {n}가지 가운데 {bad}가지가 안 됐어요."
 PROBE_REPORT_SAVED = "점검 결과를 파일에 다시 저장했어요. 이 파일을 도우미를 보내 준 분께 보내 주세요:\n{path}"
-PROBE_REPORT_HINT = "[결과\u00a0저장]을 누르면 점검 결과가 든 파일이 생겨요. 도우미를 보내 준 분께 보내 주세요"
-PROBE_DONE_LEFTOVER = "기능 점검을 마쳤지만 점검용 복사본이 남았어요. 점검 도구에서 지울 수 있어요"
+PROBE_REPORT_HINT = "[결과\u00a0저장]을 누르면 점검 결과가 든 파일이 생겨요. 도우미를 보내 준 분께 보내 주세요."
+PROBE_DONE_LEFTOVER = "기능 점검을 마쳤지만 점검용 복사본이 남았어요. [남은 점검용 복사본 지우기]로 지울 수 있어요."
 PROBE_REFUSED = {
     "no_timeline": "리졸브에서 타임라인을 열어 주세요",
     "on_probe_copy": "지금 열린 타임라인이 점검용 복사본이에요. 원래 타임라인으로 돌아간 뒤 해 주세요",

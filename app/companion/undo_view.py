@@ -1,7 +1,9 @@
 """아래쪽: [↶ 되돌리기 ▾]와 [결과 저장] (설계 B1.1, B6.3).
 
 되돌리기 목록: 지금 타임라인의 일지(새것이 위). 넣은 것(넣음·일부 넣음)은 눌러서 뺄 수 있다 (먼저 묻는다).
-줄의 상태 낱말은 일에 맞게: 지우기는 "지움 / 다시 넣음", 모두 빼기나 지우기로 끝난 일은 "모두 빼기로 끝남 / 지워짐".
+줄의 상태 낱말은 일에 맞게: 지우기는 "지움 / 지운 것 다시 넣음". 넣은 일이 다른 일로 빠졌으면
+"넣었다가 모두 빼기로 뺌 / 넣었다가 나중에 지움" (지우기 요청 줄의 "지움"과 헷갈리지 않게). 지우기 요청을
+모두 빼기가 닫았으면 "지움 · 이제 되돌릴 수 없음" (모두 빼기는 그 줄을 건드리지 않았다).
 시각은 "오후 2:02"처럼.
 맨 아래 "도우미가 넣은 것 모두 빼기"는 일지가 아니라 지금 타임라인에서 꼬리표를 직접 찾는다.
 Ctrl+Z 안내: 도우미가 넣은 것은 여기서 빼 달라고 적는다 (Ctrl+Z 시험 답이 "다른 것이 되돌아감"이면 경고를 덧붙인다).
@@ -116,9 +118,12 @@ def status_word(e: Dict[str, Any]) -> str:
     """되돌리기 목록 줄의 상태 낱말: 일(넣기·지우기)과 끝난 까닭(모두 빼기, 지우기)에 맞게."""
     status = e.get("status") or ""
     by = str(e.get("closed_by") or "")
+    clear = e.get("op") == "clear_marks"
+    if status == "undone" and by == "remove_all" and clear:
+        return S.UNDO_STATUS_CLEAR_CLOSED
     if status == "undone" and by == "remove_all":
         return S.UNDO_STATUS_CLOSED["remove_all"]
     if status == "undone" and by.startswith("clear:"):
         return S.UNDO_STATUS_CLOSED["clear"]
-    table = S.UNDO_STATUS_CLEAR if e.get("op") == "clear_marks" else S.UNDO_STATUS
+    table = S.UNDO_STATUS_CLEAR if clear else S.UNDO_STATUS
     return table.get(status, status)

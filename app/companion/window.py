@@ -5,6 +5,9 @@
 
 머리말 알림 줄은 누가 띄웠는지 기억한다: 카드가 띄운 알림은 그 카드가 닫히면(답함·취소) 카드가 남긴 말로
 바뀌고, 연결 확인이 띄운 알림은 연결이 끊기면 지운다 (지난 상태를 말하는 알림이 남지 않게).
+카드(또는 대화 줄)와 같은 말인 알림은 그 카드의 제목이 대화 칸에 보이는 동안 숨긴다 (같은 말이 두 번 보이지
+않게). 대화를 접거나 카드가 위로 밀려 안 보이면 다시 보인다.
+점검 도구 쪽에서 누른 일(기능 점검, 예전 시험 도구, 남은 복사본 지우기)의 알림은 그 쪽의 알림 줄에 뜬다.
 ⋯ > 새 판 받기는 확인을 받고 update_windows.bat을 따로 띄운 뒤 창을 닫는다 (띄우는 일은 app/update.py).
 
 이 파일은 얇게 둔다: 화면 조각은 *_view.py / check_page.py / slot_settings.py / cards.py, 연결 상태는
@@ -67,6 +70,9 @@ MODES = ("full", "tiles", "tight")
 CHAT_LOG_MIN = {"full": 100, "tiles": 60, "tight": 40}  # full: 대화 칸 전체가 220 이상 되게
 # 리졸브를 바꾸는 버튼 작업 (도는 동안 새 판 받기를 막는다). 자동화 버튼의 넣기·되돌리기는 runs.writing
 RESOLVE_WRITE_ACTIONS = ("marker", "audio", "cleanup", "probe", "switch", "leftover")
+# 점검 도구 쪽의 버튼 작업: 알림은 그 쪽의 알림 줄에 (본 쪽 머리말은 그대로 둔다)
+CHECK_PAGE_ACTIONS = ("marker", "audio", "cleanup", "probe", "leftover")
+SAME_AS_OWNER = object()  # show_message(echo=): 알림을 띄운 카드가 같은 말을 보인다 (기본)
 
 
 def layout_mode(height: int, text_scale: int = 100) -> str:
@@ -223,6 +229,8 @@ class HelperWindow(QMainWindow):
         self.after_apply_chips_shown = False  # 넣은 뒤의 예문 칩은 세션에 한 번만
         self._notice_owner: Optional[QWidget] = None  # 머리말 알림을 띄운 카드
         self._notice_source: Optional[str] = None  # 머리말 알림을 띄운 일 ("connect" 등)
+        self._notice_echo: Optional[QWidget] = None  # 머리말 알림과 같은 말을 보이는 카드·대화 줄
+        self._syncing_notice = False
         self._probe_report: Optional[Path] = None  # 기능 점검 전에 먼저 저장한 결과 파일 (끝나면 덮어쓴다)
         self._probe_done_text = ""
         self._resave_probe = False
@@ -280,6 +288,7 @@ class HelperWindow(QMainWindow):
         self.chat.sent.connect(self.on_chat)
         self.chat.set_collapsed(bool(self.settings.ui.get("chat_collapsed")))
         self.chat.collapsed_changed.connect(lambda v: self._save_ui("chat_collapsed", v))
+        self.chat.view_changed.connect(self._sync_notice)  # 대화를 접거나 굴림: 같은 말 알림을 숨기거나 보인다
         self.footer.report_btn.clicked.connect(self.on_report)
         self.footer.undo_requested.connect(self.runs.undo_from_list)
         self.footer.remove_all_requested.connect(self.runs.remove_all)
@@ -461,7 +470,8 @@ class HelperWindow(QMainWindow):
             act.setChecked(True)
         if not hasattr(self, "_arrow"):
             self._arrow = theme.arrow_image(self.state_root / "cache" / "theme")
-        self.setStyleSheet(theme.stylesheet(scale, arrow=self._arrow))
+            self._check = theme.check_image(self.state_root / "cache" / "theme")
+        self.setStyleSheet(theme.stylesheet(scale, arrow=self._arrow, check=self._check))
         self._apply_layout()
 
     def _save_ui(self, key: str, value: Any) -> None:
@@ -489,11 +499,19 @@ class HelperWindow(QMainWindow):
 
     # ── 상태를 화면에 ──────────────────────────────────────────────────
 
-    def show_message(self, text: str, owner: Optional[QWidget] = None, source: Optional[str] = None) -> None:
-        """머리말 알림 한 줄. owner: 이 알림을 띄운 카드 (닫히면 notice_closed가 고친다). source: 띄운 일."""
+    def show_message(self, text: str, owner: Optional[QWidget] = None, source: Optional[str] = None,
+                     echo: Any = SAME_AS_OWNER) -> None:
+        """머리말 알림 한 줄. owner: 이 알림을 띄운 카드 (닫히면 notice_closed가 고친다). source: 띄운 일.
+
+        echo: 같은 말을 보이는 카드·대화 줄 (기본은 owner, 카드에 없는 말이면 None). 그것이 대화 칸에 보이는
+        동안 알림 줄을 숨긴다."""
         self.header.set_message(text)
         self._notice_owner = owner
         self._notice_source = source
+        self._notice_echo = owner if echo is SAME_AS_OWNER else echo
+        self._sync_notice()
+        if self._notice_echo is not None:
+            QTimer.singleShot(0, self._sync_notice)  # 카드가 자리를 잡은 뒤 한 번 더
 
     def notice_closed(self, card: QWidget, note: str) -> None:
         """카드가 닫힘 (답함·취소·바뀜): 그 카드가 띄운 알림이면 카드가 남긴 말로 바꾸거나 지운다."""
@@ -501,6 +519,45 @@ class HelperWindow(QMainWindow):
             self._notice_owner = None
             self._notice_source = None
             self.header.set_message(note or "")
+            # 남긴 말은 카드 안의 한 줄이기도 하다: 카드가 보이는 동안은 되풀이하지 않는다
+            self._notice_echo = card if note else None
+            self._sync_notice()
+
+    @Slot()
+    def _sync_notice(self) -> None:
+        """알림과 같은 말을 보이는 카드(또는 대화 줄)의 윗부분이 대화 칸에 보이면 머리말 알림 줄을 숨긴다."""
+        if self._syncing_notice:
+            return
+        self._syncing_notice = True
+        try:
+            shown = False
+            echo = self._notice_echo
+            if echo is not None:
+                try:
+                    shown = self.chat.shows(echo)
+                except RuntimeError:  # 오래돼서 지운 카드
+                    self._notice_echo = None
+            self.header.set_echoed(shown)
+        finally:
+            self._syncing_notice = False
+
+    def check_notice(self, text: str) -> None:
+        """점검 도구 쪽의 알림 줄 (그 쪽에서 누른 일의 진행과 결과)."""
+        self.check_page.set_notice(text)
+
+    def notify(self, name: Optional[str], text: str, source: Optional[str] = None) -> None:
+        """버튼 작업의 알림: 점검 도구 쪽 일이면 그 쪽 알림 줄에, 아니면 머리말에."""
+        if name in CHECK_PAGE_ACTIONS:
+            self.check_notice(text)
+        else:
+            self.show_message(text, source=source)
+
+    def page_notice(self, text: str) -> None:
+        """지금 보고 있는 쪽의 알림 줄 (결과 저장처럼 두 쪽 모두에서 누르는 일)."""
+        if self.stack.currentWidget() is self.check_page:
+            self.check_notice(text)
+        else:
+            self.show_message(text)
 
     def log(self, text: str) -> None:
         self.check_page.log(text)
@@ -580,13 +637,17 @@ class HelperWindow(QMainWindow):
         result = S.RESULT_OK if ok else S.RESULT_BAD
         if not summary:
             return S.STEP_LINE_BARE.format(title=title, result=result)
+        if summary.startswith(title):
+            return summary  # "기능 점검을 마쳤어요 …"처럼 스스로 일 이름과 결과를 말하는 줄: 되풀이하지 않는다
         return S.STEP_LINE.format(title=title, result=result, summary=summary)
 
     def _finish(self, name: str, ok: bool, summary: str, notice: Optional[str] = None) -> None:
-        """단계 끝: 점검 도구의 기록에 한 줄, 머리말에 알림 (notice가 있으면 그 쉬운 말로)."""
+        """단계 끝: 점검 도구의 기록에 한 줄, 알림 (notice가 있으면 그 쉬운 말로).
+
+        알림은 누른 쪽에: 점검 도구 쪽 일은 그 쪽 알림 줄, 나머지는 머리말."""
         line = self._step_line(name, ok, summary)
         self.log(line)
-        self.show_message(notice if notice is not None else line, source=f"{name}_ok" if ok else name)
+        self.notify(name, notice if notice is not None else line, source=f"{name}_ok" if ok else name)
         if name == "probe":
             self._probe_done_text = summary
         if name == self.action:
@@ -688,7 +749,7 @@ class HelperWindow(QMainWindow):
     def _connect_notice(self, ok: bool, out: Dict[str, Any]) -> str:
         """[연결 확인]의 머리말 알림: 쉬운 말 한 줄 (리졸브 판·프로젝트 같은 자세한 줄은 점검 도구의 기록에)."""
         if out.get("old_script"):
-            return S.OLD_SCRIPT_HINT
+            return ""  # 머리말의 상태 안내가 이미 "스크립트를 한 번 더 눌러 주세요"를 말한다 (두 번 적지 않는다)
         state = out.get("state") if isinstance(out.get("state"), dict) else {}
         timeline = state.get("timeline")
         if ok and isinstance(timeline, str) and timeline:
@@ -748,7 +809,7 @@ class HelperWindow(QMainWindow):
             return False
         self.action = name
         self._action_t0 = time.monotonic()
-        self.show_message(S.REQUESTING.format(title=S.STEP_TITLES.get(name, name)))
+        self.notify(name, S.REQUESTING.format(title=S.STEP_TITLES.get(name, name)))
         self._refresh()
         self._submit_action(name, step, summarize)
         return True
@@ -861,7 +922,7 @@ class HelperWindow(QMainWindow):
         self._action_t0 = time.monotonic()
         self._probe_report = None
         self._probe_done_text = ""
-        self.show_message(S.PROBE_SAVING)
+        self.check_notice(S.PROBE_SAVING)
         self._refresh()
         # 리졸브가 점검 중에 멈춰도 그 전까지의 결과가 남게 먼저 결과 파일을 저장한다 (끝나면 같은 파일을 덮어쓴다)
         if not self._save_report(then=self._probe_saved_first, silent=True, log_as=S.PROBE_SAVED_FIRST):
@@ -883,14 +944,14 @@ class HelperWindow(QMainWindow):
             return
         self._probe_report = path
         saved = S.PROBE_REPORT_SAVED.format(path=path)
-        self.show_message(f"{self._probe_done_text}\n{saved}" if self._probe_done_text else saved, source="probe")
+        self.check_notice(f"{self._probe_done_text}\n{saved}" if self._probe_done_text else saved)
 
     def _probe_start(self) -> None:
         if self.closing:
             return
         step = functools.partial(probe_step, store=self.probe_store, caps_store=self.caps_store,
                                  on_stage=self.relay.stage.emit)
-        self.show_message(S.PROBE_RUNNING.format(stage=""))
+        self.check_notice(S.PROBE_RUNNING.format(stage=""))
         self._submit_action("probe", step, self._probe_summary)
 
     @Slot(str, object)
@@ -901,7 +962,7 @@ class HelperWindow(QMainWindow):
         data = data if isinstance(data, dict) else {}
         error = data.get("error")
         ok = data.get("ok") is not False and not error
-        self.show_message(S.PROBE_RUNNING.format(stage=title))
+        self.check_notice(S.PROBE_RUNNING.format(stage=title))
         # 기록에는 됨/안 됨과 (있으면) 오류만: 복사본 지문 같은 속값은 결과 파일에만 남긴다
         result = S.RESULT_OK if ok else S.RESULT_BAD
         if error:
@@ -929,7 +990,9 @@ class HelperWindow(QMainWindow):
                 ok += 1
         if run.get("leftover"):
             return False, S.PROBE_DONE_LEFTOVER
-        return ok == total, S.PROBE_DONE.format(ok=ok, bad=total - ok)
+        if ok == total:
+            return True, S.PROBE_DONE_ALL.format(n=total)
+        return False, S.PROBE_DONE_SOME.format(n=total, bad=total - ok)
 
     # 원래 타임라인으로
 
@@ -956,7 +1019,7 @@ class HelperWindow(QMainWindow):
             return
         st = self._probe_state = self.probe_store.load()
         if st is None or not st.has_copy:
-            self.show_message(S.LEFTOVER_NO_STATE)
+            self.check_notice(S.LEFTOVER_NO_STATE)
             self._refresh()
             return
         if not self.confirm(S.LEFTOVER_CONFIRM_TITLE, S.fill(S.LEFTOVER_CONFIRM, name=st.copy_name or st.copy_uid),
@@ -1069,8 +1132,9 @@ class HelperWindow(QMainWindow):
             return
         self._slots_changed()
         self.show_panel()
-        name = self.settings.slot(number).get("name") or ""
-        self.show_message(S.fill(S.SETTINGS_RESTORED, name=name))
+        # 바뀐 버튼(번호)이 이전 설정(그 이름)으로 돌아갔다: "버튼 3을 이전 설정(소리 고르게)으로 되돌렸어요"
+        name = self.settings.slot(number).get("name") or S.SLOT_DEFAULT_NAMES.get(number, "")
+        self.show_message(S.fill(S.SETTINGS_RESTORED, n=number, name=name))
 
     @Slot()
     def on_manual_checks(self) -> None:
@@ -1185,7 +1249,7 @@ class HelperWindow(QMainWindow):
         self.report_pending = True
         self._refresh()
         if not silent:
-            self.show_message(S.COLLECTING)
+            self.page_notice(S.COLLECTING)
         ping = self.controller.info.get("ping")
         caps_key = None
         if isinstance(ping, dict):
@@ -1222,12 +1286,12 @@ class HelperWindow(QMainWindow):
             try:
                 path = save_report(text, self.state_root)
             except OSError as exc:
-                self.show_message(S.REPORT_FAILED.format(error=exc))
+                self.page_notice(S.REPORT_FAILED.format(error=exc))
         if path is not None:
             self.last_report = path
             self.log((log_as or S.REPORT_SAVED_LOG).format(path=path))
             if not silent:
-                self.show_message(S.REPORT_SAVED.format(path=path))
+                self.page_notice(S.REPORT_SAVED.format(path=path))
                 if self.interactive:
                     QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
         if then is not None:

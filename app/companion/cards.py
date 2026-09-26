@@ -13,7 +13,9 @@
 대화에서 온 카드는 도우미가 정한 값에만 출처(기본값 / 설정값 / 재생 위치)를 붙이고 (적으신 값은 그대로),
 범위 지킴이의 막음(빨강, [리졸브에 넣기]를 누를 수 없음)과 경고(주황)를 보이고, 숫자를 [−][+]로 고칠 수 있다.
 단추 줄은 창이 좁으면 다음 줄로 넘어간다 (FlowLayout): 380px 창에서도 오른쪽이 잘리지 않는다.
-쉬는 곳·튀는 소리 카드에는 "이대로 자동화 버튼에 저장 ▸"이 붙는다 (구간은 저장하지 않는다).
+쉬는 곳·튀는 소리 카드에는 단추 줄 아래(foot)에 "이대로 자동화 버튼에 저장"이 붙는다 (구간은 저장하지 않는다).
+주된 단추([리졸브에 넣기])가 저장 줄보다 위에 있어, 카드가 대화 칸보다 조금 커도 맨 위부터 보면 단추가 보인다.
+표시 목록은 세 줄까지 바로 보이고 나머지는 글자 단추 "▸ N곳 더 보기" 뒤에 (숨길 줄이 하나뿐이면 다 보인다).
 영수증의 [되돌리기]는 묻지 않고 바로 뺀다 (그 카드의 것만, 되돌리기 목록 쪽은 먼저 묻는다).
 """
 
@@ -190,10 +192,20 @@ class Card(QFrame):
         self.box.addWidget(self.body)
         self.button_row = FlowLayout(spacing=6)
         self.box.addLayout(self.button_row)
+        # 단추 줄 아래 (자동화 버튼에 저장처럼 주된 단추보다 덜 급한 줄). 비어 있으면 숨긴다
+        self.foot = QWidget()
+        self.foot_box = QVBoxLayout(self.foot)
+        self.foot_box.setContentsMargins(0, 4, 0, 0)
+        self.foot_box.setSpacing(4)
+        self.foot.setVisible(False)
+        self.box.addWidget(self.foot)
         self.buttons: Dict[str, QPushButton] = {}
         self.extra: Dict[str, QAbstractButton] = {}  # 줄 안의 단추 ([−][+], 보기, 저장): 열쇠 → 단추
         self._extra_busy: List[str] = []  # 다른 일을 하는 동안 꺼 둘 줄 안 단추
         self._closing_line: Optional[QLabel] = None  # 닫을 때 남긴 줄 (빼는 중이에요 → 결과로 바뀐다)
+        self.more_btn: Optional[QToolButton] = None  # 표시 목록의 "▸ N곳 더 보기"
+        self.more_list: Optional[QWidget] = None
+        self._inline_items = INLINE_ITEMS
         self.busy = False
         self.locked = False  # 눌러서 일을 시작했음 (끝나면 창이 새 모양으로 바꾼다)
         self._primary: List[str] = []  # 작업 중에 꺼 둘 단추 (리졸브에 넣기, 되돌리기 ...)
@@ -202,6 +214,8 @@ class Card(QFrame):
 
     def clear_body(self) -> None:
         _drop_layout(self.body_box)
+        _drop_layout(self.foot_box)
+        self.foot.setVisible(False)
         self.drop_extras()
 
     def add_line(self, text: str, role: Optional[str] = None) -> QLabel:
@@ -295,6 +309,7 @@ class Card(QFrame):
                 btn.hide()
             except RuntimeError:
                 pass
+        self.foot.setVisible(False)  # 저장 줄 같은 뒤따르는 줄도 닫는다
         self._closing_line = self.add_line(note, "secondary") if note else None
         self.closed.emit(announce if announce is not None else (note or ""))
 
@@ -317,7 +332,48 @@ class Card(QFrame):
         parts = [self.title.text()]
         parts += _texts(self.body)
         parts += [f"[{b.text()}]" for b in self.buttons.values()]
-        return "\n".join(p for p in parts if p)
+        if not self.foot.isHidden():
+            parts += _texts(self.foot)
+        # 줄 바꿈을 막으려고 넣은 빈칸(NBSP)은 여느 빈칸으로 (결과 파일과 시험은 글만 본다)
+        return "\n".join(p for p in parts if p).replace("\u00a0", " ")
+
+    # ── 표시 목록 (▸ 더 보기) ─────────────────────────────────────────
+
+    def add_item_list(self, n: int, add_row) -> None:
+        """표시 목록 n줄: 처음 몇 줄은 바로, 나머지는 "▸ N곳 더 보기"(글자 단추) 뒤에.
+
+        숨길 줄이 하나뿐이면 다 보인다: 단추가 그 한 줄보다 커서 자리도 못 줄이고 한 번 더 누르게만 한다.
+        add_row(상자, i)가 i번째 줄을 그 상자에 넣는다."""
+        self.more_btn = self.more_list = None
+        head = QWidget()
+        head_box = QVBoxLayout(head)
+        head_box.setContentsMargins(0, 0, 0, 0)
+        head_box.setSpacing(2)
+        self.body_box.addWidget(head)
+        inline = n if n <= INLINE_ITEMS + 1 else INLINE_ITEMS
+        self._inline_items = inline
+        rest_box = None
+        if n > inline:
+            self.more_btn = QToolButton()
+            self.more_btn.setText(S.COUNT_MORE.format(n=n - inline))
+            self.more_btn.setCheckable(True)
+            self.more_btn.setProperty("role", "link")  # "자세히 ▸"와 같은 글자 단추 (카드의 주된 단추처럼 보이지 않게)
+            self.more_list = QWidget()
+            rest_box = QVBoxLayout(self.more_list)
+            rest_box.setContentsMargins(0, 0, 0, 0)
+            rest_box.setSpacing(2)
+            self.more_list.setVisible(False)
+            self.more_btn.toggled.connect(lambda on, total=n: self._toggle_more_items(on, total))
+            self.body_box.addWidget(self.more_btn, 0, Qt.AlignLeft)
+            self.body_box.addWidget(self.more_list)
+        for i in range(n):
+            add_row(head_box if i < inline else rest_box, i)
+
+    def _toggle_more_items(self, on: bool, total: int) -> None:
+        if self.more_btn is None or self.more_list is None:
+            return
+        self.more_btn.setText(S.COUNT_LESS if on else S.COUNT_MORE.format(n=total - self._inline_items))
+        self.more_list.setVisible(on)
 
 
 def _drop_layout(layout) -> None:
@@ -553,7 +609,8 @@ def _mark_rows(p, compact: bool) -> List[Tuple[str, str]]:
     if spans and points:
         how = S.HOW_MIXED.format(points=points, spans=spans)
     elif spans:
-        how = S.HOW_SPAN.format(length=fmt.length(sum(r.end - r.start for r in p.rows) / (p.fps or 1.0)))
+        total = fmt.length(sum(r.end - r.start for r in p.rows) / (p.fps or 1.0))
+        how = (S.HOW_SPAN if n == 1 else S.HOW_SPANS).format(length=total)
     else:
         how = S.HOW_POINT
     color_src = prov.get("color") if prov.get("color") in S.PROVENANCE else None
@@ -745,30 +802,8 @@ class ProposalCard(Card):
     def _items(self) -> None:
         p = self.proposal
         self.item_labels = []
-        n = len(p.rows)
-        if not n:
-            return
-        head = QWidget()
-        head_box = QVBoxLayout(head)
-        head_box.setContentsMargins(0, 0, 0, 0)
-        head_box.setSpacing(2)
-        self.body_box.addWidget(head)
-        rest_box = None
-        if n > INLINE_ITEMS:
-            self.more_btn = QToolButton()
-            self.more_btn.setText(S.COUNT_MORE.format(n=n - INLINE_ITEMS))
-            self.more_btn.setCheckable(True)
-            self.more_list = QWidget()
-            rest_box = QVBoxLayout(self.more_list)
-            rest_box.setContentsMargins(0, 0, 0, 0)
-            rest_box.setSpacing(2)
-            self.more_list.setVisible(False)
-            self.more_btn.toggled.connect(self._toggle_more)
-            self.body_box.addWidget(self.more_btn, 0, Qt.AlignLeft)
-            self.body_box.addWidget(self.more_list)
-        for i in range(n):
-            box = head_box if i < INLINE_ITEMS else rest_box
-            self._item_row(box, i)
+        if p.rows:
+            self.add_item_list(len(p.rows), self._item_row)
 
     def _item_row(self, box: QVBoxLayout, i: int) -> None:
         p = self.proposal
@@ -792,11 +827,6 @@ class ProposalCard(Card):
             if src:
                 box.addWidget(_label(src, "secondary"))
 
-    def _toggle_more(self, on: bool) -> None:
-        rest = len(self.proposal.rows) - INLINE_ITEMS
-        self.more_btn.setText(S.COUNT_LESS if on else S.COUNT_MORE.format(n=rest))
-        self.more_list.setVisible(on)
-
     def _notes(self) -> None:
         p = self.proposal
         for line in note_lines(getattr(p, "notes", None) or [], p.fps):
@@ -815,13 +845,16 @@ class ProposalCard(Card):
             self.body_box.addWidget(self.add_extra("leftover", btn, blocked_while_busy=False), 0, Qt.AlignLeft)
 
     def _save_row(self) -> None:
-        """이대로 자동화 버튼에 저장 ▸ [자동화 n] [저장] (대화에서 온 쉬는 곳·튀는 소리 카드)."""
+        """이대로 자동화 버튼에 저장 [자동화 n] [저장] (대화에서 온 쉬는 곳·튀는 소리 카드). 단추 줄 아래(foot)."""
         p = self.proposal
         if not self.save_slots or p.kind not in MAIN_PARAM:
             return
         # 글은 한 줄 위에, 고르기 칸과 [저장]은 그 아래 한 줄 (좁은 창에서도 [저장]이 보이게)
-        self.add_line(S.SAVE_ROW, "secondary")
-        row = self._row_box()
+        self.foot_box.addWidget(_label(S.SAVE_ROW, "secondary"))
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        self.foot_box.addLayout(row)
+        self.foot.setVisible(True)
         self.save_combo = QComboBox()
         self.save_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.save_combo.setMinimumContentsLength(6)
@@ -1004,6 +1037,18 @@ def _unknown_body(card: Card, title: str, outcome) -> None:
 
 # ── 도우미 표시 지우기 카드 ────────────────────────────────────────────
 
+def clear_colors(plan) -> str:
+    """지울 표시의 색 낱말 ("파란", "빨간·파란"). 모르면 "도우미"."""
+    words = [fmt.color_word(c) for c in (plan.colors or []) if c]
+    return S.COLOR_JOIN.join(w for w in words if w) or S.CLEAR_COLOR_FALLBACK
+
+
+def clear_keep(plan) -> str:
+    """지우기 카드의 "안 바뀌는 것": 직접 찍은 표시, 그리고 이번에 지우지 않는 나머지 도우미 표시가 몇 개인지."""
+    others = max(0, int(plan.total_ours or 0) - plan.count - int(plan.straddling or 0))
+    return S.CLEAR_KEEP_OTHERS.format(n=others) if others else S.CLEAR_KEEP
+
+
 def clear_rows(plan, compact: bool = False) -> List[Tuple[str, str]]:
     prov = plan.provenance or {}
     params = plan.params or {}
@@ -1021,8 +1066,9 @@ def clear_rows(plan, compact: bool = False) -> List[Tuple[str, str]]:
         when = S.WHEN_RANGE.format(a=a, b=b)
     else:
         when = S.WHEN_WHOLE.format(length=fmt.length((plan.tl_end - plan.tl_start) / fps))
-    # 몇 곳은 "도우미 표시 3개를 지워요"가 말한다. 안 바뀌는 것은 카드가 줄 아래에 붙인다
-    return [(S.ROW_WHAT, what), (S.ROW_WHEN, when), (S.ROW_CLEAR, S.CLEAR_RESOLVE.format(n=plan.count))]
+    # 몇 곳은 "파란 표시 9개"(넣을 때의 말과 같게)가 말한다. 안 바뀌는 것은 카드가 줄 아래에 붙인다
+    return [(S.ROW_WHAT, what), (S.ROW_WHEN, when),
+            (S.ROW_CLEAR, S.CLEAR_RESOLVE.format(colors=clear_colors(plan), n=plan.count))]
 
 
 class ClearCard(Card):
@@ -1036,8 +1082,6 @@ class ClearCard(Card):
         self.compact = compact
         self.state = "proposal"
         self.outcome = None
-        self.more_btn: Optional[QToolButton] = None
-        self.more_list: Optional[QWidget] = None
         self.show_plan()
 
     @property
@@ -1065,7 +1109,7 @@ class ClearCard(Card):
             return
         self.title.setText(S.CARD_TITLE_CLEAR)
         grid = self.add_rows(clear_rows(p, self.compact))
-        _keep_line(self, S.CLEAR_KEEP, self.compact, grid)
+        _keep_line(self, clear_keep(p), self.compact, grid)
         self._targets()
         if p.straddling:
             self.add_line(S.CLEAR_STRADDLE.format(n=p.straddling), "secondary")
@@ -1082,40 +1126,18 @@ class ClearCard(Card):
                          blocked_while_busy=("apply",))
 
     def _targets(self) -> None:
-        n = self.proposal.count
-        head = QWidget()
-        head_box = QVBoxLayout(head)
-        head_box.setContentsMargins(0, 0, 0, 0)
-        head_box.setSpacing(2)
-        self.body_box.addWidget(head)
-        rest_box = None
-        if n > INLINE_ITEMS:
-            self.more_btn = QToolButton()
-            self.more_btn.setText(S.COUNT_MORE.format(n=n - INLINE_ITEMS))
-            self.more_btn.setCheckable(True)
-            self.more_list = QWidget()
-            rest_box = QVBoxLayout(self.more_list)
-            rest_box.setContentsMargins(0, 0, 0, 0)
-            self.more_list.setVisible(False)
-            self.more_btn.toggled.connect(self._toggle_more)
-            self.body_box.addWidget(self.more_btn, 0, Qt.AlignLeft)
-            self.body_box.addWidget(self.more_list)
-        for i in range(n):
-            row = QHBoxLayout()
-            row.setSpacing(4)
-            line = ClickLabel(self._line(i))
-            tip = _item_tip(self.proposal, self.proposal.targets[i]["frame"])
-            line.setToolTip(tip)
-            line.clicked.connect(lambda k=f"view:{i}": self._press(k))
-            row.addWidget(line, 1)
-            row.addWidget(self.add_extra(f"view:{i}", _step_button(S.BTN_VIEW_SHORT, tip),
-                                         blocked_while_busy=False))
-            (head_box if i < INLINE_ITEMS else rest_box).addLayout(row)
+        self.add_item_list(self.proposal.count, self._target_row)
 
-    def _toggle_more(self, on: bool) -> None:
-        rest = self.proposal.count - INLINE_ITEMS
-        self.more_btn.setText(S.COUNT_LESS if on else S.COUNT_MORE.format(n=rest))
-        self.more_list.setVisible(on)
+    def _target_row(self, box: QVBoxLayout, i: int) -> None:
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        line = ClickLabel(self._line(i))
+        tip = _item_tip(self.proposal, self.proposal.targets[i]["frame"])
+        line.setToolTip(tip)
+        line.clicked.connect(lambda k=f"view:{i}": self._press(k))
+        row.addWidget(line, 1)
+        row.addWidget(self.add_extra(f"view:{i}", _step_button(S.BTN_VIEW_SHORT, tip), blocked_while_busy=False))
+        box.addLayout(row)
 
     def _apply_enabled(self) -> None:
         super()._apply_enabled()
@@ -1127,7 +1149,8 @@ class ClearCard(Card):
         self.state = "receipt"
         self.clear_body()
         if outcome.status == "applied":
-            self.title.setText(S.CLEAR_RECEIPT.format(at=fmt.clock_time(outcome.at), n=outcome.deleted))
+            self.title.setText(S.CLEAR_RECEIPT.format(at=fmt.clock_time(outcome.at), colors=clear_colors(self.proposal),
+                                                      n=outcome.deleted))
         elif outcome.status == "partial":
             self.title.setText(S.CLEAR_RECEIPT_PARTIAL.format(expected=outcome.expected, n=outcome.deleted))
         else:

@@ -503,7 +503,9 @@ def test_leftover_copy_is_deleted_only_after_confirm(qapp, make_window, fake, tm
     # leftover: 남은 복사본 지우기 모드 (쪽·재생 위치를 되돌리지 않고, 복사본이 열려 있을 때만 원래 타임라인으로)
     assert sent == [{"stage": "C8", "expect_fingerprint": "3:1:2", "original_uid": "tl-1", "leftover": True,
                      "original_name": "Timeline 1", "copy_uid": "tl-2", "copy_name": "AI 도우미 점검용 101500"}]
-    assert w.message.text().endswith(S.LEFTOVER_DELETED)
+    # 점검 도구 쪽에서 누른 일: 알림은 그 쪽의 알림 줄에 (본 쪽 머리말은 그대로)
+    assert w.check_page.notice.text().endswith(S.LEFTOVER_DELETED) and w.check_page.notice.isVisible()
+    assert S.LEFTOVER_DELETED not in w.message.text()
     assert store.load() is None and not w.check_page.leftover_btn.isVisible()
 
 

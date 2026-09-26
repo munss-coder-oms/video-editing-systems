@@ -320,11 +320,12 @@ def _text_contrast(widget) -> float:
 @pytest.mark.parametrize("scale", [100, 130])
 def test_dialogs_are_readable_in_the_dark_theme(qapp, make_window, tmp_path, scale):
     from PySide6.QtWidgets import QLabel, QPushButton
+    from app.companion.runs import edit_page_text
 
     w = make_window(FakeLuaBridge(tmp_path))
     w.apply_text_scale(scale)
     box, ok = w.ask_box(S.PROBE_CONFIRM_TITLE, S.PROBE_CONFIRM, S.BTN_START)
-    box2, buttons = w.choose_box(S.REMOVE_ALL_TITLE, S.EDIT_PAGE_QUESTION + "\n\n" + S.REMOVE_ALL_KEEP,
+    box2, buttons = w.choose_box(S.REMOVE_ALL_TITLE, edit_page_text(S.REMOVE_ALL_CONFIRM + "\n\n" + S.REMOVE_ALL_KEEP),
                                  [S.BTN_SWITCH_REMOVE, S.BTN_MARKERS_ONLY, S.BTN_CANCEL])
     for b in (box, box2):
         b.show()

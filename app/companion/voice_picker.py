@@ -6,6 +6,9 @@
   이 카드에 한 번만. 확인 카드마다 되풀이하지 않는다).
 - 3초 듣기는 이 PC에서만 튼다 (리졸브는 건드리지 않는다). 트는 3초 동안 그 단추는 "■ 듣는 중".
 - 고르면 카드는 한 줄("목소리는 소리 2로 정했어요 …")로 접힌다.
+- 할 일(들어 보고 골라 주세요)은 보통 글, 섞은 소리 추정은 작은 글. 줄의 꼬리표("전체 소리 (추정)")는
+  한 덩어리로 줄을 바꾼다 (낱말 사이를 줄 바꿈 없는 빈칸으로).
+- [▶ 3초 듣기]와 [■ 듣는 중]은 너비가 같다 (StableButton: 글꼴이 입혀진 뒤 두 글 중 넓은 쪽으로).
 - "같이 꺼야 두 번 들리지 않아요"(트랙 끄기 제안)는 트랙을 바꾸는 일이라 2.2에서 더한다. 지금은 알리기만 한다.
 """
 
@@ -13,14 +16,53 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QTimer, Signal
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QPushButton,
+    QSizePolicy,
+    QStyle,
+    QStyleOptionButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from . import strings_ko as S
 from .cards import Card, _label
 
 QUIET_LUFS = -50.0  # 이보다 작으면 "거의 조용함"
 LISTEN_MS = 3000  # 3초 듣기: 그동안 단추에 "■ 듣는 중"
+NBSP = "\u00a0"
+TAG_SEP = " · "
+
+
+class StableButton(QPushButton):
+    """글이 바뀌어도 너비가 그대로인 단추: 크기 힌트를 바뀔 글 가운데 가장 넓은 것으로 잰다.
+
+    만들 때 fontMetrics()로 재면 스타일시트의 글꼴(14px, ▶의 대체 글꼴)이 입혀지기 전이라 모자란다.
+    크기 힌트는 쓸 때마다 지금 글꼴과 스타일로, 글마다 QPushButton이 재는 방법 그대로 잰다.
+    (QPushButton의 minimumSizeHint는 sizeHint를 부르므로 따로 넓히지 않는다: 두 번 넓어진다)"""
+
+    def __init__(self, texts: List[str], parent: Optional[QWidget] = None) -> None:
+        super().__init__(texts[0], parent)
+        self._texts = list(texts)
+
+    def _hint_for(self, text: str) -> QSize:
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        opt.text = text
+        size = self.fontMetrics().size(Qt.TextShowMnemonic, text)
+        opt.rect.setSize(size)
+        return self.style().sizeFromContents(QStyle.CT_PushButton, opt, size, self)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt 이름
+        hint = super().sizeHint()
+        for text in self._texts:
+            hint = hint.expandedTo(self._hint_for(text))
+        return hint
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return self.sizeHint()
 
 
 def doubled_text(mix: Optional[int]) -> str:
@@ -40,7 +82,8 @@ def stream_detail(choice, mix: Optional[int], previous: Optional[int]) -> str:
         parts.append(S.VOICE_MIX_MARK)
     if previous is not None and choice.index == previous:
         parts.append(S.VOICE_PREVIOUS_MARK)
-    return " · ".join(parts)
+    # 꼬리표 하나는 한 덩어리: "전체 소리 (추정)"이 "전체" / "소리 (추정)"으로 갈라지지 않게
+    return TAG_SEP.join(p.replace(" ", NBSP) for p in parts)
 
 
 class VoicePickerCard(Card):
@@ -63,9 +106,10 @@ class VoicePickerCard(Card):
             self.add_line(S.VOICE_CHANGED, "warning")
         elif q.reason == "change":
             self.add_line(S.VOICE_CHANGE)
-        self.add_line(S.VOICE_INTRO.format(n=len(q.streams)), "secondary")
+        # 할 일(골라 주세요)이 먼저, 보통 글로. 섞은 소리 추정은 덧붙이는 말이라 작은 글로
+        self.add_line(S.VOICE_INTRO.format(n=len(q.streams)))
         if q.mix is not None:
-            self.add_line(S.fill(S.VOICE_MIX, n=q.mix + 1))
+            self.add_line(S.fill(S.VOICE_MIX, n=q.mix + 1), "secondary")
         if q.doubled:
             self.add_line(doubled_text(q.mix), "warning")
         for choice in q.streams:
@@ -83,11 +127,9 @@ class VoicePickerCard(Card):
         text.addWidget(name)
         text.addWidget(_label(stream_detail(choice, self.question.mix, self.question.previous), "secondary"))
         box.addLayout(text, 1)
-        listen = QPushButton(S.BTN_LISTEN)
-        listen.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-        # "■ 듣는 중"으로 바뀌어도 단추 너비가 흔들리지 않게 두 글 중 넓은 쪽으로
-        fm = listen.fontMetrics()
-        listen.setMinimumWidth(max(fm.horizontalAdvance(S.BTN_LISTEN), fm.horizontalAdvance(S.BTN_LISTENING)) + 24)
+        # "■ 듣는 중"으로 바뀌어도 단추 너비가 흔들리지 않게 두 글 중 넓은 쪽으로 (줄마다 같은 자리)
+        listen = StableButton([S.BTN_LISTEN, S.BTN_LISTENING])
+        listen.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         listen.setAccessibleName(f"{S.VOICE_STREAM.format(n=choice.index + 1)} {S.BTN_LISTEN}")
         listen.clicked.connect(lambda _=False, i=choice.index: self.listen.emit(i))
         pick = QPushButton(S.BTN_PICK)

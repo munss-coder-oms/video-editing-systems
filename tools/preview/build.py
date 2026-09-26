@@ -34,7 +34,7 @@ from engine.resolve_link import SCRIPT_VERSION
 from . import media as media_mod
 from . import page
 from .director import Director, Image, SceneError
-from .scenes import SECTIONS, SCENES, Flow, Scene
+from .scenes import SECTIONS, SCENES, Flow, Scene, button_particle_slips
 from .world import World
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -183,6 +183,16 @@ def scaled_shot(png: Path, size: Tuple[int, int]) -> Dict[str, Any]:
             close_window(app, window)
 
 
+def caption_problems(d: Director, tmp: Path, texts: List[str]) -> None:
+    """설명 글의 실수로 멈춘다: 미리보기 임시 폴더 경로(그림은 윈도우 경로로 바꿔 찍는다), [단추] 뒤의 틀린 조사."""
+    for text in texts:
+        if str(tmp) in text:
+            raise d.fail("설명 글에 미리보기 임시 폴더 경로가 있음")
+        slips = button_particle_slips(text)
+        if slips:
+            raise d.fail("설명 글의 조사가 단추 이름과 맞지 않음: " + ", ".join(slips))
+
+
 def _clear_images(img_dir: Path) -> None:
     if img_dir.is_dir():
         for p in img_dir.glob("*.png"):
@@ -232,6 +242,7 @@ def build(out_dir: Path, *, build_label: str = "2.1", generated_at: str, limit: 
                     raise d.fail("기다리지 않은 묻는 창: " + ", ".join(d.unexpected))
                 if not step.images:
                     raise d.fail("그림이 없음")
+                caption_problems(d, tmp, [step.do, step.see, step.note])
                 steps.append({
                     "id": f"s{n}", "n": n, "key": sc.key, "section": sc.section,
                     "section_title": section_titles[sc.section], "guide_step": sc.guide, "title": sc.title,

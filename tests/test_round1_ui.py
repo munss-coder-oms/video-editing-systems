@@ -76,6 +76,9 @@ def test_background_checks_do_not_put_raw_lines_in_the_header(qapp, make_window,
     w.controller._process_result(False)
     settle(qapp, 0.05)
     assert w.message.text() == "" and w.header.summary.text() == S.SUMMARY_NONE
+    # 요약 줄과 자세히 칸은 숨기고 비운다 (리졸브가 꺼졌는데 지난 프로젝트·타임라인이 보이지 않게)
+    assert not w.header.summary_row.isVisible() and not w.header.details.isVisible()
+    assert all(label.text() == S.INFO_EMPTY for label in w.header.info.values())
 
 
 def test_old_script_notice_says_what_to_click(qapp, make_window, fake):
@@ -83,8 +86,13 @@ def test_old_script_notice_says_what_to_click(qapp, make_window, fake):
     w = connected_window(qapp, make_window, fake)
     w.connect_btn.click()
     wait_until(qapp, lambda: w.pending == 0 and w.action is None)
-    # 답은 했지만 예전 스크립트: "연결돼 있어요"가 아니라 무엇을 누를지
-    assert w.message.text() == S.OLD_SCRIPT_HINT and w.session.steps["connect"].ok is False
+    # 답은 했지만 예전 스크립트: "연결돼 있어요"가 아니라 무엇을 누를지. 머리말 안내 한 곳에만 (두 번 적지 않는다)
+    assert w.header.hint.text() == S.OLD_SCRIPT_HINT and w.header.hint.isVisible()
+    assert w.message.text() != S.OLD_SCRIPT_HINT and not w.message.isVisible()
+    assert w.session.steps["connect"].ok is False
+    # 다른 곳에서 같은 말을 알림으로 띄워도 안내와 같으면 숨긴다
+    w.show_message(S.OLD_SCRIPT_HINT)
+    assert not w.header.message_shown
     assert "Workspace → Scripts →" in S.OLD_SCRIPT_HINT and "Workspace(워크스페이스)" in S.CONNECT_HINT
 
 
@@ -128,10 +136,16 @@ def test_probe_log_is_plain_and_the_report_is_saved_again(qapp, make_window, fak
     run = w.session.probe_runs[-1]
     stages = len([r for r in run["stages"].values() if isinstance(r, dict)]) + 1  # + 정리
     total = stages + (1 if isinstance(run.get("read"), dict) else 0)
-    assert S.PROBE_DONE.format(ok=total, bad=0) in w.message.text()
-    # 점검 전에 저장한 파일을 점검 결과로 덮어쓰고 위치를 알린다
+    # 알림은 점검 도구 쪽 알림 줄에 (본 쪽 머리말이 아니라). 단계 번호의 끝(n/9)과 마친 뒤의 수가 같다
+    notice = w.check_page.notice.text()
+    assert S.PROBE_DONE_ALL.format(n=total) in notice and w.check_page.notice.isVisible()
+    assert S.PROBE_DONE_ALL.format(n=total) not in w.message.text()
+    assert total == len(S.PROBE_STAGE_NAMES) and all(f"/{total} " in v for v in S.PROBE_STAGE_NAMES.values())
+    # 마친 줄은 "기능 점검: 됨 · 기능 점검을 마쳤어요…"처럼 일 이름을 되풀이하지 않는다
+    assert S.PROBE_DONE_ALL.format(n=total) in log.splitlines()
+    # 점검 전에 저장한 파일을 점검 결과로 덮어쓰고 위치를 알린다 (보내 달라는 말과 함께)
     path = w.last_report
-    assert path is not None and str(path) in w.message.text()
+    assert path is not None and str(path) in notice and S.PROBE_REPORT_SAVED.split("{")[0] in notice
     assert "[기능 점검]" in path.read_text(encoding="utf-8-sig")
     assert str(path) in first[0]
     # 결과를 보내는 곳: 점검 도구에 [결과 저장]과 받는 사람
@@ -213,9 +227,17 @@ def test_undo_list_words_follow_the_job_and_the_reason():
     assert status_word({"status": "applied"}) == S.UNDO_STATUS["applied"]
     assert status_word({"status": "undone"}) == S.UNDO_STATUS["undone"]
     assert status_word({"status": "applied", "op": "clear_marks"}) == "지움"
-    assert status_word({"status": "undone", "op": "clear_marks"}) == "다시 넣음"
-    assert status_word({"status": "undone", "closed_by": "remove_all"}) == "모두 빼기로 끝남"
-    assert status_word({"status": "undone", "closed_by": "clear:Pabc"}) == "지워짐"
+    assert status_word({"status": "undone", "op": "clear_marks"}) == "지운 것 다시 넣음"
+    # 넣은 일이 다른 일로 빠짐: 지우기 요청 줄의 "지움"과 헷갈리지 않는 말
+    assert status_word({"status": "undone", "closed_by": "remove_all"}) == "넣었다가 모두 빼기로 뺌"
+    assert status_word({"status": "undone", "closed_by": "clear:Pabc"}) == "넣었다가 나중에 지움"
+    # 지우기 요청을 모두 빼기가 닫음: 모두 빼기가 뺀 것이 아니라 이제 되돌릴 수 없을 뿐
+    assert status_word({"status": "undone", "op": "clear_marks", "closed_by": "remove_all"}) == \
+        "지움 · 이제 되돌릴 수 없음"
+    words = [status_word(e) for e in (
+        {"status": "applied", "op": "clear_marks"}, {"status": "undone", "closed_by": "clear:P"},
+        {"status": "undone", "closed_by": "remove_all"}, {"status": "undone", "op": "clear_marks"})]
+    assert len(set(words)) == len(words)
 
 
 def test_undo_footer_buttons_are_40_high_without_menu_arrow(qapp, make_window, fake):
@@ -251,7 +273,7 @@ def test_after_apply_chips_once_and_undo_note_on_the_question(qapp, make_window,
         card.buttons["apply"].click()
         wait_until(qapp, lambda: card.state == "receipt" and not w.busy, 20)
     log = w.chat.log.toPlainText()
-    assert log.count(S.CHAT_TRY_AFTER_APPLY) == 1 and S.CHIPS_AFTER_APPLY[-1] == "도우미 표시 다 지워줘"
+    assert log.count(S.CHAT_TRY_AFTER_APPLY) == 1 and S.CHIPS_AFTER_APPLY[-1] == "도우미가 넣은 표시 다 지워줘"
     _send(qapp, w, "방금 거 취소")
     q = [c for c in w.runs.cards if isinstance(c, QuestionCard) and c.title.text() == S.CARD_TITLE_UNDO][-1]
     assert "'2분에 파란 표시해줘'로 넣은 파란 표시 1개를 빼요" in q.plain_text()

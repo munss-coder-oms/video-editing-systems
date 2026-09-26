@@ -5,7 +5,7 @@
   재생 위치 옮기기(jump_to)만 확인 없이 한다 (편집이 아니다).
 - 칩은 입력 칸을 채우기만 하고 보내지 않는다. 못 알아들은 부분은 카드에 주황 줄로, [나머지도 다시 말하기]로 채운다.
 - 도우미 표시 지우기는 도우미가 넣은 것만, 카드에 보인 것만 지우고 되돌리면 다시 넣는다.
-- 대화의 쉬는 곳 표시는 말한 범위 안쪽만 넣고, 영수증 아래 "이대로 자동화 버튼에 저장 ▸"은 구간을 버리고 저장한다.
+- 대화의 쉬는 곳 표시는 말한 범위 안쪽만 넣고, 영수증 아래 "이대로 자동화 버튼에 저장"은 구간을 버리고 저장한다.
 """
 
 from __future__ import annotations
@@ -193,7 +193,9 @@ def test_clear_blue_removes_only_ours_and_undo_puts_them_back(qapp, make_window,
     card = _cards(w, ClearCard)[-1]
     assert card.proposal.count == 2 and set(card.proposal.colors) == {"Blue"}
     text = card.plain_text()
-    assert card.title.text() == S.CARD_TITLE_CLEAR and S.CLEAR_RESOLVE.format(n=2) in text
+    assert card.title.text() == S.CARD_TITLE_CLEAR and S.CLEAR_RESOLVE.format(colors="파란", n=2) in text
+    # 안 바뀌는 것: 이번에 지우지 않는 빨간 도우미 표시 1개도 적는다 (직접 찍은 표시만 남는 것처럼 보이지 않게)
+    assert S.CLEAR_KEEP_OTHERS.format(n=1) in text
     # 범위를 말하지 않은 지우기는 타임라인 전체에 적용된다: "언제" 줄이 "전체 18분 46초"라고 적으니 경고 줄은 되풀이하지 않는다
     assert S.WHEN_WHOLE.format(length="18분 46초") in text and card.buttons["apply"].isEnabled()
     assert S.GUARD["whole"].format(length="18분 46초") not in text
@@ -205,7 +207,7 @@ def test_clear_blue_removes_only_ours_and_undo_puts_them_back(qapp, make_window,
     ours = _ours(fr)
     assert [m["color"] for m in ours.values()] == ["Red"]
     assert fr.markers[600]["name"] == "내 파란 표시" and fr.markers[5000]["custom"] == "autosubs_1"
-    assert card.title.text().startswith("✓") and S.CLEAR_RECEIPT.split("·")[1].strip().format(n=2) in card.title.text()
+    assert card.title.text().startswith("✓") and S.CLEAR_RECEIPT.split("·")[1].strip().format(colors="파란", n=2) in card.title.text()
     args = [a for op, a in zip(fake.requests, fake.args) if op == "delete_markers"][-1]
     assert args["prefix"] == "aih:" and len(args["customs"]) == 2 and args["snapshot"] is True
 
@@ -263,7 +265,7 @@ def test_range_pauses_card_clips_saves_slot_and_view_jumps(qapp, make_window, tm
     wait_until(qapp, lambda: fr.jumps, 10)
     assert fr.jumps[-1][0] == card.proposal.rows[1].start
 
-    # 이대로 자동화 버튼에 저장 ▸ 3 → [저장]: 구간은 버린다
+    # 이대로 자동화 버튼에 저장 3 → [저장]: 구간은 버린다
     card.choose_save_slot(3)
     card.extra["save"].click()
     slot = w.settings.slot(3)
@@ -271,8 +273,8 @@ def test_range_pauses_card_clips_saves_slot_and_view_jumps(qapp, make_window, tm
     assert slot["previous"]["kind"] == "balance_voice"
     log = w.chat.log.toPlainText()
     assert S.fill(S.SAVE_DONE, n=3) == "자동화 3을 바꿨어요" and S.fill(S.SAVE_DONE, n=3) in log and S.SAVE_RANGE_DROPPED.format(a="0:11.0", b="0:21.5") in log
-    # 1번 버튼이 이미 "쉬는 곳 표시"라서 같은 이름 두 개가 되지 않게 번호를 붙인다
-    assert w.automation.buttons[2].name == S.SAVE_SLOT_NAME.format(name=S.KIND_NAMES["mark_pauses"], n=3)
+    # 버튼마다 이미 번호(1, 3)가 붙어 있어 이름에 번호를 또 붙이지 않는다 ("쉬는 곳 표시 3" 아님)
+    assert w.automation.buttons[2].name == S.KIND_NAMES["mark_pauses"]
     assert w.automation.buttons[0].name == S.KIND_NAMES["mark_pauses"]
     assert w.settings.restore_previous(3) and w.settings.slot(3)["kind"] == "balance_voice"
 

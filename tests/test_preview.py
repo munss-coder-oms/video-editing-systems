@@ -134,3 +134,61 @@ def test_caption_helpers():
     assert particle_slip("소리 3을 트는 중", "소리 3") is None
     assert particle_slip("'소리 고르게'을 되돌렸어요", "'소리 고르게'")
     assert particle_slip("'쉬는 곳 표시'를 되돌렸어요", "'쉬는 곳 표시'") is None
+
+
+def test_button_particles_in_captions():
+    """설명 글의 [단추] 바로 뒤 조사: "[결과 저장]와 안내"는 멈추고 "[결과 저장]과 안내"는 통과."""
+    from tools.preview.scenes import button_particle_slips
+
+    assert button_particle_slips("[결과 저장]와 안내") == ["[결과 저장]와 → [결과 저장]과"]
+    assert button_particle_slips("[결과 저장]과 안내, [더하기]를 눌렀어요. [이동]으로 가요.") == []
+    assert button_particle_slips("[취소]를 누르면") == []
+    assert button_particle_slips("[+]를 눌러") == []  # 받침을 모르는 기호는 그대로
+
+
+def test_report_path_is_drawn_as_a_windows_path(tmp_path):
+    """그림 속 결과 파일 경로는 임시 폴더 대신 윈도우 바탕 화면 모양으로 (글은 찍은 뒤 되돌린다)."""
+    from types import SimpleNamespace
+
+    from tools.preview.director import TEMP_PATH_NOTE, WINDOWS_DESKTOP, Director
+
+    d = Director.__new__(Director)
+    d.w = SimpleNamespace(report_dir=tmp_path / "바탕 화면")
+    path = tmp_path / "바탕 화면" / "AI도우미_결과_20260926-2150.txt"
+    text = f"결과를 저장했어요.\n{path}"
+    assert d.masked(text) == "결과를 저장했어요.\n" + WINDOWS_DESKTOP + "\\AI도우미_결과_20260926-2150.txt"
+    assert WINDOWS_DESKTOP.startswith("C:\\Users\\") and "C:\\Users" in TEMP_PATH_NOTE
+    assert d.masked("경로 없음") == "경로 없음"
+
+
+def test_timeline_legend_uses_real_colours_and_explains_the_bar(tmp_path):
+    """흉내 그림의 범례: 도우미 표시 깃발은 실제 색(빨강·파랑), 길이 있는 표시가 있으면 막대의 뜻을 적는다."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtGui import QColor, QImage
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from tools.preview import timeline_view as tv
+    from tools.preview.world import World
+
+    info = World(tmp_path / "w").info
+    markers = {600: {"color": "Blue", "custom": "aih:P1:1", "duration": 120, "name": "쉼"},
+               1200: {"color": "Red", "custom": "aih:P2:1", "duration": 1, "name": "튐"},
+               5400: {"color": "Green", "custom": "", "duration": 1, "name": "내 표시"}}
+
+    def legend_colours(path):
+        img = QImage(str(path))
+        scale = img.width() // tv.WIDTH
+        seen = set()
+        for y in range(100 * scale, 116 * scale):
+            for x in range(0, 420 * scale):
+                seen.add(img.pixelColor(x, y).name())
+        return seen
+
+    tv.render(markers, info, tmp_path / "a.png")
+    seen = legend_colours(tmp_path / "a.png")
+    for name in ("Blue", "Red", "Green"):
+        assert QColor(tv.MARKER_RGB[name]).name() in seen, name
+    assert QColor(tv.NEUTRAL).name() not in seen  # 회색 네모가 아니라 실제 색 깃발
+    assert "막대" in tv.LEGEND_RANGE and "길이" in tv.LEGEND_RANGE
+

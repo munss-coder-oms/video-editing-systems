@@ -9,13 +9,14 @@
 - 목록은 새 줄이 붙으면 따라 내려간다. 대화 칸보다 큰 카드는 카드 맨 위가 보이게 멈춘다.
   위로 올려 읽는 중이면 따라가지 않는다 (맨 아래로 다시 내리면 다시 따라간다).
 - 목록 안쪽 너비는 보이는 너비를 넘지 않는다 (카드가 넓어져 오른쪽이 잘리지 않게).
+- 굴리거나 접거나 크기가 바뀌면 view_changed: 창이 머리말 알림과 같은 말이 대화 칸에 보이는지 다시 본다 (shows).
 """
 
 from __future__ import annotations
 
 from typing import List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QInputMethodEvent, QKeyEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -36,6 +37,7 @@ from . import theme
 MAX_INPUT_LINES = 3
 MAX_MESSAGES = 200  # 이보다 많으면 오래된 것부터 지운다 (카드 포함)
 FOLLOW_SLACK = 4  # 맨 아래에서 이만큼 안이면 "맨 아래에 있음" (새 줄을 따라간다)
+SHOWN_TOP = 24  # 카드·줄의 윗부분(제목 한 줄)이 이만큼 보이면 "대화 칸에 보임"
 
 
 class MessageList(QScrollArea):
@@ -43,6 +45,8 @@ class MessageList(QScrollArea):
 
     예전 QPlainTextEdit처럼 appendPlainText()와 toPlainText()가 있다 (결과 파일과 시험이 쓴다).
     """
+
+    view_changed = Signal()  # 굴림, 목록 높이·칸 크기가 바뀜
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -80,7 +84,16 @@ class MessageList(QScrollArea):
     def viewportEvent(self, event) -> bool:
         if event.type() == QEvent.Resize:
             self._cap_width()
+            self.view_changed.emit()
         return super().viewportEvent(event)
+
+    def shows(self, widget: QWidget) -> bool:
+        """그 줄(카드)의 윗부분이 지금 보이는 칸 안에 있는지 (제목 한 줄이 가려지지 않고 보임)."""
+        if not self.isVisible() or not widget.isVisible() or not self.inner.isAncestorOf(widget):
+            return False
+        top = widget.mapTo(self.viewport(), QPoint(0, 0)).y()
+        need = min(widget.height(), SHOWN_TOP)
+        return top >= 0 and top + need <= self.viewport().height()
 
     def _target(self) -> int:
         bar = self.verticalScrollBar()
@@ -108,13 +121,14 @@ class MessageList(QScrollArea):
     def _range_changed(self, _lo: int, _hi: int) -> None:
         if self.follow:
             self._reveal()
+        self.view_changed.emit()
 
     def _value_changed(self, value: int) -> None:
-        if self._moving:
-            return
-        # 사람이 옮김 (휠, 끌기, 키): 맨 아래면 다시 따라가고, 아니면 멈춘다
-        self._anchor = None
-        self.follow = value >= self.verticalScrollBar().maximum() - FOLLOW_SLACK
+        if not self._moving:
+            # 사람이 옮김 (휠, 끌기, 키): 맨 아래면 다시 따라가고, 아니면 멈춘다
+            self._anchor = None
+            self.follow = value >= self.verticalScrollBar().maximum() - FOLLOW_SLACK
+        self.view_changed.emit()
 
     def appendPlainText(self, text: str) -> QLabel:
         label = QLabel(text)
@@ -256,6 +270,7 @@ class ChatInput(QPlainTextEdit):
 class ChatView(QWidget):
     sent = Signal(str)
     collapsed_changed = Signal(bool)
+    view_changed = Signal()  # 대화 목록을 굴리거나 접음 (보이는 줄이 바뀜)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -271,6 +286,8 @@ class ChatView(QWidget):
 
         self.log = MessageList()
         self.log.setAccessibleName(S.CHAT_TITLE)
+        self.log.view_changed.connect(self.view_changed)
+        self.last_line: Optional[QLabel] = None  # 마지막 글 줄 (머리말 알림과 같은 말인지 창이 본다)
         self.log.setMinimumHeight(60)
         self.log.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         root.addWidget(self.log, 1)
@@ -311,12 +328,18 @@ class ChatView(QWidget):
         self.log.setVisible(not collapsed)
         self.brain.setVisible(not collapsed)
         self.collapsed_changed.emit(collapsed)
+        self.view_changed.emit()
 
     def set_min_height(self, height: int) -> None:
         self.log.setMinimumHeight(max(40, height))
 
-    def add_line(self, who: str, text: str) -> None:
-        self.log.appendPlainText(f"{who}: {text}")
+    def add_line(self, who: str, text: str) -> QLabel:
+        self.last_line = self.log.appendPlainText(f"{who}: {text}")
+        return self.last_line
+
+    def shows(self, widget: QWidget) -> bool:
+        """그 카드·줄의 윗부분이 대화 칸에 보이는지 (대화를 접었으면 아니다)."""
+        return not self.collapsed and self.log.shows(widget)
 
     def add_helper(self, text: str, chips: Optional[Sequence[Tuple[str, str]]] = None) -> Optional[ChipRow]:
         """도우미 한 줄. chips: (보이는 글, 입력 칸에 채울 글) 목록."""

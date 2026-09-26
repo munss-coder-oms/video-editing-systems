@@ -16,7 +16,7 @@
    (취소·되돌려·저장처럼 앞뒤 말로 대상을 아는 동작은 빼고).
 7. 타임라인(TimeContext)이 있으면 시간을 절대 프레임으로 푼다. 없으면 NeedTimeline (화면이 연결 확인 뒤 다시 부른다).
 
-리졸브에 들어가는 표시 이름("도우미 표시", "여기 6dB 줄이기", "자르기 후보")만 여기서 만든다. 화면 글은 code로 돌려준다.
+리졸브에 들어가는 표시 이름("확인할 곳", "여기 6dB 줄이기", "자르기 후보")만 여기서 만든다. 화면 글은 code로 돌려준다.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ MAX_MARK_ITEMS = 200  # 한 카드에 넣는 표시 (설계 B4.5)
 GAIN_MIN_DB, GAIN_MAX_DB = -24.0, 12.0  # 설계 B4.5 clamps
 POINT_TOL_S = 0.5  # 점 하나를 지울 때 앞뒤로 보는 여유 (설계 B4.3 tolerance)
 MAX_NAME = 40
-DEFAULT_MARK_NAME = "도우미 표시"  # 이름을 말하지 않은 표시 (리졸브에서 직접 찍은 "Marker 1"과 구별되게)
+DEFAULT_MARK_NAME = "확인할 곳"  # 이름을 말하지 않은 표시. "도우미 표시"(도우미가 넣은 표시 모두를 이르는 말)와 다르게
 CUT_MARK_NAME = "자르기 후보"
 AUDIO_MARK_NAME = "여기 {db}dB {verb}"
 AUDIO_VERB_WORD = {"down": "줄이기", "up": "키우기"}
@@ -929,7 +929,7 @@ def _merge_modifier(target: _Result, r: _Result) -> None:
 
 
 def _names(c: _Clause) -> Tuple[Optional[str], Optional[str], str]:
-    """표시 이름과 메모: 따옴표 안의 글. 없으면 기본 이름 ("도우미 표시")."""
+    """표시 이름과 메모: 따옴표 안의 글. 없으면 기본 이름 (DEFAULT_MARK_NAME "확인할 곳")."""
     if c.quotes:
         body = c.quotes[0].value
         return body[:MAX_NAME], body, SAID
