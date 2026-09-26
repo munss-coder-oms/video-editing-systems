@@ -39,7 +39,9 @@ copy /y "%~f0" "%WORK%\update_windows.bat" >nul
 if errorlevel 1 goto :self_copy_failed
 set "AIH_UPDATE_COPY=1"
 rem One line on purpose: once the copy returns, nothing more is read from this (replaced) file.
-call "%WORK%\update_windows.bat" "%UPD_PID%" "%INSTALL_DIR%" & exit /b
+rem The exit code is given as a number: a bare "exit /b" left cmd /c with 0 after a refused update
+rem (seen in the Windows check). "if errorlevel" is read when it runs, not when the line is read.
+call "%WORK%\update_windows.bat" "%UPD_PID%" "%INSTALL_DIR%" & if errorlevel 1 (exit /b 1) else exit /b 0
 
 :worker
 set "AIH_UPDATE_COPY="

@@ -562,7 +562,7 @@ def test_update_bat_never_runs_from_the_install_folder():
     assert updater.update_dir(Path("state")) == Path("state") / "update"
     assert r'copy /y "%~f0" "%WORK%\update_windows.bat" >nul' in lines
     # 복사본을 부르고 같은 줄에서 끝낸다 (새 판이 이 파일을 덮어써도 더 읽지 않게)
-    assert r'call "%WORK%\update_windows.bat" "%UPD_PID%" "%INSTALL_DIR%" & exit /b' in lines
+    assert r'call "%WORK%\update_windows.bat" "%UPD_PID%" "%INSTALL_DIR%" & if errorlevel 1 (exit /b 1) else exit /b 0' in lines
     assert r'call "%INSTALL_DIR%\run_app.bat" & pause & exit /b 0' in lines
     assert lines.index(r'if /i "%~dp0"=="%WORK%\" goto :worker') < lines.index(":worker")
     setup = [ln for ln in lines if "setup_windows.bat" in ln and ln.startswith("call ")]
