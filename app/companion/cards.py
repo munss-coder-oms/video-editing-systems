@@ -114,17 +114,27 @@ class FlowLayout(QLayout):
         area = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
         x, y, line_h = area.x(), area.y(), 0
         shown = [i for i in self._items if not i.isEmpty()]
+        line: List[Tuple[Any, int, int, int]] = []  # 이번 줄: (항목, x, 너비, 높이)
+
+        def place() -> None:
+            # 한 줄 안에서는 가운데 높이에 맞춘다 (글 한 줄과 32 높이 단추가 같은 줄에 있어도 어긋나지 않게)
+            if apply:
+                for it, ix, iw, ih in line:
+                    it.setGeometry(QRect(QPoint(ix, y + (line_h - ih) // 2), QSize(iw, ih)))
+            line.clear()
+
         for item in shown:
             hint = item.sizeHint()
             w = min(hint.width(), max(item.minimumSize().width(), area.width()))
             if x > area.x() and x + w > area.x() + area.width():
+                place()
                 x = area.x()
                 y += line_h + self._spacing
                 line_h = 0
-            if apply:
-                item.setGeometry(QRect(QPoint(x, y), QSize(w, hint.height())))
+            line.append((item, x, w, hint.height()))
             x += w + self._spacing
             line_h = max(line_h, hint.height())
+        place()
         return (y + line_h - area.y() if shown else 0) + m.top() + m.bottom()
 
 
@@ -764,25 +774,33 @@ class ProposalCard(Card):
 
     # ── 줄들 ──────────────────────────────────────────────────────────
 
-    def _row_box(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setSpacing(4)
+    def _stepper_row(self, name_text: str, key: str, value_text: str) -> None:
+        """이름 [−] 값 [+]. 자리가 모자라면 [−] 값 [+]가 통째로 이름 아래 줄로 내려간다.
+
+        한 줄(QHBoxLayout)에 두면 좁은 창·큰 글자에서 값이 먼저 눌려 잘렸다
+        (윈도우 글꼴, 400px 창, 글자 130%에서 '6dB (기본값)'이 4px 모자람).
+        """
+        row = FlowLayout(spacing=4)
         self.body_box.addLayout(row)
-        return row
+        name = _label(name_text, "secondary", wrap=False)
+        name.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        row.addWidget(name)
+        group = QWidget()
+        box = QHBoxLayout(group)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(4)
+        box.addWidget(self.add_extra(f"dec:{key}", _step_button(S.BTN_MINUS, S.TIP_MINUS_VALUE)))
+        box.addWidget(_value_label(value_text))
+        box.addWidget(self.add_extra(f"inc:{key}", _step_button(S.BTN_PLUS, S.TIP_PLUS_VALUE)))
+        row.addWidget(group)
 
     def _edit_row(self) -> None:
         """쉰 길이·튀는 정도 [−] 값 [+] (다시 계산, AI를 부르지 않음)."""
         p = self.proposal
         key = MAIN_PARAM[p.kind]
-        row = self._row_box()
-        name = _label(S.EDIT_MIN_S if key == "min_s" else S.EDIT_ABOVE, "secondary", wrap=False)
-        name.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-        row.addWidget(name)
-        row.addWidget(self.add_extra(f"dec:{key}", _step_button(S.BTN_MINUS, S.TIP_MINUS_VALUE)))
         value = (S.EDIT_VALUE_S if key == "min_s" else S.EDIT_VALUE_DB).format(v=fmt.num(p.params.get(key)))
-        row.addWidget(_value_label(tagged(value, (p.provenance or {}).get(key), self.slot_name)))
-        row.addWidget(self.add_extra(f"inc:{key}", _step_button(S.BTN_PLUS, S.TIP_PLUS_VALUE)))
-        row.addStretch(1)
+        self._stepper_row(S.EDIT_MIN_S if key == "min_s" else S.EDIT_ABOVE, key,
+                          tagged(value, (p.provenance or {}).get(key), self.slot_name))
 
     def _db_row(self) -> None:
         """권하는 노란 표시의 이름에 적을 크기 [−] 6dB [+] (소리는 바꾸지 않는다)."""
@@ -790,14 +808,8 @@ class ProposalCard(Card):
         db = (p.params.get("offer") or {}).get("db")
         if db is None:
             return
-        row = self._row_box()
-        name = _label(S.EDIT_DB, "secondary", wrap=False)
-        name.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-        row.addWidget(name)
-        row.addWidget(self.add_extra("dec:db", _step_button(S.BTN_MINUS, S.TIP_MINUS_VALUE)))
-        row.addWidget(_value_label(tagged(S.EDIT_VALUE_DB.format(v=fmt.num(db)), (p.provenance or {}).get("db"))))
-        row.addWidget(self.add_extra("inc:db", _step_button(S.BTN_PLUS, S.TIP_PLUS_VALUE)))
-        row.addStretch(1)
+        self._stepper_row(S.EDIT_DB, "db",
+                          tagged(S.EDIT_VALUE_DB.format(v=fmt.num(db)), (p.provenance or {}).get("db")))
 
     def _items(self) -> None:
         p = self.proposal
