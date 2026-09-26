@@ -32,7 +32,7 @@ RESOLVE_QUIT_HINT = "리졸브를 다시 켜면 자동으로 다시 찾아요"
 BTN_CHECK_CONNECTION = "연결 확인"
 BTN_RETRY = "다시 시도"
 BTN_MORE = "⋯"
-TIP_MORE = "연결 점검, 결과 저장, 설정, 도움말"
+TIP_MORE = "연결 점검, 결과 저장, 설정, 도움말, 새 판 받기"
 TIP_CHECK_CONNECTION = "리졸브와 이어져 있는지 지금 확인해요"
 
 SUMMARY_NONE = "리졸브에서 열린 타임라인을 아직 몰라요"
@@ -554,6 +554,30 @@ HELP_TEXT = (
     "3) 리졸브에 넣기 전에 꼭 먼저 보여 드려요. 넣은 것은 [↶ 되돌리기]로 뺄 수 있어요.\n"
     "4) 문제가 있으면 [결과 저장]을 눌러 생긴 파일을 보내 주세요."
 )
+
+# ── ⋯ > 새 판 받기 (update_windows.bat이 새 판을 받아 같은 폴더에 넣는다) ─────────
+MENU_UPDATE = "새 판 받기"
+TIP_UPDATE = "새 판을 받아 지금 폴더에 넣고 창을 다시 열어요 (몇 분)"
+TIP_UPDATE_WINDOWS_ONLY = "새 판 받기는 윈도우에서만 할 수 있어요"
+UPDATE_CONFIRM_TITLE = "새 판 받기"
+UPDATE_CONFIRM = (
+    "새 판을 인터넷에서 받아 지금 쓰는 폴더에 그대로 넣어요. 새 폴더는 생기지 않아요.\n\n"
+    "1) 이 창이 닫혀요.\n"
+    "2) 검은 창이 뜨고 몇 분 동안 새 판으로 바꿔요. 다 되면 이 창이 저절로 다시 열려요. "
+    "검은 창은 그 뒤 아무 키나 누르면 닫혀요.\n"
+    f"3) 리졸브는 켜 둔 채로 두셔도 돼요. 다 된 뒤 리졸브에서 Workspace → Scripts → {SCRIPT_NAME}를 "
+    "한 번 더 눌러 주세요."
+)
+BTN_UPDATE = "받기"
+UPDATE_BUSY = "리졸브에 넣거나 빼는 중에는 새 판을 받을 수 없어요. 끝난 뒤 다시 눌러 주세요"
+UPDATE_FAILED = "새 판 받기를 시작하지 못했어요: {reason}"
+UPDATE_REASONS = {
+    "missing": "이 폴더에 update_windows.bat이 없어요. 새 ZIP을 받아 setup_windows.bat을 실행해 주세요",
+    "copy": "임시 폴더에 복사하지 못했어요",
+    "launch": "검은 창을 띄우지 못했어요",
+}
+UPDATE_FAILED_LOG = "새 판 받기 실패: {detail}"
+VERSION_CHANGED = "새 판({version})으로 바뀌었어요."
 
 # ── 연결 점검 쪽 ─────────────────────────────────────────────────────
 CHECK_TITLE = "연결 점검"

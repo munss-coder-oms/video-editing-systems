@@ -133,6 +133,102 @@ jobs:
           python -c "import lupa.luajit21 as l; print(l.LuaRuntime().eval('jit.version'))" || exit /b 1
           python -m pytest -q -rs tests/test_lua_script.py tests/test_bridge_roundtrip.py tests/test_resolve_link.py tests/test_probe_leftover.py tests/test_resolve_ops.py || exit /b 1
 
+      - name: 새 판 받기 준비 (지금 코드로 ZIP 만들기, 지워질 파일과 사용자 파일 심기)
+        shell: pwsh
+        run: |
+          # ⋯ > 새 판 받기는 GitHub에서 ZIP을 받는다. 여기서는 지금 코드로 같은 모양의 ZIP을 만든다
+          git archive --format=zip --prefix=video-editing-systems-update-test/ -o (Join-Path $env:RUNNER_TEMP 'update-test.zip') HEAD
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # 새 판에 없는 코드 파일(지워져야 함)과 사용자가 폴더에 넣어 둔 파일(남아야 함)
+          Set-Content -LiteralPath 'app\zz_stale_for_update_test.py' -Value '# not in the new version'
+          Set-Content -LiteralPath 'my_notes_update_test.txt' -Value 'my own notes'
+          # 이 프로그램이 아닌 ZIP (받아도 아무것도 바꾸지 않아야 함)
+          $bad = Join-Path $env:RUNNER_TEMP 'not-this-program'
+          New-Item -ItemType Directory -Force -Path (Join-Path $bad 'something') | Out-Null
+          Set-Content -LiteralPath (Join-Path $bad 'something\readme.txt') -Value 'hello'
+          Compress-Archive -Path (Join-Path $bad '*') -DestinationPath (Join-Path $env:RUNNER_TEMP 'not-this-program.zip') -Force
+
+      - name: 새 판 받기 거절 (창이 아직 열려 있음, 빈칸·괄호·작은따옴표·한글이 든 임시 폴더)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # 한글 사용자 이름 PC의 %LOCALAPPDATA%처럼. 0xD64D 0xAE38 0xB3D9 = 홍길동
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP ("local (1) it's " + [char]0xD64D + [char]0xAE38 + [char]0xB3D9)
+          New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA | Out-Null
+          $env:AIH_UPDATE_ZIP = Join-Path $env:RUNNER_TEMP 'update-test.zip'
+          $env:AIH_UPDATE_WAIT = '3'
+          # 앱 대신 오래 도는 프로그램의 PID를 넘긴다: 기다리다가 아무것도 바꾸지 않고 멈춰야 한다
+          $app = Start-Process -FilePath 'ping.exe' -ArgumentList '-n', '120', '127.0.0.1' -PassThru -WindowStyle Hidden
+          $appId = $app.Id
+          $log = Join-Path $env:RUNNER_TEMP 'update_refused.txt'
+          & cmd.exe /d /c update_windows.bat $appId *> $log
+          $rc = $LASTEXITCODE
+          Stop-Process -Id $appId -Force -ErrorAction SilentlyContinue
+          $text = Get-Content -LiteralPath $log -Raw
+          $text
+          if ($rc -eq 0) { Write-Error "창이 열려 있는데 새 판을 넣음"; exit 1 }
+          if ($text -notmatch 'still open') { Write-Error "창이 열려 있다는 안내가 없음"; exit 1 }
+          if (-not (Test-Path -LiteralPath 'app\zz_stale_for_update_test.py')) { Write-Error "거절했는데 파일이 바뀜"; exit 1 }
+          $copy = Join-Path $env:LOCALAPPDATA 'video-editing-systems\update\update_windows.bat'
+          if (-not (Test-Path -LiteralPath $copy)) { Write-Error "임시 폴더의 복사본이 없음: $copy"; exit 1 }
+
+      - name: 새 판 받기 거절 (이 프로그램이 아닌 ZIP, 같은 한글 임시 폴더)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP ("local (1) it's " + [char]0xD64D + [char]0xAE38 + [char]0xB3D9)
+          $env:AIH_UPDATE_ZIP = Join-Path $env:RUNNER_TEMP 'not-this-program.zip'
+          $log = Join-Path $env:RUNNER_TEMP 'update_bad_zip.txt'
+          & cmd.exe /d /c update_windows.bat *> $log
+          $rc = $LASTEXITCODE
+          $text = Get-Content -LiteralPath $log -Raw
+          $text
+          if ($rc -eq 0) { Write-Error "이 프로그램이 아닌 ZIP을 넣음"; exit 1 }
+          if ($text -notmatch 'not a complete version') { Write-Error "받은 파일이 이상하다는 안내가 없음"; exit 1 }
+          if (-not (Test-Path -LiteralPath 'app\zz_stale_for_update_test.py')) { Write-Error "거절했는데 파일이 바뀜"; exit 1 }
+          $work = Join-Path $env:LOCALAPPDATA 'video-editing-systems\update'
+          foreach ($left in 'download.zip', 'extract') {
+            if (Test-Path -LiteralPath (Join-Path $work $left)) { Write-Error "임시 파일이 남음: $left"; exit 1 }
+          }
+
+      - name: update_windows.bat (새 판 받기와 같은 일, 받는 대신 만든 ZIP으로)
+        shell: cmd
+        run: |
+          set "AIH_UPDATE_ZIP=%RUNNER_TEMP%\update-test.zip"
+          call update_windows.bat > "%RUNNER_TEMP%\update_log.txt" 2>&1
+          set RC=%errorlevel%
+          type "%RUNNER_TEMP%\update_log.txt"
+          exit /b %RC%
+
+      - name: 새 판 받기 뒤 확인 (지울 파일은 지워지고 사용자 파일은 남고, 테스트는 건너뛰고, 바로가기는 그대로)
+        shell: pwsh
+        run: |
+          $log = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'update_log.txt') -Raw
+          if (Test-Path -LiteralPath 'app\zz_stale_for_update_test.py') { Write-Error "새 판에 없는 코드 파일이 남아 있음"; exit 1 }
+          if (-not (Test-Path -LiteralPath 'my_notes_update_test.txt')) { Write-Error "사용자가 넣어 둔 파일이 지워짐"; exit 1 }
+          if ($log -notmatch 'Automatic tests skipped for a quick update') { Write-Error "빠른 설치인데 테스트를 건너뛴다는 줄이 없음"; exit 1 }
+          if ($log -match 'Running automatic tests') { Write-Error "빠른 설치인데 테스트를 돌림"; exit 1 }
+          if ($log -notmatch 'Update finished') { Write-Error "다 됐다는 줄이 없음"; exit 1 }
+          # setup_windows.bat과 같은 방법으로 이름을 만든다 (0xB3C4 0xC6B0 0xBBF8 = 도우미)
+          $desktop = [Environment]::GetFolderPath('Desktop')
+          $p = Join-Path $desktop ('AI ' + [char]0xB3C4 + [char]0xC6B0 + [char]0xBBF8 + '.lnk')
+          if (-not (Test-Path -LiteralPath $p)) { Write-Error "바로가기 없음: $p"; exit 1 }
+          $copy = Join-Path $env:RUNNER_TEMP 'shortcut-check-after-update.lnk'
+          Copy-Item -LiteralPath $p -Destination $copy -Force
+          $target = (New-Object -ComObject WScript.Shell).CreateShortcut($copy).TargetPath
+          $target
+          if (-not $target.EndsWith('run_app.bat')) { Write-Error "바로가기 대상이 다름: $target"; exit 1 }
+          $work = Join-Path $env:LOCALAPPDATA 'video-editing-systems\update'
+          foreach ($left in 'download.zip', 'extract') {
+            if (Test-Path -LiteralPath (Join-Path $work $left)) { Write-Error "임시 파일이 남음: $left"; exit 1 }
+          }
+
+      - name: 새 판 받기 뒤 AI 도우미 창 (창이 그대로 뜨는지)
+        shell: cmd
+        run: |
+          call "%CONDA%\condabin\conda.bat" activate video-editing
+          python -m app --helper-smoke-test || exit /b 1
+
       - name: 기록 파일 모으기
         if: always()
         shell: cmd
@@ -141,6 +237,7 @@ jobs:
           copy "%LOCALAPPDATA%\video-editing-systems\*.log" logs\ >nul 2>&1
           copy setup_check_result.txt logs\ >nul 2>&1
           copy "%LOCALAPPDATA%\video-editing-systems\AI*.txt" logs\ >nul 2>&1
+          copy "%RUNNER_TEMP%\update_*.txt" logs\ >nul 2>&1
           exit /b 0
 
       - uses: actions/upload-artifact@v4

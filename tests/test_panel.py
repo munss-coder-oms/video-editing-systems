@@ -363,7 +363,7 @@ def test_slot_press_pings_first_and_changes_nothing(qapp, make_window, fake):
 
 def test_more_menu_and_check_page(qapp, make_window, fake):
     w = connected_window(qapp, make_window, fake)
-    assert w.menu_entries() == [S.MENU_CHECK_PAGE, S.MENU_REPORT, S.MENU_SETTINGS, S.MENU_HELP]
+    assert w.menu_entries() == [S.MENU_CHECK_PAGE, S.MENU_REPORT, S.MENU_SETTINGS, S.MENU_HELP, S.MENU_UPDATE]
     w.more_menu.actions()[0].trigger()
     assert w.stack.currentWidget() is w.check_page
     for btn in (w.probe_btn, w.marker_btn, w.audio_btn, w.cleanup_btn):

@@ -5,7 +5,7 @@ rem  1) finds Miniconda  2) creates the "video-editing" env
 rem  3) runs the automatic tests
 rem  4) puts AI_Helper_Connect into DaVinci Resolve's Workspace - Scripts menu
 rem  5) makes the desktop shortcut of the AI helper  6) opens the app once
-rem  Run it again after downloading a new version.
+rem  Run it again after downloading a new version (update_windows.bat runs it for you).
 rem ============================================================
 setlocal
 rem UTF-8 console so conda works with Korean Windows user names.
@@ -43,11 +43,17 @@ if not exist "%STATE_DIR%" mkdir "%STATE_DIR%"
 > "%STATE_DIR%\conda_path.txt" echo %CONDA_BAT%
 
 echo.
+rem update_windows.bat sets AIH_UPDATE: a quick update skips the tests (they take minutes).
+if defined AIH_UPDATE goto :skip_tests
 echo [2/4] Running automatic tests...
 call "%CONDA_BAT%" run -n %ENV_NAME% --no-capture-output python -m pytest -q
 if errorlevel 1 (
   echo [WARNING] Some tests failed. Please run check_setup.bat and send the result file.
 )
+goto :tests_done
+:skip_tests
+echo [2/4] Automatic tests skipped for a quick update. If something is wrong, run check_setup.bat.
+:tests_done
 
 rem Files extracted from a downloaded ZIP carry a "from the internet" mark, which makes
 rem Windows show a security warning every time. Clear it for this folder only.

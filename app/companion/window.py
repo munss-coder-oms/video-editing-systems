@@ -2,6 +2,7 @@
 
 위에서 아래로: 머리말(연결 불빛, [연결 확인], ⋯, 타임라인 요약) · 자동화 버튼 1·2·3 · 대화 칸 ·
 [↶ 되돌리기 ▾] [결과 저장]. ⋯ > 연결 점검에는 예전 시험 도구와 [기능 점검]이 있다. ⚙는 버튼 설정 쪽.
+⋯ > 새 판 받기는 확인을 받고 update_windows.bat을 따로 띄운 뒤 창을 닫는다 (띄우는 일은 app/update.py).
 
 이 파일은 얇게 둔다: 화면 조각은 *_view.py / check_page.py / slot_settings.py / cards.py, 연결 상태는
 connection.py, 자동화 버튼의 흐름(계산·카드·넣기·되돌리기)은 runs.py, 작업 스레드는 tasks.py와 jobs.py,
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -21,6 +23,7 @@ from PySide6.QtCore import QEvent, QPoint, QRect, QStandardPaths, Qt, QTimer, QU
 from PySide6.QtGui import QActionGroup, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QMainWindow, QMenu, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
+from engine import __version__ as APP_VERSION
 from engine.resolve_link import SCRIPT_VERSION
 from engine.resolve_link.bridge import BridgeError, BridgeTimeout, LuaBridge, OldScript
 from engine.resolve_link.caps import CapabilityStore
@@ -30,6 +33,7 @@ from engine.resolve_link.probe import ProbeRunner, ProbeStateStore, delete_lefto
 from engine.resolve_link.transport import LuaTransport
 from engine.settings import TEXT_SCALES, Settings
 
+from .. import update as updater
 from . import connection as conn
 from . import report as report_mod
 from . import steps
@@ -58,6 +62,8 @@ FULL_MIN_H = 820  # 이 높이 이상이면 모두 보임
 TILES_MIN_H = 680  # 이 높이 이상이면 버튼을 타일로, 그보다 낮으면 머리말 한 줄
 MODES = ("full", "tiles", "tight")
 CHAT_LOG_MIN = {"full": 100, "tiles": 60, "tight": 40}  # full: 대화 칸 전체가 220 이상 되게
+# 리졸브를 바꾸는 버튼 작업 (도는 동안 새 판 받기를 막는다). 자동화 버튼의 넣기·되돌리기는 runs.writing
+RESOLVE_WRITE_ACTIONS = ("marker", "audio", "cleanup", "probe", "switch", "leftover")
 
 
 def layout_mode(height: int, text_scale: int = 100) -> str:
@@ -194,6 +200,7 @@ class HelperWindow(QMainWindow):
         self.confirm: Callable[[str, str, str], bool] = self._ask  # 시험에서 바꾼다
         # 여러 답 중 하나 (모두 빼기, 되돌리기 확인): 누른 단추의 번호, 닫으면 None. 시험에서 바꾼다
         self.choose: Callable[[str, str, List[str]], Optional[int]] = self._choose
+        self.start_update: Callable[..., Any] = updater.start_update  # 새 판 받기의 검은 창 띄우기. 시험에서 바꾼다
 
         self.setWindowTitle(WINDOW_TITLE)
         self.setMinimumWidth(MIN_WIDTH)
@@ -226,6 +233,9 @@ class HelperWindow(QMainWindow):
             self.log(S.NON_ASCII_MAILBOX.format(path=mailbox))
         if self.settings.moved_bad is not None:
             self.log(S.SETTINGS_MOVED_BAD.format(path=self.settings.moved_bad))
+        new_version = updater.remember_version(self.state_root, APP_VERSION)
+        if new_version:
+            self.chat.add_helper(S.VERSION_CHANGED.format(version=new_version))  # 판이 바뀐 뒤 처음 켤 때 한 번
         self._refresh()
         self.controller.start()
 
@@ -295,6 +305,15 @@ class HelperWindow(QMainWindow):
             group.addAction(act)
             self.scale_actions[scale] = act
         self.more_menu.addAction(S.MENU_HELP, self.show_help)
+        self.more_menu.addSeparator()
+        self.update_action = self.more_menu.addAction(S.MENU_UPDATE, self.on_update)
+        self.more_menu.setToolTipsVisible(True)
+        if updater.supported():
+            self.update_action.setToolTip(S.TIP_UPDATE)
+        else:
+            # 검은 창(update_windows.bat)은 윈도우에만 있다: 보이되 누를 수 없게 두고 까닭을 알린다
+            self.update_action.setEnabled(False)
+            self.update_action.setToolTip(S.TIP_UPDATE_WINDOWS_ONLY)
         self.header.more_btn.setMenu(self.more_menu)
 
     # 예전 창과 같은 이름 (시험과 app/__main__.py가 쓴다)
@@ -963,6 +982,44 @@ class HelperWindow(QMainWindow):
         """대화 칸에 보냄 (흐름은 chat_flow.py). 시간을 풀어야 할 때만 먼저 ping한다."""
         self.chat_flow.send(text)
 
+    # ⋯ > 새 판 받기
+
+    def _writing_to_resolve(self) -> bool:
+        """리졸브를 바꾸는 일이 도는 중 (넣기·되돌리기·지우기·모두 빼기, 시험 도구, 기능 점검).
+
+        계산(쉬는 곳 찾기 등)은 리졸브를 바꾸지 않고 닫을 때 멈추므로 막지 않는다.
+        """
+        return self.runs.writing or self.action in RESOLVE_WRITE_ACTIONS
+
+    @Slot()
+    def on_update(self) -> None:
+        """확인을 받고 update_windows.bat을 새 검은 창에서 띄운 뒤(이 앱의 PID와 설치 폴더) 창을 닫는다.
+
+        검은 창은 이 앱이 끝나기를 기다렸다가 새 판을 받아 같은 폴더에 넣고 앱을 다시 연다.
+        설정과 일지는 바뀔 때마다 저장되므로, 여느 때처럼 창을 닫으면 된다.
+        """
+        if self.closing:
+            return
+        if not updater.supported():
+            self.show_message(S.TIP_UPDATE_WINDOWS_ONLY)
+            return
+        if self._writing_to_resolve():
+            self.show_message(S.UPDATE_BUSY)
+            return
+        if not self.confirm(S.UPDATE_CONFIRM_TITLE, S.UPDATE_CONFIRM, S.BTN_UPDATE):
+            return
+        if self.closing or self._writing_to_resolve():  # 묻는 동안 일이 시작됐을 수 있다
+            self.show_message(S.UPDATE_BUSY)
+            return
+        try:
+            self.start_update(pid=os.getpid(), install=updater.install_dir(),
+                              work=updater.update_dir(self.state_root))
+        except updater.UpdateError as exc:
+            self.log(S.UPDATE_FAILED_LOG.format(detail=exc))
+            self.show_message(S.UPDATE_FAILED.format(reason=S.UPDATE_REASONS.get(exc.reason, exc.reason)))
+            return
+        self.close()
+
     # ── 결과 파일 ──────────────────────────────────────────────────────
 
     def _audio_paths(self) -> List[str]:
@@ -1089,7 +1146,7 @@ class HelperWindow(QMainWindow):
                 problems.append(f"{label}:clipped")
         if self.chat.input.height() < theme.INPUT_H:
             problems.append(f"chat_input:height={self.chat.input.height()}")
-        want = [S.MENU_CHECK_PAGE, S.MENU_REPORT, S.MENU_SETTINGS, S.MENU_HELP]
+        want = [S.MENU_CHECK_PAGE, S.MENU_REPORT, S.MENU_SETTINGS, S.MENU_HELP, S.MENU_UPDATE]
         entries = self.menu_entries()
         problems += [f"menu:{w}" for w in want if w not in entries]
         return problems
