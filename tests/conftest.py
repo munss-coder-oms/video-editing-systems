@@ -293,3 +293,61 @@ def load_mono(path: Path):
         capture_output=True, check=True,
     ).stdout
     return np.frombuffer(raw, dtype=np.float32)
+
+
+# ── 2.1b 자동화 버튼용 ──────────────────────────────────────────────
+
+@pytest.fixture(scope="session")
+def gap_tone(media_dir) -> Path:
+    """1kHz 소리 사이에 0.8초, 1.6초, 3.0초 조용한 곳 (2~2.8, 5~6.6, 9~12초). 모두 14초."""
+    if not _have_ffmpeg():
+        pytest.skip("FFmpeg가 설치되어 있지 않음")
+    path = media_dir / "gap_tone.wav"
+    ffmpeg(
+        "-f", "lavfi", "-i", "sine=f=1000:d=14:r=48000",
+        "-af", "volume='if(between(t,2,2.8)+between(t,5,6.6)+between(t,9,12),0,0.5)':eval=frame",
+        "-c:a", "pcm_s16le", str(path),
+    )
+    return path
+
+
+# OBS 녹화 흉내 (30초, 영상 30fps): 소리 0 = 1~3을 모두 섞은 것, 1 = 목소리, 2 = 게임, 3 = 음악.
+# 목소리는 5~5.8, 10~12, 20~23초에 쉬고, 15~15.5초에 14dB 튄다. 모두 AAC 스테레오.
+OBS_VOICE = ("volume='if(between(t,5,5.8)+between(t,10,12)+between(t,20,23),0,1)"
+             "*if(between(t,15,15.5),5,1)':eval=frame,apulsator=hz=3:amount=0.6")
+OBS_PAUSES = ((5.0, 5.8), (10.0, 12.0), (20.0, 23.0))
+OBS_SPIKE = (15.0, 15.5)
+
+
+def _obs(path: Path, *, mixed: bool) -> Path:
+    mix = "[v2][g2][m2]amix=inputs=3:normalize=0[mix]" if mixed else \
+        "anoisesrc=c=pink:a=0.08:d=30:r=48000:seed=21,aformat=channel_layouts=stereo[mix];" \
+        "[v2]anullsink;[g2]anullsink;[m2]anullsink"
+    ffmpeg(
+        "-f", "lavfi", "-i", "testsrc2=s=160x120:r=30:d=30",
+        "-f", "lavfi", "-i", "anoisesrc=c=pink:a=0.1:d=30:r=48000:seed=1",
+        "-f", "lavfi", "-i", "anoisesrc=c=brown:a=0.3:d=30:r=48000:seed=5",
+        "-f", "lavfi", "-i", "anoisesrc=c=white:a=0.05:d=30:r=48000:seed=7",
+        "-filter_complex",
+        f"[1:a]{OBS_VOICE},aformat=channel_layouts=stereo,asplit=2[v][v2];"
+        "[2:a]lowpass=f=400,aformat=channel_layouts=stereo,asplit=2[g][g2];"
+        "[3:a]highpass=f=3000,aformat=channel_layouts=stereo,asplit=2[m][m2];" + mix,
+        "-map", "0:v", "-map", "[mix]", "-map", "[v]", "-map", "[g]", "-map", "[m]",
+        "-c:v", "mpeg4", "-q:v", "10", "-c:a", "aac", "-b:a", "96k", "-shortest", str(path),
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
+def obs_video(media_dir) -> Path:
+    if not _have_ffmpeg():
+        pytest.skip("FFmpeg가 설치되어 있지 않음")
+    return _obs(media_dir / "obs.mp4", mixed=True)
+
+
+@pytest.fixture(scope="session")
+def obs_video_unmixed(media_dir) -> Path:
+    """obs_video와 같지만 소리 0이 다른 소리들을 섞은 것이 아니다 (따로 녹음한 소음)."""
+    if not _have_ffmpeg():
+        pytest.skip("FFmpeg가 설치되어 있지 않음")
+    return _obs(media_dir / "obs_unmixed.mp4", mixed=False)

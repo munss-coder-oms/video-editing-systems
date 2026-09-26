@@ -18,7 +18,8 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from app.companion import report, steps  # noqa: E402
+from app.companion import connection, report, steps  # noqa: E402
+from app.companion import strings_ko as S  # noqa: E402
 from engine.resolve_link import SCRIPT_VERSION  # noqa: E402
 from engine.resolve_link.bridge import BridgeCancelled, BridgeTimeout  # noqa: E402
 
@@ -172,7 +173,8 @@ def window(qapp, fake, tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
     from app.companion.window import HelperWindow
 
-    w = HelperWindow(bridge=fake, interactive=False, report_dir=tmp_path / "desktop", auto_ping_ms=50)
+    w = HelperWindow(bridge=fake, interactive=False, report_dir=tmp_path / "desktop", auto_ping_ms=50,
+                     state_root=tmp_path / "state", process_check=None)
     w.show()
     qapp.processEvents()
     yield w
@@ -209,9 +211,10 @@ def click(qapp, window, button) -> None:
 def test_window_builds_and_waits_for_resolve(qapp, window, fake):
     from app.companion import window as win
 
-    assert window.windowTitle() == "AI 도우미 - 리졸브 연결 시험"
+    assert window.windowTitle() == S.WINDOW_TITLE == "AI 편집 도우미"
     assert window.width() <= win.WINDOW_WIDTH
-    assert "AI_Helper_Connect" in window.status.text()
+    assert window.status.text() == "연결 안 됨"
+    assert "AI_Helper_Connect" in window.header.hint.text() and window.header.hint.isVisible()
     wait_until(qapp, lambda: window.session.auto_attempts >= 2)
     assert not window.connected
     assert window.connect_btn.isEnabled() and window.report_btn.isEnabled()
@@ -307,7 +310,7 @@ def test_timeout_during_action_goes_back_to_waiting(qapp, window, fake):
     fake.online = False
     click(qapp, window, window.marker_btn)
     assert not window.connected
-    assert "AI_Helper_Connect" in window.status.text()
+    assert window.status.text() == "연결 안 됨" and "AI_Helper_Connect" in window.header.hint.text()
     assert not window.marker_btn.isEnabled() and window.connect_btn.isEnabled()
     rec = window.session.steps["marker"]
     assert not rec.ok and rec.error["type"] == "BridgeTimeout"
@@ -333,6 +336,8 @@ def test_auto_check_with_slow_state_is_connected(qapp, window, fake):
     connect(qapp, window, fake)
     rec = window.session.steps["connect"]
     assert rec.ok and "DaVinci Resolve 21.1.0.0" in rec.summary and "답이 늦습니다" in rec.summary
+    # ping에는 답했는데 읽기가 늦다: "연결 안 됨"이 아니라 "리졸브가 바빠요" (대화 상자를 닫아 달라고)
+    assert window.status.text() == "리졸브가 바빠요" and window.connect_btn.text() == "다시 시도"
     assert rec.data["ping"]["resolve_version"] == "21.1.0.0"
     assert rec.data["state_error"]["type"] == "BridgeTimeout"
     assert window.info["version"].text() == "DaVinci Resolve 21.1.0.0"
@@ -362,7 +367,8 @@ def test_unreadable_answers_stop_auto_checks(qapp, window, fake, monkeypatch):
     fake.prefs_changed = [str(fake.prefs)]
     wait_until(qapp, lambda: window.auto_stopped)
     attempts = window.session.auto_attempts
-    assert attempts == win.UNREAD_LIMIT
+    # 창을 띄우자마자 나간 첫 확인은 prefs_changed를 바꾸기 전에 끝났을 수 있다 (정확한 수는 test_connection.py)
+    assert win.UNREAD_LIMIT <= attempts <= win.UNREAD_LIMIT + 1
     assert window.message.text() == win.UNREAD_TEXT
     rec = window.session.steps["connect"]
     assert not rec.ok and rec.error["prefs_changed"] == [str(fake.prefs)]
@@ -380,7 +386,7 @@ def test_unreadable_answers_stop_auto_checks(qapp, window, fake, monkeypatch):
 def test_auto_checks_slow_down_after_a_while(qapp, window, fake, monkeypatch):
     from app.companion import window as win
 
-    monkeypatch.setattr(win, "AUTO_SLOW_AFTER", 3)
+    monkeypatch.setattr(connection, "AUTO_SLOW_AFTER", 3)
     wait_until(qapp, lambda: window.timer.interval() == win.AUTO_PING_SLOW_MS)
     assert window.session.auto_attempts >= 3
     fake.online = True
@@ -390,7 +396,7 @@ def test_auto_checks_slow_down_after_a_while(qapp, window, fake, monkeypatch):
 
 def test_late_answers_make_auto_check_wait_longer(qapp, window, fake):
     fake.late_answers = [{"id": 1, "op": "ping", "owner": "o1", "ok": True}]
-    wait_until(qapp, lambda: window._auto_step is steps.connect_step)
+    wait_until(qapp, lambda: window._auto_step is connection.panel_connect_step)
     assert "늦게" in window.link_info()["auto_note"]
 
 
@@ -412,10 +418,11 @@ def test_report_has_step_summary_and_raw_answers(qapp, window, fake, tmp_path):
     window.report_btn.click()
     wait_until(qapp, lambda: window.last_report is not None)
     path = window.last_report
-    assert path == tmp_path / "desktop" / "AI도우미_연결시험_결과.txt"
+    assert path.parent == tmp_path / "desktop"
+    assert re.fullmatch(r"AI도우미_결과_\d{8}-\d{4}\.txt", path.name)
     text = path.read_text(encoding="utf-8-sig")
     lines = text.splitlines()
-    assert lines[0] == "AI 도우미 - 리졸브 연결 시험 결과"
+    assert lines[0] == report.REPORT_TITLE
     assert '① 연결: 됨 - DaVinci Resolve 21.1.0.0 / 프로젝트 "시험 프로젝트" / 타임라인 "타임라인 1"' in lines
     assert any(line.startswith("② 표시 찍기: 됨 - 타임라인 시작에서 240프레임") for line in lines)
     assert any(line.startswith("③ 소리 넣기: 안 됨 - 리졸브가 대답하지 않습니다.") for line in lines)
@@ -500,7 +507,8 @@ def test_window_opens_even_when_mailbox_cannot_be_ascii(qapp, tmp_path, monkeypa
 def test_close_stops_worker_and_bridge(qapp, fake, tmp_path):
     from app.companion.window import HelperWindow
 
-    w = HelperWindow(bridge=fake, interactive=False, report_dir=tmp_path, auto_ping_ms=50)
+    w = HelperWindow(bridge=fake, interactive=False, report_dir=tmp_path, auto_ping_ms=50,
+                     state_root=tmp_path / "state", process_check=None)
     w.show()
     wait_until(qapp, lambda: w.session.auto_attempts >= 1)
     w.close()
@@ -642,7 +650,8 @@ def test_helper_smoke_test_command(tmp_path):
     assert "HELPER SMOKE OK" in proc.stdout
     state = tmp_path / "Local" / "video-editing-systems"
     assert (state / "window_ok.flag").is_file()
-    assert (state / "AI도우미_연결시험_결과.txt").is_file()
+    assert len(list(state.glob("AI도우미_결과_*.txt"))) == 1
+    assert "3 slots" in proc.stdout  # 자동화 버튼 3개, 대화 입력 칸, ⋯ 메뉴, 아래쪽이 보이는지도 확인한다
     installed = list((tmp_path / "Roaming").rglob("AI_Helper_Connect.lua"))
     assert len(installed) == 1
     text = installed[0].read_text(encoding="utf-8")

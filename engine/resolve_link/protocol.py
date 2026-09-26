@@ -21,8 +21,29 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 PROTOCOL_VERSION = 1
 REQUEST_FILENAME = "request.lua"
 
-# Lua가 처리하는 작업 목록 (이 밖의 이름은 보내지 않는다)
+# Lua가 처리하는 작업 목록 (이 밖의 이름은 보내지 않는다).
+# Lua 스크립트의 OPS_ALLOWED와 같아야 한다 (tests/test_lua_script.py가 맞춰 본다).
 OPS = (
+    "ping",
+    "state",
+    "timeline_info",
+    "timeline_items",
+    "scope",
+    "probe_read",
+    "probe_copy",
+    "switch_timeline",
+    "add_marker",
+    "add_markers",
+    "get_markers",
+    "delete_markers",
+    "jump_to",
+    "place_audio",
+    "remove_audio",
+    "stop",
+)
+
+# 1.0.0 스크립트(1차 시험판)가 아는 작업. ping 답에 ops 목록이 없으면 이것으로 본다.
+LEGACY_OPS = (
     "ping",
     "state",
     "add_marker",
@@ -32,6 +53,9 @@ OPS = (
     "remove_audio",
     "stop",
 )
+
+# 요청 한 개의 최대 크기. 이보다 크면 보내지 않는다 (Lua가 한 번에 읽는 파일이 너무 커지지 않게).
+MAX_REQUEST_BYTES = 256 * 1024
 
 RESPONSE_RE = re.compile(r"AIH1:([0-9A-Za-z_]+):(\d+):([0-9a-f]*)")
 
@@ -112,10 +136,13 @@ def encode_request(
     if t is None:
         t = int(time.time())
     body = _lua_value(dict(args or {}), 0)
-    return (
+    text = (
         f"return {{v={PROTOCOL_VERSION},id={_lua_value(req_id, 0)},t={_lua_value(int(t), 0)},"
         f'op="{op}",a={body}}}'
     )
+    if len(text.encode("utf-8")) > MAX_REQUEST_BYTES:
+        raise ValueError(f"요청이 너무 큽니다: {len(text)}바이트 (최대 {MAX_REQUEST_BYTES})")
+    return text
 
 
 @dataclass(frozen=True)

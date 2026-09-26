@@ -11,7 +11,7 @@ import functools
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from engine.resolve_link.bridge import BridgeCancelled, BridgeError, BridgeTimeout
+from engine.resolve_link.bridge import OLD_SCRIPT_MESSAGE, BridgeCancelled, BridgeError, BridgeTimeout
 from engine.resolve_link.testfiles import TEST_TONE_NAME, make_test_tone
 from engine.resolve_link.timecode import is_drop_frame, parse_fps, tc_offset, tc_to_frames
 
@@ -73,6 +73,10 @@ _ERROR_TEXT = {
     "add_track_failed": "리졸브가 오디오 트랙을 추가하지 못했습니다.",
     "track_count_failed": "리졸브가 오디오 트랙 수를 알려 주지 않았습니다.",
     "too_large": "리졸브의 답이 너무 커서 받지 못했습니다.",
+    "need_edit_page": "리졸브 편집(Edit) 화면에서 눌러 주세요. 트랙은 편집 화면에서만 지웁니다.",
+    "unknown_op": OLD_SCRIPT_MESSAGE,
+    "not_original": "점검 때 적어 둔 원래 타임라인이 아니라서 옮기지 않았습니다.",
+    "timeline_not_found": "원래 타임라인을 찾지 못했습니다. 리졸브에서 직접 골라 주세요.",
 }
 
 
@@ -355,11 +359,15 @@ def summarize(name: str, out: Out) -> Tuple[bool, str]:
             return False, "트랙은 만들었지만 소리가 타임라인에 올라가지 않았습니다 (AppendToTimeline이 빈 답)."
         text = (f"오디오 트랙 {audio.get('track_index')}번(\"{TEST_NAME}\")에 "
                 f"{TONE_SECONDS:g}초짜리 시험 소리를 넣었습니다.")
+        if audio.get("length_ok") is False:
+            # 1.1.0 스크립트는 놓인 길이(GetEnd - GetStart)를 다시 읽어 알려 준다
+            text += (f" 그런데 {out.get('frames')}프레임을 부탁했는데 {audio.get('placed_frames')}프레임으로 "
+                     "놓였습니다.")
         if audio.get("track_named") is False:
             # 이름이 없으면 [시험 흔적 지우기]가 이 트랙을 찾지 못한다
             return False, text + (f" 그런데 트랙 이름을 \"{TEST_NAME}\"로 바꾸지 못해 [시험 흔적 지우기]로는 "
                                   "지워지지 않습니다. 리졸브에서 직접 지워 주세요.")
-        return True, text
+        return audio.get("length_ok") is not False, text
     if name == "cleanup":
         problems = [out[k]["message"] for k in ("delete_markers_error", "remove_audio_error") if k in out]
         removed = (out.get("remove_audio") or {}).get("removed_tracks", 0)

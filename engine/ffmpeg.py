@@ -14,6 +14,9 @@ from typing import Callable, Optional, Sequence
 
 # 윈도우에서 FFmpeg 콘솔 창이 깜빡이지 않게 한다.
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+# 리졸브가 쓰는 CPU를 덜 빼앗게 낮은 우선순위로 돌릴 때 (윈도우 BELOW_NORMAL_PRIORITY_CLASS)
+_BELOW_NORMAL_PRIORITY_CLASS = 0x00004000 if sys.platform == "win32" else 0
+_POSIX_NICE = 10
 
 ProgressCallback = Callable[[float], None]
 """0.0~1.0 사이 진행률을 받는 함수."""
@@ -64,11 +67,13 @@ def run(
     duration: Optional[float] = None,
     progress: Optional[ProgressCallback] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
+    priority: Optional[str] = None,
 ) -> subprocess.CompletedProcess:
     """FFmpeg/ffprobe를 실행하고 stdout·stderr를 문자열로 돌려준다.
 
     duration과 progress를 주면 FFmpeg의 -progress 출력을 읽어 진행률을 알린다.
     is_cancelled가 True를 돌려주면 프로세스를 끝내고 Cancelled를 던진다.
+    priority="below_normal": 리졸브를 쓰는 동안 도는 분석이 재생을 덜 방해하게 낮은 우선순위로 돌린다.
     """
     cmd = [find_tool(tool)]
     if tool == "ffmpeg":
@@ -76,6 +81,9 @@ def run(
         if progress and duration:
             cmd += ["-progress", "pipe:1", "-nostats"]
     cmd += list(args)
+    if priority not in (None, "normal", "below_normal"):
+        raise ValueError(f"알 수 없는 우선순위: {priority!r}")
+    low = priority == "below_normal"
 
     proc = subprocess.Popen(
         cmd,
@@ -83,8 +91,13 @@ def run(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        creationflags=_CREATE_NO_WINDOW,
+        creationflags=_CREATE_NO_WINDOW | (_BELOW_NORMAL_PRIORITY_CLASS if low else 0),
     )
+    if low and sys.platform != "win32":
+        try:
+            os.setpriority(os.PRIO_PROCESS, proc.pid, _POSIX_NICE)
+        except (AttributeError, OSError):  # 우선순위를 못 바꿔도 분석은 그대로 한다
+            pass
 
     # stderr는 분석 결과(ebur128 등)가 길게 나오므로 별도 스레드 없이
     # communicate로 모으고, 진행률이 필요할 때만 stdout을 줄 단위로 읽는다.
