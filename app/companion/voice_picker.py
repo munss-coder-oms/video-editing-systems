@@ -9,6 +9,7 @@
 - 할 일(들어 보고 골라 주세요)은 보통 글, 섞은 소리 추정은 작은 글. 줄의 꼬리표("전체 소리 (추정)")는
   한 덩어리로 줄을 바꾼다 (낱말 사이를 줄 바꿈 없는 빈칸으로).
 - [▶ 3초 듣기]와 [■ 듣는 중]은 너비가 같다 (StableButton: 글꼴이 입혀진 뒤 두 글 중 넓은 쪽으로).
+- 줄 너비가 "소리 N"과 두 단추에 모자라면 단추를 글 아래로 내린다 (ReflowRow: 좁은 창·넓은 글꼴에서 "소리 N"이 잘리지 않게).
 - "같이 꺼야 두 번 들리지 않아요"(트랙 끄기 제안)는 트랙을 바꾸는 일이라 2.2에서 더한다. 지금은 알리기만 한다.
 """
 
@@ -18,6 +19,7 @@ from typing import Dict, List, Optional
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QHBoxLayout,
     QPushButton,
     QSizePolicy,
@@ -63,6 +65,50 @@ class StableButton(QPushButton):
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
         return self.sizeHint()
+
+
+class ReflowRow(QWidget):
+    """왼쪽 글 + 오른쪽 단추 한 줄. 너비가 모자라면 단추를 글 아래 줄로 내린다.
+
+    한 줄에 두면 좁은 창이나 넓은 글꼴(윈도우 검사: 380px, 글자 130%)에서 단추는 그대로이고
+    "소리 1"만 눌려 잘렸다. 방향은 받은 너비로만 정하므로 크기가 바뀌어도 오가며 흔들리지 않는다.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.box = QBoxLayout(QBoxLayout.LeftToRight, self)
+        self.box.setContentsMargins(0, 2, 0, 2)
+        self.box.setSpacing(6)
+        self.keep_whole: Optional[QWidget] = None  # 잘리면 안 되는 글 ("소리 1")
+        self.side: Optional[QHBoxLayout] = None  # 오른쪽 단추들
+
+    def needed_width(self) -> int:
+        if self.keep_whole is None or self.side is None:
+            return 0
+        m = self.box.contentsMargins()
+        return (self.keep_whole.sizeHint().width() + self.box.spacing() + self.side.sizeHint().width()
+                + m.left() + m.right())
+
+    def _reflow(self, width: int) -> None:
+        want = QBoxLayout.LeftToRight if width >= self.needed_width() else QBoxLayout.TopToBottom
+        if self.box.direction() != want:
+            self.box.setDirection(want)
+            if self.side is not None:
+                self.box.setAlignment(self.side, Qt.AlignLeft if want == QBoxLayout.TopToBottom else Qt.Alignment())
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 이름
+        self._reflow(event.size().width())
+        super().resizeEvent(event)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        # 아래로 내린 모양의 최소 너비: 한 줄 모양의 최소 너비 때문에 카드가 대화 칸보다 넓어지지 않게
+        hint = super().minimumSizeHint()
+        if self.side is None:
+            return hint
+        m = self.box.contentsMargins()
+        width = max(self.side.minimumSize().width(),
+                    self.keep_whole.sizeHint().width() if self.keep_whole is not None else 0)
+        return QSize(min(hint.width(), width + m.left() + m.right()), hint.height())
 
 
 def doubled_text(mix: Optional[int]) -> str:
@@ -117,10 +163,8 @@ class VoicePickerCard(Card):
         self.set_buttons([("cancel", S.BTN_CANCEL, False)])
 
     def _row(self, choice) -> QWidget:
-        row = QWidget()
-        box = QHBoxLayout(row)
-        box.setContentsMargins(0, 2, 0, 2)
-        box.setSpacing(6)
+        row = ReflowRow()
+        box = row.box
         text = QVBoxLayout()
         text.setSpacing(0)
         name = _label(S.VOICE_STREAM.format(n=choice.index + 1), "card-title", wrap=False)
@@ -136,8 +180,12 @@ class VoicePickerCard(Card):
         pick.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         pick.setAccessibleName(f"{S.VOICE_STREAM.format(n=choice.index + 1)} {S.BTN_PICK}")
         pick.clicked.connect(lambda _=False, i=choice.index: self._pick(i))
-        box.addWidget(listen)
-        box.addWidget(pick)
+        side = QHBoxLayout()
+        side.setSpacing(6)
+        side.addWidget(listen)
+        side.addWidget(pick)
+        box.addLayout(side)
+        row.keep_whole, row.side = name, side
         self.listen_buttons[choice.index] = listen
         self.pick_buttons[choice.index] = pick
         return row

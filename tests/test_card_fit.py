@@ -185,12 +185,14 @@ def _resize(qapp, w, width, height):
     settle(qapp, 0.08)
 
 
-@pytest.mark.parametrize("scale", [150, 170])
-def test_stepper_values_stay_whole_with_wider_letters(qapp, make_window, resolve, monkeypatch, scale):
-    """[−] 값 [+]의 값은 잘리지 않는다: 자리가 모자라면 이름 아래 줄로 내려간다.
+@pytest.mark.parametrize("scale", [160, 195])
+@pytest.mark.parametrize("height", [900, 640])
+def test_every_card_fits_with_wider_letters(qapp, make_window, resolve, monkeypatch, height, scale):
+    """글꼴이 넓어도 카드 안의 글이 잘리지 않는다: 자리가 모자라면 줄을 바꾼다.
 
-    윈도우 글꼴(맑은 고딕)은 여기 글꼴보다 넓어서, 400px 창·글자 130%에서 '6dB (기본값)'이
-    한 줄 칸에 4px 모자라 잘렸다 (윈도우 검사). 여기서는 글자를 더 키워 같은 상황을 만든다.
+    윈도우 검사의 글꼴은 여기보다 1.5배쯤 넓었다 (글자 130%에서 '소리 1' 80px, 여기는 53px).
+    그래서 '6dB (기본값)'(400px 창)과 목소리 카드의 '소리 1'(380px 창)이 여기서는 맞고 윈도우에서만 잘렸다.
+    여기서는 글자를 더 키워 같은 상황을 만든다 ([−] 값 [+]와 목소리 줄의 단추가 아랫줄로 내려가야 맞는다).
     """
     from app.companion import window as window_mod
 
@@ -199,18 +201,14 @@ def test_stepper_values_stay_whole_with_wider_letters(qapp, make_window, resolve
     w = make_window(fake)
     wait_until(qapp, lambda: w.connected and w.pending == 0)
     w.apply_text_scale(scale, save=False)
-    _resize(qapp, w, 460, 900)
+    _resize(qapp, w, 460, height)
     cards = build_all_cards(qapp, w, fr)
-    steppers = {name: card for name, card in cards.items()
-                if any(k.startswith("dec:") and not k.startswith("dec:at:") for k in getattr(card, "extra", {}))}
-    assert "offer_audio" in steppers and len(steppers) >= 2, sorted(steppers)
     for width in WIDTHS:
-        _resize(qapp, w, width, 900)
-        for card in steppers.values():
+        _resize(qapp, w, width, height)
+        for card in cards.values():
             w.chat.log.ensureWidgetVisible(card, 0, 0)
         settle(qapp, 0.03)
-        problems = [p for p in fit_problems(w, steppers) if "dB" in p[1] or "초" in p[1]]
-        assert problems == [], (width, scale)
+        assert fit_problems(w, cards) == [], (width, height, scale)
 
 
 @pytest.mark.parametrize("scale", [100, 130])
