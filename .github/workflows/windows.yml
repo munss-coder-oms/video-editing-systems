@@ -107,7 +107,7 @@ jobs:
           call "%CONDA%\condabin\conda.bat" activate video-editing
           python -m app --helper-smoke-test || exit /b 1
 
-      - name: AI 도우미 창 150% 배율 (1080p 노트북에서 흔한 배율: 좁은 모양으로도 잘리지 않는지)
+      - name: AI 도우미 창 150% 배율 (1080p 노트북에서 흔한 배율, 좁은 모양으로도 잘리지 않는지)
         shell: cmd
         env:
           QT_SCALE_FACTOR: "1.5"
