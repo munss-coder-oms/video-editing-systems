@@ -900,6 +900,170 @@ def test_close_stops_waiting(link_env):
         b.ping(timeout=1)
 
 
+# ── 2차(스크립트 1.1.0) 창구: 요청 파일 지우기, 멈추기, 크기 한도, 예전 스크립트, 큰 답 뒤 ping, 다시 읽기 ──
+
+
+def test_request_file_removed_after_answer(link_env):
+    link_env["start"]()
+    b = LuaBridge(poll_interval=0.02)
+    b.state(timeout=5)
+    assert not (link_env["mailbox"] / "request.lua").exists()  # Lua가 같은 파일을 계속 다시 읽지 않게
+
+
+def test_cancel_event_stops_waiting_and_removes_request(link_env):
+    b = LuaBridge(poll_interval=0.02)
+    cancel = threading.Event()
+    errors = []
+
+    def waiting():
+        try:
+            b.request("timeline_info", timeout=30, cancel=cancel)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t = threading.Thread(target=waiting)
+    start = time.monotonic()
+    t.start()
+    time.sleep(0.2)
+    cancel.set()
+    t.join(timeout=5)
+    assert time.monotonic() - start < 3
+    assert len(errors) == 1 and isinstance(errors[0], BridgeCancelled)
+    assert "멈췄" in str(errors[0])
+    assert not (link_env["mailbox"] / "request.lua").exists()
+    # 이미 켜진 cancel이면 보내지도 않는다
+    with pytest.raises(BridgeCancelled):
+        b.request("ping", cancel=cancel)
+    assert b.request_count == 1
+
+
+def test_request_size_limit():
+    from engine.resolve_link.protocol import MAX_REQUEST_BYTES
+
+    text = encode_request(1, "add_marker", {"note": "가" * 1000})
+    assert len(text) < MAX_REQUEST_BYTES
+    with pytest.raises(ValueError):
+        encode_request(1, "add_marker", {"note": "가" * (MAX_REQUEST_BYTES // 6 + 10)})
+
+
+def _ping_with_ops(ops):
+    def handler(req):
+        if req["op"] == "ping":
+            return {"ok": True, "sv": SCRIPT_VERSION, "result": {"ops": ops, "owner": "o1700000000_4242"}}
+        return {"ok": True, "sv": SCRIPT_VERSION, "result": {"op": req["op"]}}
+    return handler
+
+
+def test_old_script_from_handshake_is_not_sent(link_env):
+    from engine.resolve_link.bridge import OldScript
+
+    fake = link_env["start"](handler=_ping_with_ops(["ping", "state", "stop"]))
+    b = LuaBridge(poll_interval=0.02)
+    b.ping(timeout=5)
+    assert b.supports("state") is True and b.supports("timeline_info") is False
+    with pytest.raises(OldScript) as info:
+        b.request("timeline_info", timeout=5)
+    assert "한 번 더 눌러" in str(info.value) and info.value.error == "unknown_op"
+    assert isinstance(info.value, BridgeError)
+    assert [r["op"] for r in fake.requests] == ["ping"]  # 보내지 않았다
+    assert b.state(timeout=5) == {"op": "state"}
+
+
+def test_old_script_without_ops_list_uses_legacy_set(link_env):
+    from engine.resolve_link.bridge import OldScript
+
+    fake = link_env["start"]()  # 1.0.0처럼 ping 답에 ops가 없다
+    b = LuaBridge(poll_interval=0.02)
+    b.ping(timeout=5)
+    with pytest.raises(OldScript):
+        b.request("probe_read")
+    assert b.get_markers(timeout=5) == {"op": "get_markers"}
+    assert [r["op"] for r in fake.requests] == ["ping", "get_markers"]
+
+
+def test_unknown_op_answer_becomes_old_script(link_env):
+    from engine.resolve_link.bridge import OldScript
+
+    link_env["start"](handler=lambda req: {"ok": False, "sv": "1.0.0", "error": "unknown_op", "func": "request"})
+    b = LuaBridge(poll_interval=0.02)
+    with pytest.raises(OldScript) as info:
+        b.request("scope", timeout=5)  # ping 전이라 목록을 모르면 보내 보고, Lua의 답으로 안다
+    assert info.value.op == "scope" and info.value.payload["error"] == "unknown_op"
+
+
+def test_owner_change_forgets_ops_list(link_env):
+    fake = link_env["start"](handler=_ping_with_ops(["ping", "stop"]))
+    b = LuaBridge(poll_interval=0.02)
+    b.ping(timeout=5)
+    assert b.supports("state") is False
+    fake.owner = "o1700000001_1"  # 스크립트를 다시 눌러 새 반복이 답함
+    b.request("stop", timeout=5)
+    assert b.supports("state") is None
+
+
+def test_large_response_is_followed_by_a_tiny_ping(link_env):
+    def handler(req):
+        if req["op"] == "timeline_items":
+            return {"ok": True, "sv": SCRIPT_VERSION, "result": {"items": ["x" * 100] * 300}}
+        return {"ok": True, "sv": SCRIPT_VERSION, "result": {"op": req["op"], "ops": list(OPS)}}
+
+    fake = link_env["start"](handler=handler)
+    b = LuaBridge(poll_interval=0.02)
+    big = b.request("timeline_items", timeout=5)
+    assert len(big["items"]) == 300
+    assert [r["op"] for r in fake.requests] == ["timeline_items", "ping"]
+    assert b.cleanup_pings == 1
+    b.request("scope", timeout=5)  # 작은 답 뒤에는 보내지 않는다
+    assert [r["op"] for r in fake.requests] == ["timeline_items", "ping", "scope"]
+
+
+def test_read_is_retried_once_silently(link_env):
+    seen = []
+
+    def writer(prefs, full, req):
+        seen.append(req["op"])
+        if len(seen) == 1:
+            return  # 첫 요청에는 답하지 않는다 (리졸브가 잠깐 바쁨)
+        prefs.write_text(full, encoding="utf-8")
+
+    link_env["start"](writer=writer)
+    b = LuaBridge(poll_interval=0.02)
+    assert b.request("timeline_info", timeout=0.5) == {"op": "timeline_info"}
+    assert seen == ["timeline_info", "timeline_info"] and b.read_retries == 1
+
+
+def test_mutating_op_is_never_resent(link_env):
+    seen = []
+    link_env["start"](writer=lambda prefs, full, req: seen.append(req["op"]))
+    b = LuaBridge(poll_interval=0.02)
+    with pytest.raises(BridgeTimeout):
+        b.request("add_marker", {"frame": 1}, timeout=0.3)
+    assert seen == ["add_marker"] and b.read_retries == 0
+    assert list(b.timed_out.values()) == ["add_marker"]
+
+
+def test_per_op_default_timeouts():
+    assert bridge_mod.OP_TIMEOUTS["ping"] == 5.0
+    assert bridge_mod.OP_TIMEOUTS["probe_copy"] == 120.0
+    assert bridge_mod.OP_TIMEOUTS["timeline_items"] == 30.0
+    assert set(bridge_mod.OP_TIMEOUTS) == set(OPS)
+    assert bridge_mod.READ_OPS <= set(OPS)
+    assert "add_marker" not in bridge_mod.READ_OPS and "probe_copy" not in bridge_mod.READ_OPS
+
+
+def test_default_timeout_is_used_when_none_given(link_env):
+    ticks = {"t": 0.0}
+
+    def clock():
+        ticks["t"] += 1.0
+        return ticks["t"]
+
+    b = LuaBridge(clock=clock, poll_interval=0.001)
+    with pytest.raises(BridgeTimeout):
+        b.request("ping")
+    assert 5 <= ticks["t"] < 20  # ping 5초 (다시 보내지 않음), 읽기(30초 + 한 번 더)보다 훨씬 짧다
+
+
 def test_fusion_prefs_backed_up_once(link_env):
     link_env["start"]()
     backup = link_env["tmp"] / "state" / "video-editing-systems" / "backup"

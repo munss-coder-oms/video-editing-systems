@@ -8,7 +8,7 @@
 """
 
 # 설치하는 Lua 스크립트의 버전. 답(sv)에 실려 오므로 예전 스크립트가 도는지 알 수 있다.
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.1.0"
 
 # 리졸브 Scripts 메뉴에 보이는 이름 (파일 이름에서 .lua를 뺀 것)
 SCRIPT_NAME = "AI_Helper_Connect"

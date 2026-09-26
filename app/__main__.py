@@ -4,7 +4,7 @@ pythonw로 실행하면 콘솔이 없어 오류가 보이지 않으므로,
 실행 과정과 오류를 로그 파일에 남기고 창으로도 알린다 (PRD 7.4 원칙 6).
 Qt(PySide6)를 불러오지 못한 경우에도 윈도우 기본 알림 창으로 알린다.
 
-    python -m app                      AI 도우미 창 (리졸브 연결 시험판)
+    python -m app                      AI 편집 도우미 창 (자동화 버튼 + 대화 칸, ⋯ > 연결 점검)
     python -m app --legacy             예전 창 (영상을 넣어 음량 정리 → 리졸브용 파일 내보내기)
     python -m app --smoke-test 영상    예전 창을 띄우고 영상을 처리한 뒤 스스로 종료 (자동 검사용)
     python -m app --helper-smoke-test  스크립트를 설치하고 AI 도우미 창을 띄운 뒤 스스로 종료 (자동 검사용)
@@ -226,6 +226,17 @@ def _run_helper_smoke_test(app, window, install, QTimer) -> int:
             return
         print(f"스크립트: {paths[0]}", flush=True)
 
+    def check_panel():
+        # 자동화 버튼 3개, 대화 입력 칸, ⋯ 메뉴 항목, 아래쪽 버튼이 잘리지 않고 보이는지 (QT_SCALE_FACTOR 1.0/1.5)
+        problems = window.smoke_check()
+        metrics = window.screen_metrics()
+        print(f"화면: {metrics.get('available')} 배율 {metrics.get('device_pixel_ratio')} "
+              f"창 {metrics.get('window')} 모양 {metrics.get('layout')}", flush=True)
+        if problems:
+            finish(1, f"HELPER SMOKE FAIL: 창이 제대로 보이지 않음 {problems}")
+            return
+        print(f"창 모양: 3 slots, chat input, menu {window.menu_entries()}, footer - 보임", flush=True)
+
     def save_report():
         if window.session.auto_attempts < 1:
             finish(1, "HELPER SMOKE FAIL: 리졸브 연결 확인을 한 번도 하지 않음")
@@ -250,6 +261,7 @@ def _run_helper_smoke_test(app, window, install, QTimer) -> int:
     tick_timer.timeout.connect(tick)
     tick_timer.start(100)
     QTimer.singleShot(500, check_install)
+    QTimer.singleShot(1500, check_panel)
     QTimer.singleShot(3500, save_report)
     timer = QTimer()
     timer.timeout.connect(poll)

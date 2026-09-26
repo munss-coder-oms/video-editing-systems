@@ -78,5 +78,6 @@ echo.
 echo  Log files are in: %LOGDIR%
 echo  Please run check_setup.bat and send the result file (setup_check_result.txt).
 echo.
-if not defined NOPAUSE pause
-exit /b 1
+if defined NOPAUSE exit /b 1
+rem One line on purpose: a later update may replace this file while this window waits at pause.
+pause & exit /b 1

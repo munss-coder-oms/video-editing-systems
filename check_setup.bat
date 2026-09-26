@@ -62,6 +62,7 @@ if exist "%AIH_LUA%" >> "%RESULT%" echo [OK] Resolve script AI_Helper_Connect.lu
 if not exist "%AIH_LUA%" >> "%RESULT%" echo [PROBLEM] Resolve script AI_Helper_Connect.lua not found: "%AIH_LUA%" - run setup_windows.bat again.
 echo.
 echo Result saved to: %RESULT%
-if not defined NOPAUSE start "" notepad "%RESULT%"
-if not defined NOPAUSE pause
-exit /b %RC%
+if defined NOPAUSE exit /b %RC%
+start "" notepad "%RESULT%"
+rem One line on purpose: a later update may replace this file while this window waits at pause.
+pause & exit /b %RC%

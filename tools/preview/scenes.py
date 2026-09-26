@@ -1,0 +1,1316 @@
+"""미리보기 단계: 2.1 시험 안내(guides/도우미창-2.1-시험-안내.md)의 순서대로 창을 누르고 찍는다.
+
+단계마다 제목, 할 일, 보이는 것, (있으면) 알아 둘 것과 찾은 문제, 안내 번호, 그림. 글 속 단추와 문구는
+strings_ko나 창에서 그대로 가져오고, 설명에 적은 문구가 창에 정말 있는지 expect()로 확인한다 (없으면 그 단계에서
+멈춘다). [...]는 단추, '...'는 창에 보이는 문구다 (page.py가 단추 모양으로 그린다). 창의 문구 바로 뒤에는 조사를
+붙이지 않는다 (문구마다 받침이 달라서): "맨 위: '...'"처럼 적는다.
+
+- 안내의 한 줄이 창에서 여러 번 누르는 일이면 단계를 나눈다 (같은 안내 번호).
+- 안내에 없는 것(연결 전, 옛 스크립트, 리졸브를 껐을 때, 새 판 받기, 작은 화면)은 따로 모았다 (안내 번호 없음).
+- 미리보기에서 할 수 없는 것(소리 듣기, 리졸브의 Ctrl+Z와 자르기)은 알아 둘 것에 적는다.
+- 찍으면서 잰 창의 문제(잘린 단추, 흐린 글씨 등)는 찾은 문제(issues)에 적는다.
+"""
+
+from __future__ import annotations
+
+import re
+import threading
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
+
+from PySide6.QtCore import Qt
+
+from app.companion import strings_ko as S
+from app.companion import fmt
+from app.companion.cards import ClearCard, ProposalCard, QuestionCard, clear_colors, clear_keep, voice_row_text
+from app.companion.runs import undo_what
+from app.companion.voice_picker import VoicePickerCard, doubled_text
+from engine.resolve_link import SCRIPT_NAME
+from engine.settings import TEXT_SCALES
+
+from .director import ISSUE_NOT_SHOWN, Director, Image
+from .world import TEST_NAME
+
+SECTIONS = (
+    ("connect", "연결과 기능 점검"),
+    ("pauses", "버튼 1 · 쉬는 곳 표시"),
+    ("spikes", "버튼 2 · 튀는 소리 표시"),
+    ("chat", "대화 칸"),
+    ("undo", "모두 빼기와 결과 저장"),
+    ("trouble", "이럴 때는"),
+    ("small", "작은 화면"),
+)
+GEAR = f"{S.SLOT_SETTINGS}︎"  # 톱니바퀴를 그림 글자가 아닌 글자로
+STRIP_NOTE = "아래 줄은 리졸브 화면이 아니라, 가짜 리졸브가 받은 표시를 그린 흉내 그림이에요."
+BUTTON_PARTICLE = re.compile(r"\[([^\[\]]+)\](을|를|은|는|이|가|과|와|으로|로)(?=[\s.,)]|$)")
+
+
+@dataclass
+class Step:
+    do: str
+    see: str
+    images: List[Image]
+    note: str = ""
+    issues: List[str] = field(default_factory=list)  # 찍으면서 찾은 창의 문제
+
+
+@dataclass
+class Scene:
+    key: str
+    section: str
+    guide: Optional[int]
+    title: str
+    run: Callable[["Flow"], Step]
+    media: bool = True  # 녹화 파일(소리 계산)이 있어야 하는 단계
+    subprocess: bool = False  # 다른 화면 배율로 따로 띄워 찍는 단계
+
+
+SCENES: List[Scene] = []
+
+
+def scene(key: str, section: str, guide: Optional[int], title: str, *, media: bool = True,
+          subprocess: bool = False):
+    def deco(fn: Callable[["Flow"], Step]) -> Callable[["Flow"], Step]:
+        SCENES.append(Scene(key, section, guide, title, fn, media, subprocess))
+        return fn
+    return deco
+
+
+def btn(label: str) -> str:
+    return f"[{label}]"
+
+
+def q(text: str) -> str:
+    """창에 보이는 문구를 따옴표로 (문구 안에 작은따옴표가 있으면 큰따옴표로). 여러 줄은 ' / '로 잇는다."""
+    text = " / ".join(line.strip() for line in str(text).splitlines() if line.strip())
+    return f'"{text}"' if "'" in text else f"'{text}'"
+
+
+def buttons_of(labels: List[str]) -> str:
+    return " ".join(btn(b) for b in labels)
+
+
+def batchim(word: str) -> Optional[bool]:
+    """마지막 글자에 받침이 있는지 (창과 같은 규칙: strings_ko.final_sound). 모르면 None."""
+    sound = S.final_sound(word)
+    return None if sound is False else sound is not None
+
+
+def particle_slip(text: str, word: str) -> Optional[str]:
+    """창 문구에서 word 바로 뒤의 을/를이 받침과 맞지 않으면 찾은 문제 한 줄 (맞으면 None)."""
+    has = batchim(word)
+    if has is None:
+        return None
+    right, wrong = ("을", "를") if has else ("를", "을")
+    if word + wrong not in text:
+        return None
+    return f"창 문구 {q(text)}: {q(word)} 뒤에는 '{wrong}' 대신 '{right}'이 맞아요."
+
+
+def button_particle_slips(text: str) -> List[str]:
+    """설명 글에서 [단추] 바로 뒤의 조사가 단추 이름의 받침과 맞지 않는 곳 ("[결과 저장]와" 따위)."""
+    out = []
+    for m in BUTTON_PARTICLE.finditer(text):
+        label, particle = m.group(1), m.group(2)
+        right = next((S.josa(f"{label}{marker}")[len(label):] for marker, *forms in S.PARTICLES
+                      if particle in forms), None)
+        if right is not None and S.final_sound(label) is not False and right != particle:
+            out.append(f"[{label}]{particle} → [{label}]{right}")
+    return out
+
+
+def _then_idle(f: "Flow", images: List[Image]) -> List[Image]:
+    """찍은 뒤에 창이 하던 일(3초 듣기)이 끝나기를 기다린다 (듣는 중 단추를 찍으려고 먼저 찍는다)."""
+    f.d.idle()
+    return images
+
+
+class Flow:
+    """단계 사이에 넘기는 것 (카드, 수)과 자주 쓰는 확인."""
+
+    def __init__(self, d: Director) -> None:
+        self.d = d
+        self.w = d.w
+        self.world = d.world
+        self.found: Dict[str, Any] = {}
+        self.played: List[Any] = []
+        # 버튼 1의 첫 계산을 "소리 꺼내는 중"에서 잠깐 세워 진행 줄을 찍는다 (소리 계산이 빨라서)
+        self.gate = threading.Event()
+        self.gate.set()
+        self.gate_waiting = threading.Event()
+        real = self.w.runs.probe_file
+
+        def gated(path):
+            if not self.gate.is_set():
+                self.gate_waiting.set()
+                self.gate.wait(60)
+            return real(path)
+
+        self.w.runs.probe_file = gated
+        # 다른 화면 배율로 따로 띄워 찍는 일 (build.py가 넣는다): scaled(alt) → Image
+        self.scaled: Optional[Callable[[str], Image]] = None
+
+    # 창 안의 것
+    def cards(self, cls) -> List[Any]:
+        return [c for c in self.w.runs.cards if type(c) is cls]
+
+    def quiet(self) -> bool:
+        w = self.w
+        return not w.busy and w.pending == 0 and not w.chat_flow.active
+
+    def new_card(self, cls, before: int, what: str, *, title: Optional[str] = None, timeout: float = 90.0):
+        def ready():
+            found = [c for c in self.cards(cls)[before:] if title is None or c.title.text() == title]
+            return found[-1] if found and self.quiet() else None
+
+        card = self.d.wait(ready, what, timeout)
+        self.d.idle()
+        return card
+
+    def slot(self, n: int):
+        return self.w.automation.button(n)
+
+    def slot_lines(self) -> str:
+        """자동화 버튼 아래 줄을 같은 것끼리 묶어서: 버튼 1·2 아래: '…'. 버튼 3 아래: '…'."""
+        groups: Dict[str, List[str]] = {}
+        for i, b in enumerate(self.w.automation.buttons, start=1):
+            if b.isVisible():
+                groups.setdefault(b.receipt.text(), []).append(str(i))
+        return " ".join(f"버튼 {'·'.join(ns)} 아래: {q(text)}." for text, ns in groups.items())
+
+    def log_last(self) -> str:
+        """연결 점검 쪽 기록 칸의 마지막 줄."""
+        lines = [ln for ln in self.w.log_view.toPlainText().splitlines() if ln.strip()]
+        return lines[-1] if lines else ""
+
+    def inside(self, widget) -> bool:
+        """창 안에 다 보이는지 (아래나 옆으로 잘리지 않음)."""
+        top = widget.mapTo(self.w, widget.rect().topLeft())
+        return widget.isVisible() and self.w.rect().contains(widget.rect().translated(top))
+
+    def screen_text(self) -> str:
+        """창에 적힌 글 (머리말, 버튼, 대화 칸, 쪽)."""
+        w = self.w
+        parts = [w.status.text(), w.header.hint.text(), w.header.summary.text(), w.message.text()]
+        for b in w.automation.buttons:
+            parts += [b.title.text(), b.summary.text(), b.receipt.text()]
+        parts += [w.automation.progress.label.text(), w.chat.log.toPlainText(), w.log_view.toPlainText()]
+        return "\n".join(parts)
+
+    def notice(self, text: Optional[str] = None) -> str:
+        """머리말 알림 줄을 보이는 그대로: 떠 있으면 "맨 위 알림: '…'.", 같은 말이 대화 칸(카드)에 보여서
+        비워 두었으면 그렇게 적는다 (찍은 바로 뒤에 부른다)."""
+        text = self.w.message.text() if text is None else text
+        if self.w.header.message_shown:
+            return f"맨 위 알림: {q(text)}."
+        return (f"맨 위 알림 줄은 비어 있어요: 같은 말이 대화 칸에 보이는 동안은 숨겨요 ({q(text)}, 대화를 접거나 "
+                "위로 밀려 안 보이면 맨 위에 떠요).")
+
+    def expect(self, text: str, *needles: str) -> None:
+        missing = [n for n in needles if n not in text]
+        if missing:
+            raise self.d.fail("설명에 적은 문구가 창에 없음: " + " / ".join(missing))
+
+    def on_panel(self) -> None:
+        self.d.wait(lambda: self.w.stack.currentWidget() is self.w.panel, "도우미 창 첫 쪽")
+
+    def receipt_shot(self, card, alt: str, strip_alt: str) -> List[Image]:
+        """영수증 카드와 타임라인 흉내. 영수증 뒤에 새 줄이 붙어 위로 밀렸으면 사용자처럼 위로 굴려서."""
+        images = self.card_shot(card, alt, scroll=self.d.card_cut(card))
+        images.append(self.d.strip(strip_alt))
+        return images
+
+    def card_shot(self, card, alt: str, *, scroll: bool = False) -> List[Image]:
+        """카드를 찍는다. 새 카드는 창이 스스로 굴린 자리 그대로 (scroll=True: 예전 카드를 사용자처럼 굴려서).
+        대화 칸보다 큰 카드는 위(창이 멈춘 자리)와 아래를 한 장씩. 잘렸으면 카드만 따로.
+        사용자처럼 굴려 본 뒤에는 창이 멈췄던 자리로 돌려놓는다 (다음 단계가 창이 둔 자리에서 시작하게)."""
+        d = self.d
+        d.settle(0.1)
+        bar = d.w.chat.log.verticalScrollBar()
+        stay = bar.value()
+        if scroll:
+            d.show_in_chat(card)
+        elif not d.visible_top(card):
+            title = getattr(card, "title", None)
+            d.issue(ISSUE_NOT_SHOWN.format(title=title.text() if title is not None else ""))
+            d.show_in_chat(card)
+        d.check_clipped(card)
+        images = [d.shot(alt)]
+        if d.taller_than_chat(card):
+            d.show_bottom(card)
+            images.append(d.shot(alt + " (카드 아래쪽)", name="window-bottom"))
+        elif d.card_cut(card):
+            images.append(d.widget_shot(card, alt + " (카드만)"))
+        if bar.value() != stay:
+            bar.setValue(stay)
+            d.settle(0.05)
+        return images
+
+    def apply(self, card, what: str, timeout: float = 60.0) -> None:
+        button = card.buttons.get("apply")
+        self.d.press(button, f"{what} {btn(button.text() if button is not None else S.BTN_APPLY)}")
+        self.d.wait(lambda: card.state == "receipt" and self.quiet(), f"{what} 영수증", timeout)
+        self.d.idle()
+
+    def chat(self, text: str, cls, what: str, *, title: Optional[str] = None, timeout: float = 90.0):
+        before = len(self.cards(cls))
+        self.d.type_send(text)
+        return self.new_card(cls, before, what, title=title, timeout=timeout)
+
+
+# ── 연결과 기능 점검 ─────────────────────────────────────────────────
+
+@scene("before", "connect", None, "스크립트를 누르기 전", media=False)
+def s_before(f: Flow) -> Step:
+    w = f.w
+    image = None
+    for _ in range(5):
+        # 2초마다 묻는 동안은 잠깐 '확인하는 중'이 보여서, 찍은 뒤에도 그대로인지 본다
+        f.d.wait(lambda: w.status.text() == S.STATUS_NOT_CONNECTED and f.quiet(), "연결 안 됨 표시")
+        image = f.d.shot("연결 안 됨: 스크립트를 누르라는 안내")
+        if w.status.text() == S.STATUS_NOT_CONNECTED:
+            break
+    f.expect(f.screen_text(), S.STATUS_NOT_CONNECTED, S.CONNECT_HINT, S.SLOT_DISABLED_NOT_CONNECTED)
+    return Step(
+        do=f"도우미 창을 켠 채, 리졸브에서 아직 {SCRIPT_NAME}를 누르지 않은 때예요.",
+        see=(f"맨 위: {q(S.DOT_OFF + ' ' + S.STATUS_NOT_CONNECTED)}. 안내: {q(S.CONNECT_HINT)}. "
+             + f.slot_lines()),
+        images=[image],
+        note="창은 2초마다 리졸브에 물어봐요. 스크립트를 누르면 저절로 연결돼요.",
+    )
+
+
+@scene("connected", "connect", 1, "스크립트를 눌러 연결", media=False)
+def s_connected(f: Flow) -> Step:
+    w = f.w
+    f.world.fake.online = True
+    f.d.wait(lambda: w.connected and "Timeline 1" in w.header.summary.text(), "연결됨", 15)
+    f.d.idle()
+    summary = w.header.summary.text()
+    f.expect(f.screen_text(), S.STATUS_CONNECTED, S.CHAT_TRY_CONNECTED, *S.CHIPS_AFTER_CONNECT)
+    length = fmt.length(420)
+    f.expect(summary, "Timeline 1", f"길이 {length}", "소리 트랙 5개")
+    images = [f.d.shot("연결됨: 타임라인 요약과 예문 칩"),
+              f.d.strip("리졸브 타임라인 흉내: 처음 상태 (직접 찍은 표시와 지난번 시험 표시)")]
+    return Step(
+        do=f"리졸브에서 Workspace → Scripts → {SCRIPT_NAME}",
+        see=(f"맨 위: {q(S.DOT_CONNECTED + ' ' + S.STATUS_CONNECTED)}. 요약: {q(summary)}. "
+             f"대화 칸: {q(S.CHAT_TRY_CONNECTED)}, 그 아래 예문 칩 {len(S.CHIPS_AFTER_CONNECT)}개."),
+        images=images,
+        note=(f"미리보기 타임라인은 {length}짜리예요 (창에는 '길이 {length}'). 안내서의 '18분 46초'도 창에 같은 "
+              "말로 적혀요 (시각과 헷갈리지 않게 18:46 모양으로 쓰지 않아요). 소리 트랙 5개는 녹화의 소리 4개와 "
+              "지난번 시험 트랙 'AI 도우미 시험'이에요. "
+              + STRIP_NOTE + " 직접 찍은 표시 2개(초록, 파랑)와 지난번 시험의 노란 표시 2개가 있어요."),
+    )
+
+
+@scene("more-menu", "connect", 2, "⋯ 메뉴 열기", media=False)
+def s_more_menu(f: Flow) -> Step:
+    w = f.w
+    labels = [a.text() for a in w.more_menu.actions() if a.text()]
+    image = f.d.menu(w.header.more_btn, w.more_menu, S.MENU_CHECK_PAGE, "⋯ 메뉴")
+    f.expect(" ".join(labels), S.MENU_CHECK_PAGE, S.MENU_REPORT, S.MENU_SETTINGS, S.MENU_HELP, S.MENU_UPDATE)
+    if not w.update_action.isEnabled():
+        raise f.d.fail(f"메뉴 줄이 꺼져 있음: {S.MENU_UPDATE}")
+    return Step(
+        do=f"창 오른쪽 위 {btn(S.BTN_MORE)} → {S.MENU_CHECK_PAGE}",
+        see=(f"메뉴 줄: {S.MENU_CHECK_PAGE} · {S.MENU_REPORT} · {S.MENU_SETTINGS} ▸ · {S.MENU_HELP}, "
+             f"가는 줄 아래 {S.MENU_UPDATE}"),
+        images=[image],
+        note=f"{S.MENU_UPDATE}는 이번 판에 새로 생긴 줄이에요 ('이럴 때는'의 새 판 단계에 따로 찍었어요).",
+    )
+
+
+@scene("check-page", "connect", 2, "점검 도구 쪽", media=False)
+def s_check_page(f: Flow) -> Step:
+    w = f.w
+    page = w.check_page
+    f.d.wait(lambda: w.stack.currentWidget() is page, "점검 도구 쪽")
+    f.d.wait(lambda: w.probe_btn.isEnabled(), f"{btn(S.BTN_PROBE)} 켜지기")
+    f.d.settle(0.2)
+    f.expect(page.report_hint.text(), S.PROBE_REPORT_HINT)
+    return Step(
+        do=S.josa(f"메뉴에서 {S.MENU_CHECK_PAGE}을(를) 누르면 이 쪽으로 바뀌어요."),
+        see=(f"맨 위: {btn(S.BTN_BACK)}, 제목 {q(S.CHECK_TITLE)}. 파란 {btn(S.BTN_PROBE)}, "
+             + S.josa(f"{btn(S.BTN_MANUAL_CHECKS)}, {btn(S.BTN_REPORT)}과(와) 안내 ")
+             + f"{q(S.PROBE_REPORT_HINT)}. 그 아래 "
+             f"{q(S.CHECK_OLD_TOOLS)}: {btn(S.BTN_TEST_MARKER)} {btn(S.BTN_TEST_AUDIO)} {btn(S.BTN_TEST_CLEANUP)}, "
+             "맨 아래 한 일 기록 칸."),
+        images=[f.d.shot("점검 도구 쪽")],
+    )
+
+
+@scene("probe-confirm", "connect", 2, "기능 점검 시작")
+def s_probe_confirm(f: Flow) -> Step:
+    w = f.w
+    f.world.probe_hold = "C4"
+    image = f.d.dialog(lambda: f.d.press(w.probe_btn, btn(S.BTN_PROBE)), S.BTN_START, "기능 점검을 묻는 창")
+    dlg = f.d.last_dialog
+    f.expect(dlg["text"], S.PROBE_CONFIRM)
+    return Step(
+        do=f"{btn(S.BTN_PROBE)} → 묻는 창에서 {btn(S.BTN_START)}",
+        see=f"묻는 창 제목: {q(dlg['title'])}. 글: {q(dlg['text'])}. 단추: {buttons_of(dlg['buttons'])}.",
+        images=[image],
+        note="묻는 창의 제목 줄은 윈도우가 그려요. 미리보기에서는 제목만 담은 줄로 그렸어요.",
+    )
+
+
+@scene("probe-running", "connect", 2, "기능 점검 도는 중")
+def s_probe_running(f: Flow) -> Step:
+    w, world = f.w, f.world
+    running = S.PROBE_RUNNING.format(stage="")
+    f.d.wait(lambda: world.probe_waiting.is_set(), "기능 점검이 4번째 점검에 닿기", 30)
+    page = w.check_page
+    f.d.wait(lambda: page.notice.text().startswith(running) and page.notice.text() != running, "단계 이름", 10)
+    f.d.settle(0.3)
+    last = f.log_last()
+    notice = page.notice.text()
+    if any(b.isEnabled() for b in (page.marker_btn, page.audio_btn, page.cleanup_btn)):
+        raise f.d.fail("기능 점검이 도는 동안 예전 시험 도구 단추가 켜져 있음")
+    f.expect(last, S.RESULT_OK)
+    image = f.d.shot("기능 점검 도는 중")
+    world.probe_release.set()
+    return Step(
+        do="기다려요. 리졸브는 건드리지 않아요.",
+        see=(f"안내 아래 알림 줄: {q(notice)} (몇 번째 점검인지). 기록 칸에 점검마다 한 줄씩 쌓여요 (지금 마지막 "
+             f"줄: {q(last)}). 도는 동안 예전 시험 도구 단추는 흐리게 꺼져요."),
+        images=[image],
+        note=("실제로는 1~2분 걸리고, 그동안 리졸브에 점검용 복사 타임라인이 잠깐 생겼다가 지워져요. "
+              "미리보기에서는 도는 모습을 찍으려고 4번째 점검 앞에서 잠깐 세웠어요."),
+    )
+
+
+@scene("probe-done", "connect", 2, "기능 점검 끝")
+def s_probe_done(f: Flow) -> Step:
+    w = f.w
+    page = w.check_page
+    done = S.PROBE_DONE_ALL.split("{")[0]
+    saved = S.PROBE_REPORT_SAVED.split("{")[0].strip()
+    f.d.wait(lambda: done in page.notice.text() and saved in page.notice.text(), "기능 점검 끝과 결과 파일", 60)
+    f.d.idle()
+    log = [ln for ln in w.log_view.toPlainText().splitlines() if ln.strip()]
+    line = next(ln for ln in reversed(log) if done in ln)
+    first = next(ln for ln in log if ln.startswith(S.PROBE_SAVED_FIRST.split("{")[0]))
+    message = page.notice.text().splitlines()[0]
+    if not page.notice.isVisible():
+        raise f.d.fail("점검 도구 쪽에 알림 줄이 보이지 않음")
+    if done in w.message.text():
+        raise f.d.fail("기능 점검 알림이 첫 쪽 머리말에도 뜸")
+    return Step(
+        do="끝날 때까지 기다려요.",
+        see=(f"안내 아래 알림 줄: {q(message)}. 그 아래 {q(saved)}, 다음 줄에 파일 경로. 기록 칸 마지막 줄: "
+             f"{q(line)}. 점검 전에 저장한 결과 파일을 점검 결과로 덮어써요."),
+        images=[f.d.shot("기능 점검을 마침")],
+        note=("가짜 리졸브는 모든 점검에 '됨'으로 답해요. 실제 결과는 리졸브 판에 따라 다를 수 있어요. 기록 칸 첫 줄은 "
+              f"점검이 멈춰도 결과가 남게 먼저 저장해 둔 파일이에요: {q(first.split(':')[0])}. 이 알림은 점검 도구 "
+              "쪽에만 떠요 (첫 쪽으로 돌아가도 머리말은 그대로예요)."),
+    )
+
+
+# ── 버튼 1: 쉬는 곳 표시 ─────────────────────────────────────────────
+
+@scene("slot1-run", "pauses", 3, "버튼 1 누르기")
+def s_slot1_run(f: Flow) -> Step:
+    w = f.w
+    f.d.press(w.check_page.back_btn, btn(S.BTN_BACK))
+    f.on_panel()
+    f.gate.clear()
+    f.d.press(f.slot(1), f"버튼 1 '{S.SLOT_DEFAULT_NAMES[1]}'")
+    f.d.wait(lambda: f.gate_waiting.is_set() and w.automation.progress.isVisible(), "진행 줄", 30)
+    f.d.settle(0.3)
+    progress = w.automation.progress.label.text()
+    f.expect(progress, S.SLOT_DEFAULT_NAMES[1] + " · ")
+    f.expect(w.automation.progress.note.text(), S.PROGRESS_FREE)
+    f.expect(f.slot(2).receipt.text(), S.SLOT_DISABLED_BUSY)
+    where = "진행 줄" if f.slot(1).isVisible() else "버튼 1 자리에 진행 줄"
+    image = f.d.shot("버튼 1 계산 중: 진행 줄")
+    f.gate.set()
+    return Step(
+        do=f"{btn(S.BTN_BACK)} → 버튼 1 '{S.SLOT_DEFAULT_NAMES[1]}'",
+        see=(f"{where}: {q(progress)} {btn(S.BTN_STOP)}, 그 아래 {q(S.PROGRESS_FREE)}. "
+             f"버튼 2 아래: {q(S.SLOT_DISABLED_BUSY)}."),
+        images=[image],
+        note=("계산은 이 PC에서 녹화 파일만 읽어요 (리졸브에는 아직 아무것도 넣지 않아요). 7분짜리 미리보기 "
+              "녹화는 몇 초면 끝나서 첫 단계에서 잠깐 세워 찍었어요."),
+    )
+
+
+@scene("voice-card", "pauses", 3, "목소리 고르기 카드")
+def s_voice_card(f: Flow) -> Step:
+    card = f.new_card(VoicePickerCard, 0, "목소리 고르기 카드", timeout=180)
+    f.found["voice"] = card
+    text = card.plain_text()
+    n = len(card.question.streams)
+    lines = [S.VOICE_INTRO.format(n=n)]
+    if card.question.mix is not None:
+        lines.append(S.fill(S.VOICE_MIX, n=card.question.mix + 1))
+    if card.question.doubled:
+        lines.append(doubled_text(card.question.mix))
+    f.expect(text, S.VOICE_TITLE, *lines)
+    return Step(
+        do="계산이 끝나기를 기다려요 (처음 한 번만 묻는 카드예요).",
+        see=(f"카드 {q(S.VOICE_TITLE)}: " + " ".join(q(t) for t in lines)
+             + f". 소리마다 {btn(S.BTN_LISTEN)} {btn(S.BTN_PICK)}, 맨 아래 {btn(S.BTN_CANCEL)}."),
+        images=f.card_shot(card, "목소리 고르기 카드"),
+        note=(f"미리보기 녹화는 OBS처럼 소리 {n}개예요: 소리 1은 모두 섞은 것, 소리 2는 목소리, "
+              "소리 3은 게임, 소리 4는 음악."),
+    )
+
+
+@scene("listen", "pauses", 4, "3초 듣기")
+def s_listen(f: Flow) -> Step:
+    w = f.w
+    card = f.found["voice"]
+    listening = S.fill(S.LISTENING, n=2)
+    f.d.press(card.listen_buttons[1], f"소리 2 {btn(S.BTN_LISTEN)}")
+    f.d.wait(lambda: w.message.text() == listening, "소리를 트는 중 알림", 30)
+    f.d.wait(lambda: card.listen_buttons[1].text() == S.BTN_LISTENING, "듣는 중 단추", 10)
+    slip = particle_slip(listening, S.VOICE_STREAM.format(n=2))
+    return Step(
+        do=f"소리마다 {btn(S.BTN_LISTEN)} (여기서는 소리 2)",
+        see=(f"맨 위 알림: {q(listening)}. 트는 3초 동안 그 단추는 {btn(S.BTN_LISTENING)}. "
+             "소리마다 3초씩 들려요."),
+        images=_then_idle(f, f.card_shot(card, "소리 2를 트는 중")),
+        note=("미리보기에서는 소리가 나지 않아요 (틀기 직전에 막아 두었어요). 3초를 꺼내는 일까지는 진짜로 해요. "
+              "소리를 트는 동안에도 리졸브에는 아무것도 묻지 않아요."),
+        issues=[slip] if slip else [],
+    )
+
+
+@scene("voice-pick", "pauses", 5, "목소리 고르기")
+def s_voice_pick(f: Flow) -> Step:
+    card = f.found["voice"]
+    before = len(f.cards(ProposalCard))
+    f.d.press(card.pick_buttons[1], f"소리 2 {btn(S.BTN_PICK)}")
+    pc = f.new_card(ProposalCard, before, "쉬는 곳 카드", timeout=180)
+    p = pc.proposal
+    resolve = S.RESOLVE_RANGE.format(color_word=S.COLOR_WORDS["Blue"], n=p.count)
+    voice = voice_row_text(p.voice, p.tracks)
+    picked = S.fill(S.VOICE_PICKED, n=2)
+    f.expect(pc.plain_text(), S.CARD_TITLE_FOUND, resolve, voice)
+    f.expect(card.plain_text(), picked)
+    if "A5" in voice:
+        raise f.d.fail(f"옛 시험 트랙(A5)이 목소리 트랙으로 들어감: {voice}")
+    f.found["pause1"] = pc
+    # 접힌 한 줄이 칸 위에 걸려 반만 보이지 않게: 사용자처럼 조금 위로 굴려 접힌 줄부터 찍는다
+    bar = f.w.chat.log.verticalScrollBar()
+    stay = bar.value()
+    f.d.show_from_top(card)
+    images = [f.d.shot("목소리 고르기 카드가 한 줄로 접히고 새 카드")]
+    whole = not f.d.card_cut(pc)
+    bar.setValue(stay)
+    f.d.settle(0.05)
+    if not whole:
+        images += f.card_shot(pc, "쉬는 곳 확인 카드")
+    return Step(
+        do=f"목소리인 소리 옆 {btn(S.BTN_PICK)} (여기서는 소리 2)",
+        see=(f"고르기 카드는 한 줄로 접혀요: {q(picked)}. 새 카드 {q(S.CARD_TITLE_FOUND)}. "
+             f"{S.ROW_RESOLVE}: {q(resolve)}. 목소리: {q(voice)}. 맨 아래 {btn(S.BTN_APPLY)} {btn(S.BTN_CANCEL)}."),
+        images=images,
+        note=("이 카드까지는 리졸브에 아무것도 넣지 않았어요. 다음부터는 목소리를 묻지 않아요. "
+              "'목소리가 두 번 들릴 수 있어요'는 고르기 카드에서 한 번만 알려요."),
+    )
+
+
+@scene("pause1-apply", "pauses", 6, "리졸브에 넣기")
+def s_pause1_apply(f: Flow) -> Step:
+    pc = f.found["pause1"]
+    f.apply(pc, "쉬는 곳 카드")
+    title = pc.title.text()
+    receipt = f.slot(1).receipt.text()
+    n = pc.outcome.placed
+    f.found["pause1_n"] = n
+    f.expect(receipt, S.SLOT_RECEIPT.split("{")[0])
+    if len(f.world.ours("Blue")) != n:
+        raise f.d.fail(f"가짜 리졸브의 파란 표시 수가 영수증과 다름 ({len(f.world.ours('Blue'))}, {n})")
+    return Step(
+        do=btn(S.BTN_APPLY),
+        see=(f"카드가 영수증으로 바뀌어요: {q(title)}, 맨 아래 {btn(S.BTN_UNDO_ONE)}. 버튼 1 아래: {q(receipt)}. "
+             f"흉내 그림: 쉬는 곳마다 길이 있는 파란 표시 {n}개."),
+        images=f.receipt_shot(pc, "쉬는 곳 표시를 넣은 영수증", f"리졸브 타임라인 흉내: 길이 있는 파란 표시 {n}개"),
+        note=(STRIP_NOTE + " 도우미 표시는 채운 깃발, 직접 찍은 표시는 속이 빈 깃발로 그렸어요. 깃발 오른쪽 아래의 "
+              "짧은 막대는 표시의 길이예요 (쉬는 곳이 몇 초라 7분 타임라인에서는 짧게 보여요)."),
+    )
+
+
+@scene("m3", "pauses", 7, "Ctrl+Z 질문 카드")
+def s_m3(f: Flow) -> Step:
+    card = f.w.runs.manual_cards.get("M3")
+    if card is None:
+        raise f.d.fail("Ctrl+Z 질문 카드가 뜨지 않음")
+    f.expect(card.plain_text(), S.M3_QUESTION, S.M3_STEP, *S.M3_ANSWERS.values())
+    f.expect(f.screen_text(), S.CHAT_TRY_AFTER_APPLY, *S.CHIPS_AFTER_APPLY)
+    answers = " ".join(btn(a) for a in S.M3_ANSWERS.values())
+    rows = len({b.y() for b in card.buttons.values()})
+    images = f.card_shot(card, "Ctrl+Z 질문 카드")
+    return Step(
+        do="(질문 카드가 뜨면) 리졸브 타임라인의 빈 곳 클릭 → Ctrl+Z 한 번 → 본 대로 고르기",
+        see=(f"카드 {q(S.M3_QUESTION)}, 안내 {q(S.M3_STEP)}. 단추: {answers} {btn(S.BTN_LATER)} "
+             f"(대화 칸 너비에 맞춰 {rows}줄로 쌓여요)."),
+        images=images,
+        note=("미리보기에서는 리졸브의 Ctrl+Z를 해 볼 수 없어서 답하지 않고 두었어요. 넣은 뒤에는 대화 칸에 "
+              f"{q(S.CHAT_TRY_AFTER_APPLY)}, 그 아래 예문 칩도 나와요 (이 창을 켠 뒤 처음 넣었을 때 한 번만)."),
+    )
+
+
+@scene("slot1-gear", "pauses", 8, f"버튼 1 {GEAR} 쉰 길이 2초")
+def s_slot1_gear(f: Flow) -> Step:
+    w = f.w
+    f.d.press(w.automation.gears[0], f"버튼 1 {S.SLOT_SETTINGS}")
+    page = w.settings_page
+    f.d.wait(lambda: w.stack.currentWidget() is page and "min_s" in page.fields, "버튼 1 설정 쪽")
+    spin = page.fields["min_s"]
+    start = spin.value()
+    plus = spin.steppers.plus
+    page.scroll.ensureWidgetVisible(plus)
+    steps = int(round((2.0 - start) / spin.singleStep()))
+    for _ in range(steps):
+        f.d.press(plus, f"'{S.PARAM_LABELS['min_s']}' {btn(S.BTN_PLUS)}")
+    if abs(spin.value() - 2.0) > 1e-6:
+        raise f.d.fail(f"쉰 길이가 2초가 되지 않음 ({spin.value()})")
+    preview = page.preview.text()
+    f.expect(preview, "2초")
+    return Step(
+        do=f"버튼 1 옆 {GEAR} → '{S.PARAM_LABELS['min_s']}' 칸 옆 {btn(S.BTN_PLUS)}를 눌러 2.0초로",
+        see=(f"설정 쪽 제목: {page.title.text()}. {S.PARAM_LABELS['min_s']}: {spin.text()}. "
+             f"아래 요약 줄: {q(preview)}. 맨 아래 {btn(S.BTN_CANCEL)} {btn(S.BTN_SAVE)}."),
+        images=[f.d.shot("버튼 1 설정 쪽: 쉰 길이 2초")],
+        note=f"처음 값은 {start:g}초예요. {btn(S.BTN_PLUS)} 한 번에 {spin.singleStep():g}초씩. 칸에 숫자를 바로 적어도 돼요.",
+    )
+
+
+@scene("slot1-saved", "pauses", 8, "설정 저장")
+def s_slot1_saved(f: Flow) -> Step:
+    w = f.w
+    f.d.press(w.settings_page.save_btn, btn(S.BTN_SAVE))
+    f.on_panel()
+    f.d.idle()
+    summary = f.slot(1).summary.text()
+    saved = S.SETTINGS_SAVED.format(name=S.SLOT_DEFAULT_NAMES[1])
+    f.expect(w.message.text(), saved)
+    return Step(
+        do=btn(S.BTN_SAVE),
+        see=f"첫 쪽으로 돌아와요. 버튼 1 요약: {q(summary)}. 맨 위 알림: {q(saved)}.",
+        images=[f.d.shot("버튼 1 요약이 바뀜")],
+        note=f"안내서 8번의 요약 '2초 넘게 쉰 곳 표시'는 창에서 조금 달라요: {q(summary)}.",
+    )
+
+
+@scene("slot1-rerun", "pauses", 9, "버튼 1 다시 누르기")
+def s_slot1_rerun(f: Flow) -> Step:
+    before = len(f.cards(QuestionCard))
+    f.d.press(f.slot(1), "버튼 1")
+    n = f.found["pause1_n"]
+    question = S.RERUN_QUESTION.format(color_word=S.COLOR_WORDS["Blue"], n=n)
+    card = f.new_card(QuestionCard, before, "바꿀지 묻는 카드", title=question, timeout=120)
+    text = card.plain_text()
+    f.expect(text, S.RERUN_EXPLAIN, S.RERUN_FROM.split("{")[0])
+    if list(card.buttons) != ["replace", "add", "cancel"]:
+        raise f.d.fail(f"다시 누름 카드의 단추가 다름 ({list(card.buttons)})")
+    origin = next(line for line in text.splitlines() if line.startswith(S.RERUN_FROM.split("{")[0]))
+    f.found["rerun"] = card
+    return Step(
+        do="버튼 1",
+        see=(f"카드 {q(question)}, 그 아래 어느 표시인지 {q(origin)}, 그리고 {q(S.RERUN_EXPLAIN)}. 단추: "
+             f"{btn(S.BTN_REPLACE)} {btn(S.BTN_ADD_MORE)} {btn(S.BTN_CANCEL)}"),
+        images=f.card_shot(card, "이전 표시를 바꿀지 묻는 카드"),
+        note=(f"같은 색 표시가 타임라인에 남아 있으면 먼저 이렇게 물어요. 잘못 눌렀으면 {btn(S.BTN_CANCEL)}: 카드가 "
+              "닫히고 버튼 아래 줄도 지난번 결과로 돌아가요."),
+    )
+
+
+@scene("slot1-replace", "pauses", 9, "바꾸기")
+def s_slot1_replace(f: Flow) -> Step:
+    card = f.found["rerun"]
+    before = len(f.cards(ProposalCard))
+    f.d.press(card.buttons.get("replace"), btn(S.BTN_REPLACE))
+    pc = f.new_card(ProposalCard, before, "새 쉬는 곳 카드")
+    n_old = f.found["pause1_n"]
+    what = S.WHAT_PAUSES.format(min_s=2)
+    replace = S.RESOLVE_REPLACE.format(color_word=S.COLOR_WORDS["Blue"], n=n_old)
+    resolve = S.RESOLVE_RANGE.format(color_word=S.COLOR_WORDS["Blue"], n=pc.proposal.count)
+    f.expect(pc.plain_text(), what, resolve, replace)
+    f.found["pause2"] = pc
+    return Step(
+        do=btn(S.BTN_REPLACE),
+        see=f"새 카드. 할 일: {q(what)}. 리졸브: {q(resolve)}, {q(replace)}.",
+        images=f.card_shot(pc, "2초 설정으로 다시 찾은 카드"),
+    )
+
+
+@scene("pause2-apply", "pauses", 9, "다시 넣기")
+def s_pause2_apply(f: Flow) -> Step:
+    pc = f.found["pause2"]
+    f.apply(pc, "새 쉬는 곳 카드")
+    n_old, n = f.found["pause1_n"], pc.outcome.placed
+    if n >= n_old:
+        raise f.d.fail(f"2초 설정의 표시 수({n})가 처음({n_old})보다 적지 않음")
+    if len(f.world.ours("Blue")) != n:
+        raise f.d.fail(f"가짜 리졸브의 파란 표시 수가 영수증과 다름 ({len(f.world.ours('Blue'))}, {n})")
+    replaced = S.RECEIPT_REPLACED.format(color_word=S.COLOR_WORDS["Blue"], n=n_old)
+    f.expect(pc.plain_text(), replaced)
+    return Step(
+        do=btn(S.BTN_APPLY),
+        see=(f"영수증 {q(pc.title.text())}, {q(replaced)}. 흉내 그림: 파란 표시 {n_old}개가 빠지고 {n}개 "
+             "(안내 6번 때보다 적음)."),
+        images=f.receipt_shot(pc, "2초 설정 영수증", f"리졸브 타임라인 흉내: 파란 표시 {n}개 (전 것은 빠짐)"),
+        note=STRIP_NOTE,
+    )
+
+
+# ── 버튼 2: 튀는 소리 표시 ───────────────────────────────────────────
+
+@scene("slot2-card", "spikes", 10, "버튼 2 누르기")
+def s_slot2_card(f: Flow) -> Step:
+    before = len(f.cards(ProposalCard))
+    f.d.press(f.slot(2), f"버튼 2 '{S.SLOT_DEFAULT_NAMES[2]}'")
+    pc = f.new_card(ProposalCard, before, "튀는 소리 카드", timeout=120)
+    p = pc.proposal
+    if p.count == 0:
+        raise f.d.fail("튀는 소리를 찾지 못함 (미리보기 녹화에는 4곳이 있음)")
+    resolve = S.RESOLVE_RANGE.format(color_word=S.COLOR_WORDS["Red"], n=p.count)
+    voice = voice_row_text(p.voice, p.tracks)
+    f.expect(pc.plain_text(), S.CARD_TITLE_FOUND, resolve, voice)
+    f.found["spikes"] = pc
+    return Step(
+        do=f"버튼 2 '{S.SLOT_DEFAULT_NAMES[2]}'",
+        see=f"목소리를 다시 묻지 않고 카드 {q(S.CARD_TITLE_FOUND)}. 리졸브: {q(resolve)}. 목소리: {q(voice)}.",
+        images=f.card_shot(pc, "튀는 소리 확인 카드"),
+    )
+
+
+@scene("spikes-apply", "spikes", 10, "리졸브에 넣기")
+def s_spikes_apply(f: Flow) -> Step:
+    pc = f.found["spikes"]
+    f.apply(pc, "튀는 소리 카드")
+    n = pc.outcome.placed
+    if len(f.world.ours("Red")) != n:
+        raise f.d.fail(f"가짜 리졸브의 빨간 표시 수가 영수증과 다름 ({len(f.world.ours('Red'))}, {n})")
+    f.expect(f.screen_text(), S.M2_QUESTION)
+    f.d.chat_bottom()
+    m2 = f.w.runs.manual_cards.get("M2")
+    if m2 is None or not f.d.visible_top(m2):
+        raise f.d.fail("대화 칸 맨 아래에 자르기 질문 카드가 보이지 않음")
+    return Step(
+        do=btn(S.BTN_APPLY),
+        see=(f"영수증 {q(pc.title.text())}. 흉내 그림: 빨간 표시 {n}개가 더해져요. 대화 칸 맨 아래에 자르기 질문 "
+             f"카드 {q(S.M2_QUESTION)}도 떠요 (안내 21번)."),
+        images=[f.d.shot("튀는 소리 영수증 뒤: 자르기 질문 카드"),
+                f.d.strip(f"리졸브 타임라인 흉내: 빨간 표시 {n}개 더해짐")],
+        note=STRIP_NOTE,
+    )
+
+
+@scene("view", "spikes", 11, "목록의 이동")
+def s_view(f: Flow) -> Step:
+    w, world = f.w, f.world
+    pc = f.found["spikes"]
+    before = world.info.get("current_tc")
+    key = "view:1"
+    f.d.press(pc.extra.get(key), f"두 번째 줄 {btn(S.BTN_VIEW_SHORT)}")
+    done = S.CHAT_JUMP_DONE.split("{")[0]
+    f.d.wait(lambda: w.message.text().startswith(done), "재생 위치를 옮김", 20)
+    f.d.idle()
+    message = w.message.text()
+    after = world.info.get("current_tc")
+    if after == before:
+        raise f.d.fail("재생 위치가 바뀌지 않음")
+    images = [f.d.shot("재생 위치를 옮김"), f.d.strip(f"리졸브 타임라인 흉내: 재생 위치 {after}")]
+    shown = f.notice(message)
+    return Step(
+        do=(f"그 카드 목록의 한 줄 옆 {btn(S.BTN_VIEW_SHORT)} (여기서는 두 번째 줄). 줄에 마우스를 올리면 리졸브 "
+            "시간(타임코드)이 보여요."),
+        see=f"대화 칸 맨 아래: {q(message)}. {shown} 흉내 그림: 재생 위치 {before} → {after}.",
+        images=images,
+        note="편집이 아니라서 카드나 되돌리기 목록에 남지 않아요. " + STRIP_NOTE,
+    )
+
+
+# ── 대화 칸 ───────────────────────────────────────────────────────
+
+@scene("chat-mark", "chat", 12, "3분 20초에 빨간 표시")
+def s_chat_mark(f: Flow) -> Step:
+    text = "3분 20초에 빨간 표시해줘"
+    pc = f.chat(text, ProposalCard, "표시 카드")
+    f.expect(pc.plain_text(), S.CARD_TITLE_PROPOSE, "3:20.0", "빨간 표시 1개")
+    f.found["mark"] = pc
+    return Step(
+        do=f"대화 칸에 \"{text}\" → Enter",
+        see=(f"카드 {q(S.CARD_TITLE_PROPOSE)}. 언제: '3:20.0'. 리졸브: 빨간 표시 1개. "
+             f"{btn(S.BTN_APPLY)} {btn(S.BTN_CANCEL)}."),
+        images=f.card_shot(pc, "3분 20초 표시 카드"),
+        note=f"대화 칸 맨 아래 {q(S.CHAT_BRAIN_LINE)}. 이번 시험의 대화는 사용량을 쓰지 않아요.",
+    )
+
+
+@scene("chat-mark-apply", "chat", 12, "리졸브에 넣기")
+def s_chat_mark_apply(f: Flow) -> Step:
+    pc = f.found["mark"]
+    f.apply(pc, "표시 카드")
+    fps = float(f.world.info["fps"])
+    if not any(abs(fr - 200 * fps) <= 1 for fr in f.world.ours("Red")):
+        raise f.d.fail(f"3분 20초 자리에 빨간 표시가 없음 ({sorted(f.world.ours('Red'))})")
+    return Step(
+        do=btn(S.BTN_APPLY),
+        see=f"영수증 {q(pc.title.text())}. 흉내 그림: 3분 20초 자리에 빨간 표시.",
+        images=f.receipt_shot(pc, "3분 20초 표시 영수증", "리졸브 타임라인 흉내: 3분 20초에 빨간 표시"),
+        note=STRIP_NOTE,
+    )
+
+
+@scene("chat-clear", "chat", 13, "도우미 파란 표시 지우기")
+def s_chat_clear(f: Flow) -> Step:
+    text = "도우미가 넣은 파란 표시 지워줘"
+    card = f.chat(text, ClearCard, "지우기 카드")
+    plan = card.proposal
+    resolve = S.CLEAR_RESOLVE.format(colors=clear_colors(plan), n=plan.count)
+    keep = clear_keep(plan)
+    f.expect(card.plain_text(), S.CARD_TITLE_CLEAR, resolve, keep)
+    f.expect(card.buttons["apply"].text(), S.BTN_CLEAR_APPLY)
+    f.found["clear"] = card
+    return Step(
+        do=f"\"{text}\" → Enter",
+        see=(f"카드 {q(S.CARD_TITLE_CLEAR)}: {S.ROW_CLEAR} {q(resolve)} (넣을 때와 같은 말), 그 아래 {q(keep)}. "
+             f"{btn(S.BTN_CLEAR_APPLY)} {btn(S.BTN_CANCEL)}."),
+        images=f.card_shot(card, "도우미 파란 표시 지우기 카드"),
+        note="파란 것만 지우라고 해서, 앞에서 넣은 빨간 도우미 표시는 그대로 남아요 (그 수를 적어요).",
+    )
+
+
+@scene("chat-clear-apply", "chat", 13, "리졸브에서 지우기")
+def s_chat_clear_apply(f: Flow) -> Step:
+    card = f.found["clear"]
+    f.apply(card, "지우기 카드")
+    user_blue = [m for m in f.world.user_markers().values() if m.get("color") == "Blue"]
+    if f.world.ours("Blue") or not user_blue:
+        raise f.d.fail("도우미 파란 표시만 없어지지 않음")
+    return Step(
+        do=btn(S.BTN_CLEAR_APPLY),
+        see=(f"영수증 {q(card.title.text())}. 흉내 그림: 도우미가 넣은 파란 표시만 없어지고, 직접 찍은 파란·초록 "
+             "표시는 그대로예요."),
+        images=f.receipt_shot(card, "지우기 영수증", "리졸브 타임라인 흉내: 도우미 파란 표시가 빠짐"),
+        note=STRIP_NOTE + " 속이 빈 깃발이 직접 찍은 표시예요.",
+    )
+
+
+@scene("chat-range", "chat", 14, "5분~6분에서 2초 넘게 쉰 곳")
+def s_chat_range(f: Flow) -> Step:
+    text = "5분~6분에서 2초 넘게 쉰 곳 표시해줘"
+    pc = f.chat(text, ProposalCard, "구간 쉬는 곳 카드", timeout=120)
+    when = S.WHEN_RANGE.format(a="5:00.0", b="6:00.0")
+    resolve = S.RESOLVE_RANGE.format(color_word=S.COLOR_WORDS["Blue"], n=pc.proposal.count)
+    text_now = pc.plain_text()
+    f.expect(text_now, S.CARD_TITLE_FOUND, when, resolve, S.SAVE_ROW)
+    if S.PROVENANCE["said"] in text_now:
+        raise f.d.fail("적으신 값에도 꼬리표가 붙음")
+    tag = next((t for t in (S.PROVENANCE_SLOT.format(name=S.SLOT_DEFAULT_NAMES[1]), S.PROVENANCE["setting"],
+                            S.PROVENANCE["default"]) if f"({t})" in text_now), None)
+    if tag is None:
+        raise f.d.fail("도우미가 정한 값의 꼬리표가 없음")
+    hi = pc.proposal.scope["hi"]
+    if any(r.start < hi < r.end for r in pc.proposal.rows):
+        raise f.d.fail("6분에 걸친 쉬는 곳이 카드에 들어감")
+    f.found["range"] = pc
+    return Step(
+        do=f"\"{text}\" → Enter",
+        see=(f"카드 {q(S.CARD_TITLE_FOUND)}. 언제: {q(when)}. {S.ROW_RESOLVE}: {q(resolve)}. 적지 않아서 "
+             f"도우미가 정한 값에는 어디서 왔는지 붙어요 (예: {q('(' + tag + ')')}). 적으신 값에는 붙지 않아요."),
+        images=f.card_shot(pc, "5분~6분 쉬는 곳 카드"),
+        note="6분에 걸친 쉬는 곳은 말한 범위를 넘어서 빼요.",
+    )
+
+
+@scene("chat-range-apply", "chat", 14, "리졸브에 넣기")
+def s_chat_range_apply(f: Flow) -> Step:
+    pc = f.found["range"]
+    f.apply(pc, "구간 쉬는 곳 카드")
+    fps = float(f.world.info["fps"])
+    lo, hi = 300 * fps, 360 * fps
+    frames = list(f.world.ours("Blue"))
+    if not frames or any(not (lo <= fr < hi) for fr in frames):
+        raise f.d.fail(f"새 파란 표시가 5분~6분 밖에도 있음: {frames}")
+    return Step(
+        do=btn(S.BTN_APPLY),
+        see=f"영수증 {q(pc.title.text())}. 흉내 그림: 새 파란 표시가 5분~6분 안에만 있어요.",
+        images=f.receipt_shot(pc, "5분~6분 영수증", "리졸브 타임라인 흉내: 5분~6분 안에만 파란 표시"),
+        note=STRIP_NOTE,
+    )
+
+
+@scene("save-slot", "chat", 15, "자동화 버튼 3에 저장")
+def s_save_slot(f: Flow) -> Step:
+    pc = f.found["range"]
+    combo = pc.save_combo
+    if combo is None:
+        raise f.d.fail("영수증에 저장 줄이 없음")
+    f.d.show_in_chat(combo)
+    target = combo.findData(3)
+    f.d.keys(combo, Qt.Key_Down, target - combo.currentIndex())
+    if combo.currentData() != 3:
+        raise f.d.fail("자동화 3을 고르지 못함")
+    choice = combo.currentText()
+    card_image = f.d.widget_shot(pc, "자동화 3을 고른 저장 줄", name="card")
+    f.d.press(pc.extra.get("save"), btn(S.BTN_SAVE))
+    f.d.idle()
+    b3 = f.slot(3)
+    done = S.fill(S.SAVE_DONE, n=3)
+    dropped = S.SAVE_RANGE_DROPPED.format(a="5:00.0", b="6:00.0")
+    f.expect(f.w.message.text(), done)
+    f.expect(f.w.chat.log.toPlainText(), done, dropped)
+    f.d.chat_bottom()
+    window_image = f.d.shot("버튼 3이 바뀜")
+    shown = f.notice(done)
+    return Step(
+        do=f"그 카드 아래 {q(S.SAVE_ROW)} → {q(choice)} 고르기 → {btn(S.BTN_SAVE)}",
+        see=(f"버튼 3 이름: {q(b3.title.text())}, 요약: {q(b3.summary.text())}. "
+             f"대화 칸 맨 아래: {q(done)}, {q(dropped)}. {shown}"),
+        images=[card_image, window_image],
+        note=(f"저장 줄은 {btn(S.BTN_APPLY)} 아래에 있어요 (넣기 단추가 먼저 보이게). 버튼에는 이미 번호가 있어서 "
+              "이름에 번호를 붙이지 않아요."),
+    )
+
+
+@scene("slot3-run", "chat", 16, "버튼 3 누르기")
+def s_slot3_run(f: Flow) -> Step:
+    q_before = len(f.cards(QuestionCard))
+    p_before = len(f.cards(ProposalCard))
+    f.d.press(f.slot(3), "버튼 3")
+
+    def rerun_questions():
+        return [c for c in f.cards(QuestionCard)[q_before:] if S.BTN_REPLACE in c.plain_text()]
+
+    def next_card():
+        if not f.quiet():
+            return None
+        if len(f.cards(ProposalCard)) > p_before:
+            return "card"
+        return "question" if rerun_questions() else None
+
+    kind = f.d.wait(next_card, "버튼 3의 카드", 120)
+    images: List[Image] = []
+    note = ""
+    if kind == "question":
+        question = rerun_questions()[-1]
+        images += f.card_shot(question, "버튼 3: 이전 표시를 바꿀지 묻는 카드")
+        origin = next((line for line in question.plain_text().splitlines()
+                       if line.startswith(S.RERUN_FROM.split("{")[0])), "")
+        if "cancel" not in question.buttons or not origin:
+            raise f.d.fail("다시 누름 카드에 [취소]나 어느 표시인지가 없음")
+        f.d.press(question.buttons.get("add"), btn(S.BTN_ADD_MORE))
+        note = (f"안내서 16번에는 없지만, 안내 14번에 넣은 파란 표시가 남아 있어서 먼저 이렇게 물어요: "
+                f"{q(question.title.text())}. 어느 표시인지도 적어요: {q(origin)}. 단추는 {btn(S.BTN_REPLACE)} "
+                f"{btn(S.BTN_ADD_MORE)} {btn(S.BTN_CANCEL)}. 여기서는 {btn(S.BTN_ADD_MORE)}를 눌렀어요 (안내 17번에서 "
+                "취소하니 어느 쪽이든 리졸브는 그대로예요). 이미 표시가 있는 곳은 빼고 새로 찾은 곳만 카드에 올라와요.")
+    pc = f.new_card(ProposalCard, p_before, "버튼 3 카드")
+    what = S.WHAT_PAUSES.format(min_s=2)
+    when = S.WHEN_WHOLE.format(length=_length(pc))
+    f.expect(pc.plain_text(), what, when)
+    f.found["slot3"] = pc
+    images += f.card_shot(pc, "버튼 3 카드: 2초 넘게 쉰 곳, 전체")
+    return Step(
+        do="버튼 3",
+        see=f"카드. 할 일: {q(what)}. 언제: {q(when)} (구간 없이 전체).",
+        images=images,
+        note=note,
+    )
+
+
+def _length(pc) -> str:
+    from app.companion import fmt
+
+    p = pc.proposal
+    return fmt.length((p.tl_end - p.tl_start) / (p.fps or 1.0))
+
+
+@scene("slot3-cancel", "chat", 17, "카드 취소")
+def s_slot3_cancel(f: Flow) -> Step:
+    pc = f.found["slot3"]
+    f.d.press(pc.buttons.get("cancel"), btn(S.BTN_CANCEL))
+    f.d.idle()
+    f.expect(pc.plain_text(), S.CARD_CANCELLED)
+    f.d.show_bottom(pc)
+    return Step(
+        do=f"그 카드에서 {btn(S.BTN_CANCEL)}",
+        see=f"카드 맨 아래: {q(S.CARD_CANCELLED)}",
+        images=[f.d.shot("취소한 카드 (카드 아래쪽)")],
+    )
+
+
+@scene("slot3-gear", "chat", 18, f"버튼 3 {GEAR}")
+def s_slot3_gear(f: Flow) -> Step:
+    w = f.w
+    f.d.press(w.automation.gears[2], f"버튼 3 {S.SLOT_SETTINGS}")
+    page = w.settings_page
+    f.d.wait(lambda: w.stack.currentWidget() is page and page.restore_btn.isVisible(), "버튼 3 설정 쪽")
+    f.d.settle(0.2)
+    return Step(
+        do=f"버튼 3 옆 {GEAR}",
+        see=f"설정 쪽 제목: {page.title.text()}. 아래쪽에 {btn(S.BTN_RESTORE_PREVIOUS)}.",
+        images=[f.d.shot("버튼 3 설정 쪽")],
+    )
+
+
+@scene("slot3-restore", "chat", 18, "이전 설정으로 되돌리기")
+def s_slot3_restore(f: Flow) -> Step:
+    w = f.w
+    f.d.press(w.settings_page.restore_btn, btn(S.BTN_RESTORE_PREVIOUS))
+    f.on_panel()
+    f.d.idle()
+    b3 = f.slot(3)
+    restored = S.fill(S.SETTINGS_RESTORED, n=3, name=S.SLOT_DEFAULT_NAMES[3])
+    f.expect(w.message.text(), restored)
+    title, receipt = b3.title.text(), b3.receipt.text()
+    if title != S.SLOT_TITLE.format(n=3, name=S.SLOT_DEFAULT_NAMES[3]):
+        raise f.d.fail(f"버튼 3 이름이 돌아오지 않음 ({title})")
+    slip = particle_slip(restored, "버튼 3")
+    return Step(
+        do=btn(S.BTN_RESTORE_PREVIOUS),
+        see=(f"버튼 3이 처음 것으로 돌아와요. 이름: {q(title)}, 요약: {q(b3.summary.text())}, "
+             f"아래: {q(receipt)}. 맨 위 알림: {q(restored)}."),
+        images=[f.d.shot("버튼 3이 소리 고르게로 돌아옴")],
+        note=f"안내서 18번의 '소리 고르게 · 준비 중'은 창에서 이름과 아래 줄로 나뉘어 보여요: {q(title)} / {q(receipt)}.",
+        issues=[slip] if slip else [],
+    )
+
+
+@scene("undo-last", "chat", 19, "방금 거 취소")
+def s_undo_last(f: Flow) -> Step:
+    text = "방금 거 취소"
+    card = f.chat(text, QuestionCard, "뺄지 묻는 카드", title=S.CARD_TITLE_UNDO)
+    target = f.found["range"]
+    what = undo_what(target.proposal.request, target.outcome.placed, target.proposal.colors)
+    f.expect(card.plain_text(), what)
+    f.found["undo"] = card
+    return Step(
+        do=f"대화 칸에 \"{text}\" → Enter",
+        see=f"카드 {q(S.CARD_TITLE_UNDO)}: {q(what)}. {btn(S.BTN_REMOVE)} {btn(S.BTN_CANCEL)}.",
+        images=f.card_shot(card, "방금 거 취소 카드"),
+    )
+
+
+@scene("undo-last-apply", "chat", 19, "빼기")
+def s_undo_last_apply(f: Flow) -> Step:
+    card = f.found["undo"]
+    f.d.press(card.buttons.get("remove"), btn(S.BTN_REMOVE))
+    target = f.found["range"]
+    f.d.wait(lambda: target.title.text() in card.plain_text() and f.quiet(), "빼기 끝", 30)
+    f.d.idle()
+    if f.world.ours("Blue"):
+        raise f.d.fail("14번에 넣은 파란 표시가 남음")
+    n = target.outcome.placed
+    f.expect(card.plain_text(), target.title.text())
+    if S.UNDO_STARTED in card.plain_text():
+        raise f.d.fail("다 뺀 뒤에도 '빼는 중이에요' 줄이 남음")
+    images = f.card_shot(card, "물었던 카드에 뺀 결과")
+    images.append(f.d.widget_shot(target, "14번 영수증이 뺌으로 바뀜 (카드만)"))
+    images.append(f.d.strip("리졸브 타임라인 흉내: 14번 파란 표시가 빠짐"))
+    return Step(
+        do=f"카드의 {btn(S.BTN_REMOVE)}",
+        see=(f"누르면 카드 맨 아래에 {q(S.UNDO_STARTED)}, 다 빼면 그 줄이 결과로 바뀌어요: "
+             f"{q(target.title.text())}. 안내 14번의 영수증도 같은 줄로 바뀌어요 (둘째 그림). "
+             f"흉내 그림: 그때 넣은 파란 표시 {n}개가 빠져요."),
+        images=images,
+        note=STRIP_NOTE,
+    )
+
+
+@scene("cut", "chat", 20, "여기서 잘라줘")
+def s_cut(f: Flow) -> Step:
+    text = "여기서 잘라줘"
+    pc = f.chat(text, ProposalCard, "보라 표시를 권하는 카드", title=S.OFFER_TITLES["cut"])
+    f.expect(pc.plain_text(), btn(S.BTN_OFFER_YES), btn(S.BTN_OFFER_NO))
+    f.found["cut"] = pc
+    return Step(
+        do=f"\"{text}\" → Enter",
+        see=f"카드 {q(S.OFFER_TITLES['cut'])}. 단추: {btn(S.BTN_OFFER_YES)} {btn(S.BTN_OFFER_NO)}",
+        images=f.card_shot(pc, "자를 수 없다는 카드"),
+    )
+
+
+@scene("cut-no", "chat", 20, "괜찮아요")
+def s_cut_no(f: Flow) -> Step:
+    pc = f.found["cut"]
+    f.d.press(pc.buttons.get("cancel"), btn(S.BTN_OFFER_NO))
+    f.d.idle()
+    f.expect(pc.plain_text(), S.CHAT_OFFER_DECLINED)
+    return Step(
+        do=btn(S.BTN_OFFER_NO),
+        see=f"카드 맨 아래: {q(S.CHAT_OFFER_DECLINED)}",
+        images=f.card_shot(pc, "괜찮아요를 누른 카드"),
+    )
+
+
+@scene("m2", "chat", 21, "자르기 질문 카드")
+def s_m2(f: Flow) -> Step:
+    card = f.w.runs.manual_cards.get("M2")
+    if card is None:
+        raise f.d.fail("자르기 질문 카드가 없음")
+    f.expect(card.plain_text(), S.M2_QUESTION, S.M2_NOTE, *S.M2_ANSWERS.values())
+    answers = " ".join(btn(a) for a in S.M2_ANSWERS.values())
+    return Step(
+        do="(시간이 되면) 시험용 타임라인 앞부분 한 곳을 평소처럼 잘라 낸 뒤 카드에서 고르기",
+        see=(f"대화 칸을 위로 굴리면 안내 10번 뒤에 뜬 카드: {q(S.M2_QUESTION)}. 안내 {q(S.M2_NOTE)}. "
+             f"단추: {answers} {btn(S.BTN_LATER)}"),
+        images=f.card_shot(card, "자르기 질문 카드", scroll=True),
+        note="미리보기에서는 리졸브에서 자를 수 없어서 답하지 않았어요.",
+    )
+
+
+# ── 모두 빼기와 결과 저장 ─────────────────────────────────────────────
+
+@scene("undo-menu", "undo", 22, "되돌리기 메뉴")
+def s_undo_menu(f: Flow) -> Step:
+    w = f.w
+    entries = w.footer.entry_texts()
+    if not entries:
+        raise f.d.fail("되돌리기 목록이 비어 있음")
+    # 메뉴만 찍고 닫는다: 모두 빼기를 묻는 창은 다음 단계에서 띄워 그 단계 이름으로 찍는다
+    image = f.d.menu(w.footer.undo_btn, w.footer.menu, None, "되돌리기 메뉴")
+    ended = [f"({S.UNDO_STATUS['undone']})", *(f"({v})" for v in S.UNDO_STATUS_CLOSED.values()),
+             f"({S.UNDO_STATUS_CLEAR['applied']})", f"({S.UNDO_STATUS_CLEAR['undone']})",
+             f"({S.UNDO_STATUS_CLEAR_CLOSED})"]
+    words = [word for word in ended if any(e.endswith(word) for e in entries)]
+    greyed = f" 끝난 일은 흐리게, 끝에 {' '.join(q(x) for x in words)}." if words else ""
+    return Step(
+        do=f"창 아래 {btn(S.BTN_UNDO)}",
+        see=(f"넣은 일이 새것부터 한 줄씩 보여요. 맨 위: {q(entries[0])}.{greyed} 맨 아래 {q(S.UNDO_ALL)}, "
+             f"안내 {q(S.UNDO_HINT)}."),
+        images=[image],
+        note=(f"넣은 일은 되돌리면 {q(S.UNDO_STATUS['undone'])}, 나중에 대화로 지웠으면 "
+              f"{q(S.UNDO_STATUS_CLOSED['clear'])}, 모두 빼기로 뺐으면 {q(S.UNDO_STATUS_CLOSED['remove_all'])}. "
+              f"지우라는 부탁 자체는 이렇게 적어요: {q(S.UNDO_STATUS_CLEAR['applied'])}."),
+    )
+
+
+@scene("remove-all-confirm", "undo", 22, "모두 빼기 확인")
+def s_remove_all_confirm(f: Flow) -> Step:
+    w = f.w
+    action = w.footer.remove_all_action()
+    image = f.d.dialog(action.trigger, S.BTN_REMOVE, "모두 빼기를 묻는 창", timeout=30)
+    dlg = dict(f.d.last_dialog)
+    f.expect(dlg["title"], S.REMOVE_ALL_TITLE)
+    f.expect(dlg["text"], S.REMOVE_ALL_CONFIRM.split("{")[0], S.REMOVE_ALL_DETAIL.split("{")[0], S.REMOVE_ALL_KEEP)
+    if "0개" in dlg["text"]:
+        raise f.d.fail("모두 빼기 글에 0개인 것이 적힘")
+    return Step(
+        do=f"메뉴에서 {S.UNDO_ALL} → 묻는 창에서 {btn(S.BTN_REMOVE)}",
+        see=f"묻는 창 제목: {q(dlg['title'])}. 글: {q(dlg['text'])}. 단추: {buttons_of(dlg['buttons'])}.",
+        images=[image],
+        note="리졸브가 편집(Edit) 화면이면 이 창이 떠요. 다른 화면일 때는 '이럴 때는'의 첫 단계를 보세요.",
+    )
+
+
+@scene("remove-all-done", "undo", 22, "모두 빠짐")
+def s_remove_all_done(f: Flow) -> Step:
+    w, world = f.w, f.world
+    done = S.REMOVE_ALL_DONE.split("{")[0]
+    f.d.wait(lambda: w.message.text().startswith(done) and f.quiet(), "모두 빼기 끝", 30)
+    f.d.idle()
+    message = w.message.text()
+    left = world.resolve.markers
+    if any(str(m.get("custom") or "").startswith("aih") for m in left.values()):
+        raise f.d.fail("도우미 표시가 남음")
+    tracks = world.info["tracks"]["audio"]
+    if any(t.get("name") == TEST_NAME for t in tracks):
+        raise f.d.fail("'AI 도우미 시험' 트랙이 남음")
+    f.expect(f.w.chat.log.toPlainText(), message)
+    f.expect(message, S.REMOVE_ALL_PART_TRACKS.format(n=1))  # 트랙 결과까지 한 줄에 (대화를 접어도 보이게)
+    count = f"소리 트랙 {len(tracks)}개"
+    f.d.wait(lambda: count in w.header.summary.text() and f.quiet(), "머리말 요약을 다시 읽기", 20)
+    f.d.idle()
+    f.d.chat_bottom()
+    images = [f.d.shot("모두 뺀 뒤"), f.d.strip("리졸브 타임라인 흉내: 직접 찍은 표시만 남음")]
+    summary = w.header.summary.text()
+    shown = f.notice(message)
+    return Step(
+        do="기다려요.",
+        see=(f"대화 칸 맨 아래: {q(message)} (뺀 것을 확인 창과 같은 이름으로, 옛 시험 트랙까지 한 줄에). {shown} "
+             f"머리말 요약도 다시 읽어 바뀌어요: {q(summary)}. "
+             f"흉내 그림: 직접 찍은 표시 {len(left)}개만 남아요."),
+        images=images,
+        note=STRIP_NOTE,
+    )
+
+
+@scene("report", "undo", 23, "결과 저장")
+def s_report(f: Flow) -> Step:
+    w = f.w
+    saved = S.REPORT_SAVED.splitlines()[0]
+    image = f.d.menu(w.header.more_btn, w.more_menu, S.MENU_REPORT, "⋯ 메뉴: 결과 저장")
+    f.d.wait(lambda: w.message.text().startswith(saved) and not w.report_pending, "결과 파일", 60)
+    f.d.idle()
+    name = w.last_report.name
+    if not name.startswith("AI도우미_결과_") or not w.last_report.is_file():
+        raise f.d.fail(f"결과 파일 이름이 다름: {name}")
+    f.expect(w.message.text(), name)
+    return Step(
+        do=f"{btn(S.BTN_MORE)} → {S.MENU_REPORT} (창 아래 {btn(S.BTN_REPORT)}도 같아요)",
+        see=f"맨 위 알림: {q(saved)}, 그 아래 파일 경로 (이름 {q(name)}).",
+        images=[image, f.d.shot("결과를 저장함")],
+        note="실제로는 바탕 화면에 파일이 생기고 그 폴더가 열려요. 미리보기에서는 폴더를 열지 않았어요.",
+    )
+
+
+# ── 이럴 때는 (안내에 없는 화면) ──────────────────────────────────────
+
+@scene("edit-page", "trouble", None, "편집 화면이 아닐 때 모두 빼기")
+def s_edit_page(f: Flow) -> Step:
+    w, world = f.w, f.world
+    # 지난번 시험 흔적이 아직 있고, 리졸브가 색보정(Color) 화면인 경우
+    world.restore_legacy()
+    world.info["page"] = "color"
+    # 실제로는 연결할 때 옛 시험 트랙까지 세어 둔다: 흔적을 다시 넣은 뒤 머리말을 한 번 다시 읽는다
+    w.controller.check_now("refresh")
+    tracks = f"소리 트랙 {len(world.info['tracks']['audio'])}개"
+    f.d.wait(lambda: tracks in w.header.summary.text() and f.quiet(), "머리말 요약을 다시 읽기", 20)
+    f.d.idle()
+    opened = len(world.resolve.opened_pages)
+    shots: List[Image] = []
+
+    def open_menu() -> None:
+        shots.append(f.d.menu(w.footer.undo_btn, w.footer.menu, S.UNDO_ALL, "되돌리기 메뉴"))
+
+    dialog = f.d.dialog(open_menu, S.BTN_SWITCH_REMOVE, "편집 화면으로 바꿀지 묻는 창", timeout=30)
+    dlg = dict(f.d.last_dialog)
+    f.d.wait(lambda: w.message.text().startswith(S.REMOVE_ALL_DONE.split("{")[0]) and f.quiet(), "모두 빼기 끝", 30)
+    f.d.idle()
+    f.expect(dlg["title"], S.REMOVE_ALL_TITLE)
+    f.expect(dlg["text"], S.EDIT_PAGE_DETAIL, S.EDIT_PAGE_SWITCH, S.EDIT_PAGE_MARKERS, S.REMOVE_ALL_LEGACY_NOTE)
+    if not dlg["text"].startswith(S.REMOVE_ALL_CONFIRM.split("{")[0]) or dlg["text"].count("?") != 1:
+        raise f.d.fail("묻는 창의 물음이 하나(모두 뺄까요?)가 아님")
+    if world.resolve.opened_pages[opened:] != ["edit", "color"]:
+        raise f.d.fail(f"편집 화면으로 바꿨다가 돌아가지 않음 ({world.resolve.opened_pages[opened:]})")
+    if any(t.get("name") == TEST_NAME for t in world.info["tracks"]["audio"]):
+        raise f.d.fail("'AI 도우미 시험' 트랙이 남음")
+    done = w.message.text()
+    f.expect(done, S.REMOVE_ALL_PART_TRACKS.format(n=1))
+    f.expect(f.w.chat.log.toPlainText(), done)
+    f.d.chat_bottom()
+    after = f.d.shot("편집 화면으로 바꿔서 뺀 뒤")
+    world.info["page"] = "edit"
+    return Step(
+        do=(f"(지난번 'AI 도우미 시험' 트랙이 남아 있고 리졸브가 편집 화면이 아닐 때) {btn(S.BTN_UNDO)} → "
+            f"{S.UNDO_ALL} → {btn(S.BTN_SWITCH_REMOVE)}"),
+        see=(f"묻는 창 제목: {q(dlg['title'])}. 글: {q(dlg['text'])}. 단추: {buttons_of(dlg['buttons'])}. "
+             f"{btn(S.BTN_SWITCH_REMOVE)}를 누르면 편집 화면으로 바꿔 트랙까지 빼고 원래 화면으로 돌아가요. "
+             f"대화 칸 맨 아래: {q(done)}."),
+        images=[*shots, dialog, after],
+        note=("미리보기에서는 가짜 리졸브를 색보정(Color) 화면으로 두고 지난번 시험 흔적을 다시 넣은 뒤, 머리말을 "
+              f"다시 읽어({q(tracks)}) 찍었어요."),
+    )
+
+
+@scene("old-script", "trouble", None, "스크립트를 한 번 더 눌러야 할 때", media=False)
+def s_old_script(f: Flow) -> Step:
+    w, fake = f.w, f.world.fake
+    fake.old_script = True
+    f.d.press(w.connect_btn, btn(S.BTN_CHECK_CONNECTION))
+    f.d.wait(lambda: w.status.text() == S.STATUS_OLD_SCRIPT and f.quiet(), "옛 스크립트 표시", 20)
+    f.d.settle(0.2)
+    f.expect(f.screen_text(), S.OLD_SCRIPT_HINT, S.SLOT_DISABLED_OLD_SCRIPT)
+    image = f.d.shot("옛 스크립트: 한 번 더 눌러 달라는 안내")
+    slots = f.slot_lines()
+    fake.old_script = False
+    f.d.press(w.connect_btn, btn(S.BTN_CHECK_CONNECTION))
+    f.d.wait(lambda: w.status.text() == S.STATUS_CONNECTED and f.quiet(), "다시 연결됨", 20)
+    f.d.idle()
+    return Step(
+        do=(f"리졸브에서 예전 스크립트가 돌고 있을 때 ({btn(S.BTN_CHECK_CONNECTION)} 또는 자동화 버튼을 "
+            "누르면)"),
+        see=f"맨 위: {q(S.DOT_WARN + ' ' + S.STATUS_OLD_SCRIPT)}. 안내: {q(S.OLD_SCRIPT_HINT)}. " + slots,
+        images=[image],
+        note=(f"리졸브에서 Workspace → Scripts → {SCRIPT_NAME}를 한 번 더 누르면 돼요. 안내서 첫머리의 "
+              "\"2번을 한 번 더\"는 표의 1번(스크립트 누르기)을 말하는 것 같아요."),
+    )
+
+
+@scene("resolve-quit", "trouble", None, "리졸브를 껐을 때", media=False)
+def s_resolve_quit(f: Flow) -> Step:
+    w, world = f.w, f.world
+    world.running = False
+    f.d.wait(lambda: w.status.text() == S.STATUS_RESOLVE_QUIT, "리졸브가 꺼졌어요 표시", 15)
+    f.d.settle(0.2)
+    f.expect(f.screen_text(), S.RESOLVE_QUIT_HINT)
+    image = f.d.shot("리졸브가 꺼짐")
+    slots = f.slot_lines()
+    world.running = True
+    f.d.wait(lambda: w.connected and f.quiet(), "다시 연결됨", 20)
+    f.d.idle()
+    return Step(
+        do="도우미 창을 켜 둔 채 리졸브를 끔",
+        see=(f"몇 초 안에 맨 위: {q(S.DOT_OFF + ' ' + S.STATUS_RESOLVE_QUIT)}. 안내: {q(S.RESOLVE_QUIT_HINT)}. "
+             + slots),
+        images=[image],
+        note="창은 5초마다 윈도우 작업 목록에서 리졸브가 켜져 있는지만 봐요 (리졸브에는 묻지 않아요).",
+    )
+
+
+@scene("update", "trouble", None, "새 판이 나왔을 때 (새 판 받기)", media=False)
+def s_update(f: Flow) -> Step:
+    w = f.w
+    shots: List[Image] = []
+
+    def open_menu() -> None:
+        shots.append(f.d.menu(w.header.more_btn, w.more_menu, S.MENU_UPDATE, "⋯ 메뉴: 새 판 받기"))
+
+    dialog = f.d.dialog(open_menu, S.BTN_CANCEL, "새 판 받기를 묻는 창", timeout=30)
+    dlg = dict(f.d.last_dialog)
+    f.d.settle(0.2)
+    f.expect(dlg["title"], S.UPDATE_CONFIRM_TITLE)
+    f.expect(dlg["text"], S.UPDATE_CONFIRM)
+    if w.closing or not w.isVisible():
+        raise f.d.fail(f"{btn(S.BTN_CANCEL)}를 눌렀는데 창이 닫힘")
+    return Step(
+        do=(f"{btn(S.BTN_MORE)} → {S.MENU_UPDATE} → 묻는 창의 글을 읽고 {btn(S.BTN_UPDATE)} "
+            f"(미리보기에서는 {btn(S.BTN_CANCEL)})"),
+        see=f"묻는 창 제목: {q(dlg['title'])}. 글: {q(dlg['text'])}. 단추: {buttons_of(dlg['buttons'])}.",
+        images=[*shots, dialog],
+        note=(f"{btn(S.BTN_UPDATE)}를 누르면 창이 닫히고, 검은 창이 새 판을 받아 지금 폴더에 넣은 뒤 창을 다시 "
+              "열어요 (몇 분). 미리보기에서는 검은 창을 띄우지 않고 취소했어요. 리졸브에 넣거나 빼는 중에는 받지 "
+              f"않아요 (맨 위 알림: {q(S.UPDATE_BUSY)}). 0.2.0에는 이 메뉴가 없어서, 이 판은 한 번 더 ZIP으로 "
+              "설치해야 해요."),
+    )
+
+
+# ── 작은 화면 ───────────────────────────────────────────────────────
+
+@scene("compact", "small", None, "좁고 낮은 창 (380×640)", media=False)
+def s_compact(f: Flow) -> Step:
+    w = f.w
+    f.d.resize(380, 640)
+    if w.layout_name != "tight":
+        raise f.d.fail(f"좁은 모양이 아님 ({w.layout_name})")
+    if w.header.summary_row.isVisible():
+        raise f.d.fail("좁은 창에서도 머리말에 타임라인 요약 줄이 보임")
+    text = "여기 표시해줘"
+    pc = f.chat(text, ProposalCard, "표시 카드", title=S.CARD_TITLE_PROPOSE)
+    images = f.card_shot(pc, "380×640 창: 버튼은 타일, 카드는 짧게")
+    cut = [name for name, widget in (("입력 칸", w.chat.input), (btn(S.BTN_UNDO), w.footer.undo_btn),
+                                     (btn(S.BTN_REPORT), w.footer.report_btn)) if not f.inside(widget)]
+    if cut:
+        raise f.d.fail("좁은 창에서 잘림: " + ", ".join(cut))
+    return Step(
+        do=f"창을 380×640으로 줄이고 \"{text}\" → Enter",
+        see=("머리말에서 타임라인 요약 줄이 빠지고, 자동화 버튼이 한 줄에 셋인 타일로 바뀌어요 (톱니바퀴는 타일의 "
+             f"오른쪽 위 모서리, 따로 한 줄을 쓰지 않아요). 카드는 {q(S.KEEP_MARKERS)} 줄을 빼서 짧아져요 (마지막 줄에 "
+             "마우스를 올리면 보여요). 입력 칸과 아래 단추는 잘리지 않아요."),
+        images=images,
+        note="작은 노트북 화면이나 창을 줄였을 때의 모양이에요.",
+    )
+
+
+@scene("scale150", "small", None, "윈도우 화면 배율 150%", media=False, subprocess=True)
+def s_scale150(f: Flow) -> Step:
+    if f.scaled is None:
+        raise f.d.fail("다른 배율로 띄울 방법이 없음")
+    image = f.scaled("화면 배율 150%의 도우미 창")
+    sizes = ", ".join(f"{s}%" for s in TEXT_SCALES if s != 100)
+    return Step(
+        do="윈도우 설정 → 디스플레이 → 배율이 150%인 1920×1080 화면 (노트북에 흔해요)",
+        see=("창이 380×640 크기로 계산되어 바로 위와 같은 좁은 모양이 돼요. 그림은 그 화면의 실제 픽셀 크기로 "
+             "보여서 글자가 1.5배 커 보여요."),
+        images=[image],
+        note=(f"윈도우의 화면 배율로 본 모양이에요. 도우미의 ⋯ → {S.MENU_SETTINGS} → {S.MENU_TEXT_SIZE}"
+              f"({sizes})와는 다른 설정이에요. 새로 띄운 창이라 연결 뒤 \"여기 표시해줘\"를 보낸 카드까지 "
+              "찍었어요."),
+    )
