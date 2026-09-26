@@ -137,8 +137,36 @@ jobs:
         shell: pwsh
         run: |
           # ⋯ > 새 판 받기는 GitHub에서 ZIP을 받는다. 여기서는 지금 코드로 같은 모양의 ZIP을 만든다
-          git archive --format=zip --prefix=video-editing-systems-update-test/ -o (Join-Path $env:RUNNER_TEMP 'update-test.zip') HEAD
+          $base = Join-Path $env:RUNNER_TEMP 'update-base.zip'
+          git archive --format=zip --prefix=video-editing-systems-update-test/ -o $base HEAD
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          # 새 판은 맨 위에 폴더를 하나 더 두고 자기 update_windows.bat의 목록에도 넣었다고 친다.
+          # 넣는 일은 새 판의 update_windows.bat이 하므로, 지금 판의 목록에 없어도 그 폴더가 들어와야 한다
+          $src = Join-Path $env:RUNNER_TEMP 'update-src'
+          Expand-Archive -LiteralPath $base -DestinationPath $src -Force
+          $new = Join-Path $src 'video-editing-systems-update-test'
+          New-Item -ItemType Directory -Force -Path (Join-Path $new 'zz_new_folder_update_test') | Out-Null
+          Set-Content -LiteralPath (Join-Path $new 'zz_new_folder_update_test\new_file.txt') -Value 'from the new version'
+          $bat = Join-Path $new 'update_windows.bat'
+          $text = [IO.File]::ReadAllText($bat)
+          $patched = $text.Replace('in (app engine ', 'in (zz_new_folder_update_test app engine ')
+          if ($patched -eq $text) { Write-Error "update_windows.bat에서 넣는 폴더 목록을 찾지 못함"; exit 1 }
+          [IO.File]::WriteAllText($bat, $patched)
+          # Compress-Archive와 달리 .github 같은 점 이름도 빠짐없이, 맨 위 폴더째로 묶는다
+          [IO.Compression.ZipFile]::CreateFromDirectory($new, (Join-Path $env:RUNNER_TEMP 'update-test.zip'), [IO.Compression.CompressionLevel]::Optimal, $true)
+          # 이미 있는 파일도 새 판의 것으로 바뀌는지 보려고 고쳐 둔다 (맨 위 파일, 코드 폴더 안 파일)
+          Add-Content -LiteralPath 'README.md' -Value 'local change (update test)'
+          Add-Content -LiteralPath 'app\update.py' -Value '# local change (update test)'
+          # 지금보다 예전 판의 ZIP (이 프로그램의 모양이지만 판 번호가 낮다: 넣지 않아야 함)
+          $old = Join-Path $env:RUNNER_TEMP 'old-version\video-editing-systems-old'
+          foreach ($f in 'environment.yml', 'setup_windows.bat', 'update_windows.bat', 'app\__main__.py') {
+            $to = Join-Path $old $f
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $to) | Out-Null
+            Copy-Item -LiteralPath $f -Destination $to
+          }
+          New-Item -ItemType Directory -Force -Path (Join-Path $old 'engine') | Out-Null
+          Set-Content -LiteralPath (Join-Path $old 'engine\__init__.py') -Value '__version__ = "0.0.1"'
+          [IO.Compression.ZipFile]::CreateFromDirectory($old, (Join-Path $env:RUNNER_TEMP 'old-version.zip'), [IO.Compression.CompressionLevel]::Optimal, $true)
           # 새 판에 없는 코드 파일(지워져야 함)과 사용자가 폴더에 넣어 둔 파일(남아야 함)
           Set-Content -LiteralPath 'app\zz_stale_for_update_test.py' -Value '# not in the new version'
           Set-Content -LiteralPath 'my_notes_update_test.txt' -Value 'my own notes'
@@ -175,6 +203,8 @@ jobs:
           if (-not (Test-Path -LiteralPath 'app\zz_stale_for_update_test.py')) { Write-Error "거절했는데 파일이 바뀜"; exit 1 }
           $copy = Join-Path $env:LOCALAPPDATA 'video-editing-systems\update\update_windows.bat'
           if (-not (Test-Path -LiteralPath $copy)) { Write-Error "임시 폴더의 복사본이 없음: $copy"; exit 1 }
+          # 러너가 끝에 'exit $LASTEXITCODE'를 붙이므로, 거절한 cmd의 1로 끝나지 않게
+          exit 0
 
       - name: 새 판 받기 거절 (이 프로그램이 아닌 ZIP, 같은 한글 임시 폴더)
         shell: pwsh
@@ -194,15 +224,75 @@ jobs:
           foreach ($left in 'download.zip', 'extract') {
             if (Test-Path -LiteralPath (Join-Path $work $left)) { Write-Error "임시 파일이 남음: $left"; exit 1 }
           }
+          exit 0
 
-      - name: update_windows.bat (새 판 받기와 같은 일, 받는 대신 만든 ZIP으로)
+      - name: 새 판 받기 거절 (지금보다 예전 판의 ZIP)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:AIH_UPDATE_ZIP = Join-Path $env:RUNNER_TEMP 'old-version.zip'
+          $log = Join-Path $env:RUNNER_TEMP 'update_old_version.txt'
+          & cmd.exe /d /c update_windows.bat *> $log
+          $rc = $LASTEXITCODE
+          $text = Get-Content -LiteralPath $log -Raw
+          $text
+          if ($rc -eq 0) { Write-Error "예전 판을 넣음"; exit 1 }
+          if ($text -notmatch 'older than') { Write-Error "예전 판이라는 안내가 없음"; exit 1 }
+          if (-not (Test-Path -LiteralPath 'app\zz_stale_for_update_test.py')) { Write-Error "거절했는데 파일이 바뀜"; exit 1 }
+          exit 0
+
+      - name: 새 판 받기 거절 (가지가 GitHub에 없으면 main을 받되, 지금보다 예전 판이면 넣지 않음)
+        # 판 번호가 99.0.0인 가짜 설치 폴더: 가지(404) 다음에 받은 main은 늘 이보다 예전 판이다 (실제로 GitHub에서 받는다)
         shell: cmd
         run: |
-          set "AIH_UPDATE_ZIP=%RUNNER_TEMP%\update-test.zip"
-          call update_windows.bat > "%RUNNER_TEMP%\update_log.txt" 2>&1
+          set "FAKE=%RUNNER_TEMP%\fake install"
+          mkdir "%FAKE%\engine"
+          > "%FAKE%\run_app.bat" echo @echo off
+          > "%FAKE%\setup_windows.bat" echo @echo off
+          > "%FAKE%\update_source.txt" echo no-such-branch-update-test
+          > "%FAKE%\engine\__init__.py" echo __version__ = "99.0.0"
+          set "LOG=%RUNNER_TEMP%\update_missing_branch.txt"
+          call update_windows.bat "" "%FAKE%" > "%LOG%" 2>&1
           set RC=%errorlevel%
-          type "%RUNNER_TEMP%\update_log.txt"
-          exit /b %RC%
+          type "%LOG%"
+          if "%RC%"=="0" exit /b 1
+          findstr /c:"no longer on GitHub" "%LOG%" >nul || exit /b 1
+          findstr /c:"older than" "%LOG%" >nul || exit /b 1
+          if exist "%FAKE%\app" exit /b 1
+          exit /b 0
+
+      - name: 새 판 받기 (앱과 같은 방법, 창의 PID를 넘겨 닫히기를 기다린 뒤, 받는 대신 만든 ZIP으로)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:AIH_UPDATE_ZIP = Join-Path $env:RUNNER_TEMP 'update-test.zip'
+          $env:AIH_UPDATE_WAIT = '30'
+          $env:AIH_TEST_UPDATE_LOG = Join-Path $env:RUNNER_TEMP 'update_log.txt'
+          # 앱 대신 3초쯤 뒤에 끝나는 프로그램. 앱처럼 아무도 붙잡고 있지 않게 핸들을 놓는다
+          $app = Start-Process -FilePath 'ping.exe' -ArgumentList '-n', '4', '127.0.0.1' -PassThru -WindowStyle Hidden
+          $env:AIH_TEST_APP_PID = [string]$app.Id
+          $app.Dispose()
+          # 앱이 부르는 app/update.py의 start_update 그대로 (임시 폴더로 복사, AIH_UPDATE_COPY=1, PID와 설치 폴더).
+          # 새 콘솔 대신 여기서 기다리며 글을 받고, 키를 누를 사람이 없어 NOPAUSE=1.
+          # 기본 conda의 python으로 띄운다 (환경의 python이 돌고 있으면 setup이 환경 파일을 바꾸지 못할 수 있다)
+          $code = @'
+          import os, subprocess, sys
+          from app import update as updater
+          from engine.resolve_link.paths import state_dir
+          codes = []
+          def run(cmd, **kw):
+              env = dict(kw['env'], NOPAUSE='1')
+              with open(os.environ['AIH_TEST_UPDATE_LOG'], 'wb') as log:
+                  done = subprocess.run(cmd, cwd=kw['cwd'], env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+              codes.append(done.returncode)
+          print(updater.start_update(pid=int(os.environ['AIH_TEST_APP_PID']), install=updater.install_dir(), work=updater.update_dir(state_dir()), popen=run))
+          sys.exit(codes[0])
+          '@
+          & (Join-Path $env:CONDA 'python.exe') -c $code
+          $rc = $LASTEXITCODE
+          Get-Content -LiteralPath $env:AIH_TEST_UPDATE_LOG -Raw
+          if ($rc -ne 0) { Write-Error "새 판 받기가 실패함 (종료 코드 $rc)"; exit 1 }
+          exit 0
 
       - name: 새 판 받기 뒤 확인 (지울 파일은 지워지고 사용자 파일은 남고, 테스트는 건너뛰고, 바로가기는 그대로)
         shell: pwsh
@@ -217,6 +307,13 @@ jobs:
           if ($log -notmatch 'Automatic tests skipped for a quick update') { Write-Error "빠른 설치인데 테스트를 건너뛴다는 줄이 없음"; exit 1 }
           if ($log -match 'Running automatic tests') { Write-Error "빠른 설치인데 테스트를 돌림"; exit 1 }
           if ($log -notmatch 'Update finished') { Write-Error "다 됐다는 줄이 없음"; exit 1 }
+          if ($log -notmatch 'Waiting for the AI helper window to close') { Write-Error "창이 닫히기를 기다리지 않음"; exit 1 }
+          # 고쳐 둔 파일은 새 판의 것으로, 새 판에만 있는 맨 위 폴더도 (새 판의 update_windows.bat이 넣음)
+          $new = Join-Path $env:RUNNER_TEMP 'update-src\video-editing-systems-update-test'
+          foreach ($f in 'README.md', 'app\update.py', 'update_windows.bat', 'zz_new_folder_update_test\new_file.txt') {
+            if (-not (Test-Path -LiteralPath $f)) { Write-Error "새 판의 파일이 없음: $f"; exit 1 }
+            if ((Get-FileHash -LiteralPath $f).Hash -ne (Get-FileHash -LiteralPath (Join-Path $new $f)).Hash) { Write-Error "새 판의 파일로 바뀌지 않음: $f"; exit 1 }
+          }
           # setup_windows.bat과 같은 방법으로 이름을 만든다 (0xB3C4 0xC6B0 0xBBF8 = 도우미)
           $desktop = [Environment]::GetFolderPath('Desktop')
           $p = Join-Path $desktop ('AI ' + [char]0xB3C4 + [char]0xC6B0 + [char]0xBBF8 + '.lnk')
@@ -227,7 +324,7 @@ jobs:
           $target
           if (-not $target.EndsWith('run_app.bat')) { Write-Error "바로가기 대상이 다름: $target"; exit 1 }
           $work = Join-Path $env:LOCALAPPDATA 'video-editing-systems\update'
-          foreach ($left in 'download.zip', 'extract') {
+          foreach ($left in 'download.zip', 'extract', 'apply_update.bat') {
             if (Test-Path -LiteralPath (Join-Path $work $left)) { Write-Error "임시 파일이 남음: $left"; exit 1 }
           }
 

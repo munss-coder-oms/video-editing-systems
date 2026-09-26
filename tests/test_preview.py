@@ -4,6 +4,7 @@
 - steps.json에 판, 앱 판, 스크립트 판, 만든 때, 단계마다 제목·할 일·보이는 것·안내 번호·그림이 있다.
 - index.html은 쪽 조각이다 (<html>/<head>/<body> 없이 <title>로 시작), 밖의 주소는 구글 글꼴뿐이다.
 - 단계 목록이 2.1 시험 안내의 1~23번을 모두 덮는다.
+- 찍고 어느 단계에도 넣지 않은 그림이 있으면 만들기가 멈춘다 (올려도 쪽에서 보이지 않는 파일).
 """
 
 from __future__ import annotations
@@ -48,6 +49,19 @@ def test_images_exist(preview):
         image = QImage(str(path))
         assert not image.isNull() and image.width() >= 300, src
     assert sorted(p.name for p in (out / "img").glob("*.png")) == sorted(src.split("/")[-1] for src in srcs)
+
+
+def test_unreferenced_images_stop_the_build(tmp_path):
+    """앞 몇 단계만 만드는 위 시험으로는 뒤쪽 단계에서 찍고 넣지 않은 그림을 못 본다: 찾는 함수를 따로 본다."""
+    from tools.preview import build
+
+    for name in ("s1-window.png", "s42-menu.png", "s42-dialog.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG")
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    steps = [{"images": [{"src": "img/s1-window.png"}]}, {"images": [{"src": "img/s42-dialog.png"}]}]
+    assert build.unreferenced_images(tmp_path, steps) == ["s42-menu.png"]
+    steps[1]["images"].insert(0, {"src": "img/s42-menu.png"})
+    assert build.unreferenced_images(tmp_path, steps) == []
 
 
 def test_steps_json(preview):

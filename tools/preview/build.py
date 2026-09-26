@@ -189,6 +189,12 @@ def _clear_images(img_dir: Path) -> None:
             p.unlink()
 
 
+def unreferenced_images(img_dir: Path, steps: List[Dict[str, Any]]) -> List[str]:
+    """img에 있지만 어느 단계의 그림에도 없는 PNG (찍고 넣지 않은 것: 올려도 쪽에서 보이지 않는다)."""
+    used = {img["src"].split("/")[-1] for s in steps for img in s["images"]}
+    return sorted(p.name for p in Path(img_dir).glob("*.png") if p.name not in used)
+
+
 def build(out_dir: Path, *, build_label: str = "2.1", generated_at: str, limit: Optional[int] = None,
           log: Callable[[str], None] = print) -> Dict[str, Any]:
     """미리보기를 out_dir에 만든다. limit: 앞에서 몇 단계만 (시험용). 돌려주는 값은 steps.json 내용."""
@@ -235,6 +241,9 @@ def build(out_dir: Path, *, build_label: str = "2.1", generated_at: str, limit: 
                 })
         finally:
             close_window(app, window)
+    unused = unreferenced_images(out_dir / "img", steps)
+    if unused:
+        raise PreviewError("찍었지만 어느 단계에도 넣지 않은 그림: " + ", ".join(unused))
     data = {
         "version": STEPS_VERSION,
         "build": build_label,
@@ -252,4 +261,4 @@ def build(out_dir: Path, *, build_label: str = "2.1", generated_at: str, limit: 
     return data
 
 
-__all__ = ["PreviewError", "SceneError", "build", "qt_env", "scaled_shot", "title_for"]
+__all__ = ["PreviewError", "SceneError", "build", "qt_env", "scaled_shot", "title_for", "unreferenced_images"]

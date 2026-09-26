@@ -85,9 +85,9 @@ if not defined SHORTCUT_OK echo [WARNING] The desktop shortcut could not be crea
 echo Then in DaVinci Resolve: open a project, then click Workspace - Scripts - AI_Helper_Connect.
 echo The app will now open once so you can see it.
 echo.
-if not defined NOPAUSE call "%~dp0run_app.bat"
-if not defined NOPAUSE pause
-exit /b 0
+if defined NOPAUSE exit /b 0
+rem One line on purpose: a later update may replace this file while this window waits at pause.
+call "%~dp0run_app.bat" & pause & exit /b 0
 
 :ask_conda
 if defined NOPAUSE exit /b 0
@@ -110,8 +110,8 @@ echo         Install Miniconda first: https://www.anaconda.com/download/success
 echo         If your Windows user name is Korean, install it to C:\miniconda3
 echo         then run this file again.
 echo.
-if not defined NOPAUSE pause
-exit /b 1
+if defined NOPAUSE exit /b 1
+pause & exit /b 1
 
 :not_extracted
 echo.
@@ -119,5 +119,5 @@ echo [ERROR] Please extract the whole ZIP file first:
 echo         right-click the ZIP file, choose "Extract All", then run
 echo         setup_windows.bat inside the extracted folder.
 echo.
-if not defined NOPAUSE pause
-exit /b 1
+if defined NOPAUSE exit /b 1
+pause & exit /b 1

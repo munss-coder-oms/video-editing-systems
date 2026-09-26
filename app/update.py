@@ -47,8 +47,12 @@ def supported(platform: Optional[str] = None) -> bool:
 
 
 def install_dir() -> Path:
-    """run_app.bat이 있는 저장소 폴더. 지금 폴더(cwd)가 아니라 이 패키지가 있는 곳에서 찾는다."""
-    return Path(__file__).resolve().parent.parent
+    """run_app.bat이 있는 저장소 폴더. 지금 폴더(cwd)가 아니라 이 패키지가 있는 곳에서 찾는다.
+
+    resolve()는 쓰지 않는다: 윈도우에서 네트워크 드라이브(Z:)를 \\\\서버\\공유 경로로 바꾸는데, cmd는 그런
+    폴더로 cd하지 못해 setup_windows.bat과 run_app.bat이 실패한다. 앱을 켠 경로(드라이브 글자) 그대로 쓴다.
+    """
+    return Path(os.path.abspath(__file__)).parent.parent
 
 
 def update_dir(state_root: Path) -> Path:

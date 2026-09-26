@@ -1067,7 +1067,7 @@ def s_edit_page(f: Flow) -> Step:
         see=(f"묻는 창 제목: {q(dlg['title'])}. 글: {q(dlg['text'])}. 단추: {buttons_of(dlg['buttons'])}. "
              f"{btn(S.BTN_SWITCH_REMOVE)}를 누르면 편집 화면으로 바꿔 트랙까지 빼고 원래 화면으로 돌아가요. "
              f"대화 칸 맨 아래: {q(S.REMOVE_ALL_TRACK_DONE)}."),
-        images=[dialog, after],
+        images=[*shots, dialog, after],
         note="미리보기에서는 가짜 리졸브를 색보정(Color) 화면으로 두고 지난번 시험 흔적을 다시 넣어 찍었어요.",
     )
 
