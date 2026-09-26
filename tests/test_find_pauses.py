@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from engine.loudness import (PAUSE_LEAD, PAUSE_TAIL, Region, analyze, find_pauses, find_spikes, pad_region,
-                             pause_threshold, quiet_runs)
+from engine.loudness import (FRAME_SILENCE, PAUSE_LEAD, PAUSE_TAIL, Region, analyze, find_pauses, find_spikes,
+                             pad_region, parse_frames, pause_threshold, quiet_runs)
 from tests.conftest import requires_ffmpeg
 
 
@@ -73,6 +73,28 @@ def test_find_spikes_merges_within_merge_s():
     assert len(got) == 2
     got = find_spikes(frames, -20.0, above_lu=8.0, merge_s=0.3)
     assert len(got) == 3
+
+
+def _framelog(values) -> str:
+    """ffmpeg ebur128 framelog 줄 흉내. values = [(t, M 글자)]."""
+    return "\n".join(
+        f"[Parsed_ebur128_0 @ 0000021c] t: {t:<10} TARGET:-23 LUFS    M:{m:>6} S:{m:>6}     I: -20.0 LUFS"
+        "       LRA:   0.0 LU"
+        for t, m in values
+    )
+
+
+@pytest.mark.parametrize("silent", ["-inf", "nan", "-nan", "-1.#J", "-1.#INF", "-1.#IND", "-INF", "-nan(ind)"])
+def test_digital_silence_is_read_however_ffmpeg_prints_it(silent):
+    """윈도우용 FFmpeg는 완전 무음을 "-1.#J"처럼 찍을 수 있다. 그런 줄도 무음으로 읽어야 긴 쉼을 찾는다."""
+    values = [(round(k * 0.1, 1), silent if 25 <= k <= 60 else "-20.0") for k in range(1, 91)]
+    frames, short = parse_frames(_framelog(values))
+    assert len(frames) == len(short) == 90
+    assert frames[29] == (3.0, FRAME_SILENCE) and short[29] == (3.0, FRAME_SILENCE)
+    assert frames[0] == (0.1, -20.0)
+    got = find_pauses(frames, -20.0, min_s=1.5, pad_s=0.0)
+    assert len(got) == 1
+    assert got[0].start == pytest.approx(2.5 - PAUSE_LEAD) and got[0].end == pytest.approx(6.0 + PAUSE_TAIL)
 
 
 @requires_ffmpeg

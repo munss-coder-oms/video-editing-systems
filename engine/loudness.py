@@ -16,12 +16,12 @@ from .probe import format_time
 
 # 0.1초 줄의 M·S는 소리가 전혀 없으면 "nan"이나 "-inf"로 나온다 (예전에는 이런 줄을 건너뛰어
 # 디지털 무음으로 쉬는 곳을 찾지 못했다). 이런 값은 FRAME_SILENCE로 적는다.
-_FRAME_RE = re.compile(
-    r"t:\s*(?P<t>[\d.]+)\s+.*?M:\s*(?P<m>-?(?:[\d.]+|inf|nan))\s+S:\s*(?P<s>-?(?:[\d.]+|inf|nan))"
-)
-_I_RE = re.compile(r"I:\s*(-?(?:[\d.]+|inf))\s*LUFS")
-_LRA_RE = re.compile(r"LRA:\s*(-?(?:[\d.]+|inf))\s*LU")
-_PEAK_RE = re.compile(r"Peak:\s*(-?(?:[\d.]+|inf))\s*dBFS")
+# 윈도우용 FFmpeg는 같은 값을 "-1.#J"·"-1.#INF"처럼 다르게 찍을 수 있어 (윈도우 검사에서 긴 무음을
+# 못 찾음, 2026-09-26) 숫자 자리의 낱말을 통째로 받고, 숫자가 아니면 무음으로 본다.
+_FRAME_RE = re.compile(r"t:\s*(?P<t>[\d.]+)\s+.*?M:\s*(?P<m>\S+)\s+S:\s*(?P<s>\S+)")
+_I_RE = re.compile(r"I:\s*(\S+)\s*LUFS")
+_LRA_RE = re.compile(r"LRA:\s*(\S+)\s*LU")
+_PEAK_RE = re.compile(r"Peak:\s*(\S+)\s*dBFS")
 
 SILENCE = -70.0
 
@@ -37,6 +37,17 @@ def _frame_num(text: str) -> float:
     if math.isinf(v) or math.isnan(v):
         return FRAME_SILENCE
     return v
+
+
+def parse_frames(err: str) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
+    """ebur128 framelog 줄에서 0.1초마다의 (t, M)과 (t, S) 목록을 읽는다."""
+    frames: List[Tuple[float, float]] = []
+    short: List[Tuple[float, float]] = []
+    for m in _FRAME_RE.finditer(err):
+        t = float(m.group("t"))
+        frames.append((t, _frame_num(m.group("m"))))
+        short.append((t, _frame_num(m.group("s"))))
+    return frames, short
 
 
 def _num(text: str) -> float:
@@ -271,12 +282,7 @@ def analyze(
     )
     err = result.stderr
 
-    frames: list[tuple[float, float]] = []
-    short: list[tuple[float, float]] = []
-    for m in _FRAME_RE.finditer(err):
-        t = float(m.group("t"))
-        frames.append((t, _frame_num(m.group("m"))))
-        short.append((t, _frame_num(m.group("s"))))
+    frames, short = parse_frames(err)
 
     summary = err[err.rfind("Summary:"):] if "Summary:" in err else err
     i_match = _I_RE.search(summary)
