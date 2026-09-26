@@ -72,6 +72,7 @@
 4. 리졸브는 켜 둔 채로 두어도 됩니다. 다 된 뒤 리졸브에서 **Workspace → Scripts → AI_Helper_Connect** 를 한 번 더 누릅니다.
 
 - 프로그램 폴더(app, engine, tests 등)만 새 판으로 바뀌고, 폴더에 직접 넣어 둔 다른 파일은 그대로 둡니다.
+  `samples` 폴더에 넣어 둔 영상과 `tools\ffmpeg` 에 직접 넣은 FFmpeg도 지우지 않습니다.
 - 인터넷이 안 되거나 받은 파일이 이상하면 아무것도 바꾸지 않고 멈춥니다. 바탕화면의 **AI 도우미** 로 다시 켜면 됩니다.
 - 창이 켜지지 않을 때는 폴더의 `update_windows.bat` 을 두 번 눌러도 같은 일을 합니다. 그래도 이상하면 `check_setup.bat` 결과 파일을 보내 주세요.
 

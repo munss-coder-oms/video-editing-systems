@@ -111,9 +111,12 @@ if not exist "%NEW%\app\__main__.py" goto :bad_zip
 echo Copying the new version into the folder...
 rem Code folders are mirrored (/MIR), so files removed in the new version disappear too
 rem (an old test file would otherwise still run). .github holds the automatic checks the tests read.
-rem Nothing else in the folder is deleted.
+rem Nothing else in the folder is deleted: tools\ffmpeg (FFmpeg you put there yourself) is kept
+rem with /XD, and samples (your own videos) only gets the new files, nothing removed.
 set "COPY_FAILED="
-for %%F in (app engine resolve_scripts tests tools docs samples .github) do call :mirror %%F
+for %%F in (app engine resolve_scripts tests docs .github) do call :mirror %%F
+call :mirror tools "/XD ffmpeg"
+call :merge samples
 if defined COPY_FAILED goto :copy_failed
 rem Files at the top of the folder are copied without deleting anything (your own files stay).
 robocopy "%NEW%" "%INSTALL_DIR%" /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
@@ -144,9 +147,18 @@ rem One line on purpose: a later update may replace this temp copy while this wi
 call "%INSTALL_DIR%\run_app.bat" & pause & exit /b 0
 
 :mirror
+rem The second argument is an optional robocopy option in quotes ("/XD name"): excluded folders are not deleted.
 if not exist "%NEW%\%~1\" exit /b 0
 echo   %~1
-robocopy "%NEW%\%~1" "%INSTALL_DIR%\%~1" /MIR /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
+robocopy "%NEW%\%~1" "%INSTALL_DIR%\%~1" /MIR /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP %~2
+if errorlevel 8 set "COPY_FAILED=1"
+exit /b 0
+
+:merge
+rem Only the files at the top of this folder, and nothing is deleted.
+if not exist "%NEW%\%~1\" exit /b 0
+echo   %~1
+robocopy "%NEW%\%~1" "%INSTALL_DIR%\%~1" /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
 if errorlevel 8 set "COPY_FAILED=1"
 exit /b 0
 

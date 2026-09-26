@@ -4,7 +4,8 @@
 - 설치 폴더의 update_windows.bat이 아니라 임시 폴더의 복사본을 띄운다 (돌면서 자기를 덮어쓰지 않게).
 - 리졸브에 넣는 중에는 받지 않는다. 윈도우가 아니면 메뉴 항목은 보이되 꺼져 있다.
 - 판 번호가 바뀐 뒤 처음 켤 때 한 번만 알린다.
-- .bat 파일은 ASCII와 CRLF. update_windows.bat은 코드 폴더만 /MIR로 바꾸고 다른 것은 지우지 않는다.
+- .bat 파일은 ASCII와 CRLF. update_windows.bat은 코드 폴더만 /MIR로 바꾸고 다른 것은 지우지 않는다
+  (tools\ffmpeg에 직접 넣은 FFmpeg와 samples의 영상도 남는다).
 실제로 받고 풀고 넣는 일은 윈도우 CI(.github/workflows/windows.yml)가 한다.
 """
 
@@ -27,7 +28,9 @@ from engine import __version__ as APP_VERSION
 ROOT = Path(__file__).resolve().parent.parent
 BAT = ROOT / "update_windows.bat"
 # .github도: 테스트가 그 안의 검사 설정을 읽으므로 예전 것이 남으면 다음 설치의 테스트가 헷갈린다
-CODE_FOLDERS = {"app", "engine", "resolve_scripts", "tests", "tools", "docs", "samples", ".github"}
+CODE_FOLDERS = {"app", "engine", "resolve_scripts", "tests", "docs", ".github"}
+# tools는 사용자가 직접 넣은 FFmpeg(tools\ffmpeg, engine/ffmpeg.py가 찾는 곳)를 빼고 /MIR.
+# samples는 사용자의 영상을 넣는 곳이라 새 판의 파일만 넣고 아무것도 지우지 않는다
 CMD = r"C:\Windows\system32\cmd.exe"
 
 
@@ -373,11 +376,17 @@ def test_update_bat_mirrors_only_the_code_folders():
     loops = [ln for ln in lines if ln.endswith("do call :mirror %%F")]
     assert len(loops) == 1
     assert set(re.search(r"in \(([^)]*)\)", loops[0]).group(1).split()) == CODE_FOLDERS
+    # tools는 ffmpeg 폴더를 빼고 (/XD로 뺀 폴더는 /MIR도 지우지 않는다), samples는 지우지 않고 넣기만
+    assert 'call :mirror tools "/XD ffmpeg"' in lines
+    assert "call :merge samples" in lines
+    calls = [ln for ln in lines if re.match(r"(for .* do )?call :(mirror|merge) ", ln)]
+    assert len(calls) == 3
     robo = [ln for ln in lines if ln.lower().startswith("robocopy ")]
     mirror = [ln for ln in robo if "/MIR" in ln.upper()]
-    assert mirror == [r'robocopy "%NEW%\%~1" "%INSTALL_DIR%\%~1" /MIR /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP']
+    assert mirror == [r'robocopy "%NEW%\%~1" "%INSTALL_DIR%\%~1" /MIR /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP %~2']
     rest = [ln for ln in robo if ln not in mirror]
-    assert rest == [r'robocopy "%NEW%" "%INSTALL_DIR%" /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP']
+    assert rest == [r'robocopy "%NEW%" "%INSTALL_DIR%" /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP',
+                    r'robocopy "%NEW%\%~1" "%INSTALL_DIR%\%~1" /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP']
     for ln in robo:
         assert not re.search(r"\s/(PURGE|MOV|MOVE|S|E)\b", ln, re.I), ln  # 맨 위 폴더에서는 지우지 않는다
         assert '\\"' not in ln  # "C:\x\"는 robocopy에서 따옴표를 먹는다
@@ -444,5 +453,6 @@ def test_windows_ci_checks_the_update():
             assert ": " not in value and not value.endswith(":"), value
     for words in ("git archive --format=zip --prefix=video-editing-systems-update-test/",
                   r"app\zz_stale_for_update_test.py", "my_notes_update_test.txt", "AIH_UPDATE_ZIP",
+                  r"tools\ffmpeg\bin\keep_update_test.txt", r"samples\my_video_update_test.txt",
                   "call update_windows.bat", "Automatic tests skipped for a quick update"):
         assert words in text, words

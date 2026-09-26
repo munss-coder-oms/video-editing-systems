@@ -142,6 +142,10 @@ jobs:
           # 새 판에 없는 코드 파일(지워져야 함)과 사용자가 폴더에 넣어 둔 파일(남아야 함)
           Set-Content -LiteralPath 'app\zz_stale_for_update_test.py' -Value '# not in the new version'
           Set-Content -LiteralPath 'my_notes_update_test.txt' -Value 'my own notes'
+          # samples에 넣어 둔 영상과 tools\ffmpeg에 직접 넣은 FFmpeg (코드 폴더 안이지만 남아야 함)
+          New-Item -ItemType Directory -Force -Path 'tools\ffmpeg\bin' | Out-Null
+          Set-Content -LiteralPath 'tools\ffmpeg\bin\keep_update_test.txt' -Value 'my own ffmpeg'
+          Set-Content -LiteralPath 'samples\my_video_update_test.txt' -Value 'my own video'
           # 이 프로그램이 아닌 ZIP (받아도 아무것도 바꾸지 않아야 함)
           $bad = Join-Path $env:RUNNER_TEMP 'not-this-program'
           New-Item -ItemType Directory -Force -Path (Join-Path $bad 'something') | Out-Null
@@ -206,6 +210,10 @@ jobs:
           $log = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'update_log.txt') -Raw
           if (Test-Path -LiteralPath 'app\zz_stale_for_update_test.py') { Write-Error "새 판에 없는 코드 파일이 남아 있음"; exit 1 }
           if (-not (Test-Path -LiteralPath 'my_notes_update_test.txt')) { Write-Error "사용자가 넣어 둔 파일이 지워짐"; exit 1 }
+          foreach ($mine in 'tools\ffmpeg\bin\keep_update_test.txt', 'samples\my_video_update_test.txt') {
+            if (-not (Test-Path -LiteralPath $mine)) { Write-Error "사용자가 넣어 둔 파일이 지워짐: $mine"; exit 1 }
+          }
+          if (-not (Test-Path -LiteralPath 'samples\README.md')) { Write-Error "samples\README.md가 없음"; exit 1 }
           if ($log -notmatch 'Automatic tests skipped for a quick update') { Write-Error "빠른 설치인데 테스트를 건너뛴다는 줄이 없음"; exit 1 }
           if ($log -match 'Running automatic tests') { Write-Error "빠른 설치인데 테스트를 돌림"; exit 1 }
           if ($log -notmatch 'Update finished') { Write-Error "다 됐다는 줄이 없음"; exit 1 }
