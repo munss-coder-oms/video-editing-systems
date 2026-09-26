@@ -2,8 +2,10 @@
 
 녹화 파일 안의 소리마다 한 줄: "소리 2 · 스테레오 · 타임라인에서 켜짐", [▶ 3초 듣기], [이걸로].
 - 한 소리가 나머지를 모두 섞은 것처럼 보이면 (추정) 그 줄과 위에 알린다. 고르는 것은 사람이다.
-- 섞은 소리와 다른 소리가 함께 타임라인에서 켜져 있으면 "목소리가 두 번 들리고 있을 수 있어요".
-- 3초 듣기는 이 PC에서만 튼다 (리졸브는 건드리지 않는다).
+- 섞은 소리와 다른 소리가 함께 타임라인에서 켜져 있으면 "목소리가 두 번 들릴 수 있어요" (어느 소리인지 적어서,
+  이 카드에 한 번만. 확인 카드마다 되풀이하지 않는다).
+- 3초 듣기는 이 PC에서만 튼다 (리졸브는 건드리지 않는다). 트는 3초 동안 그 단추는 "■ 듣는 중".
+- 고르면 카드는 한 줄("목소리는 소리 2로 정했어요 …")로 접힌다.
 - "같이 꺼야 두 번 들리지 않아요"(트랙 끄기 제안)는 트랙을 바꾸는 일이라 2.2에서 더한다. 지금은 알리기만 한다.
 """
 
@@ -11,13 +13,19 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from . import strings_ko as S
 from .cards import Card, _label
 
 QUIET_LUFS = -50.0  # 이보다 작으면 "거의 조용함"
+LISTEN_MS = 3000  # 3초 듣기: 그동안 단추에 "■ 듣는 중"
+
+
+def doubled_text(mix: Optional[int]) -> str:
+    """목소리가 두 번 들릴 수 있음: 전체 소리가 몇 번인지 알면 그 번호까지."""
+    return S.DOUBLED_VOICE.format(mix=mix + 1) if mix is not None else S.DOUBLED_VOICE_SHORT
 
 
 def stream_detail(choice, mix: Optional[int], previous: Optional[int]) -> str:
@@ -46,6 +54,10 @@ class VoicePickerCard(Card):
         self.question = question
         self.listen_buttons: Dict[int, QPushButton] = {}
         self.pick_buttons: Dict[int, QPushButton] = {}
+        self.playing: Optional[int] = None
+        self._play_timer = QTimer(self)
+        self._play_timer.setSingleShot(True)
+        self._play_timer.timeout.connect(lambda: self.set_playing(None))
         q = question
         if q.reason == "changed":
             self.add_line(S.VOICE_CHANGED, "warning")
@@ -53,9 +65,9 @@ class VoicePickerCard(Card):
             self.add_line(S.VOICE_CHANGE)
         self.add_line(S.VOICE_INTRO.format(n=len(q.streams)), "secondary")
         if q.mix is not None:
-            self.add_line(S.VOICE_MIX.format(n=q.mix + 1))
+            self.add_line(S.fill(S.VOICE_MIX, n=q.mix + 1))
         if q.doubled:
-            self.add_line(S.DOUBLED_VOICE, "warning")
+            self.add_line(doubled_text(q.mix), "warning")
         for choice in q.streams:
             self.body_box.addWidget(self._row(choice))
         self.set_buttons([("cancel", S.BTN_CANCEL, False)])
@@ -73,6 +85,9 @@ class VoicePickerCard(Card):
         box.addLayout(text, 1)
         listen = QPushButton(S.BTN_LISTEN)
         listen.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        # "■ 듣는 중"으로 바뀌어도 단추 너비가 흔들리지 않게 두 글 중 넓은 쪽으로
+        fm = listen.fontMetrics()
+        listen.setMinimumWidth(max(fm.horizontalAdvance(S.BTN_LISTEN), fm.horizontalAdvance(S.BTN_LISTENING)) + 24)
         listen.setAccessibleName(f"{S.VOICE_STREAM.format(n=choice.index + 1)} {S.BTN_LISTEN}")
         listen.clicked.connect(lambda _=False, i=choice.index: self.listen.emit(i))
         pick = QPushButton(S.BTN_PICK)
@@ -95,6 +110,19 @@ class VoicePickerCard(Card):
         for i, btn in self.listen_buttons.items():
             btn.setEnabled(index != i and not self.locked)
 
+    def set_playing(self, index: Optional[int], ms: int = LISTEN_MS) -> None:
+        """트는 동안(3초) 그 줄의 단추를 "■ 듣는 중"으로. None이면 모두 "▶ 3초 듣기"로 돌린다."""
+        self.playing = index
+        for i, btn in self.listen_buttons.items():
+            try:
+                btn.setText(S.BTN_LISTENING if i == index else S.BTN_LISTEN)
+            except RuntimeError:
+                continue
+        if index is None:
+            self._play_timer.stop()
+        else:
+            self._play_timer.start(ms)
+
     def _apply_enabled(self) -> None:
         super()._apply_enabled()
         # [이걸로]는 다시 계산이라 다른 일이 도는 동안 꺼 둔다 (설계 B10). 3초 듣기는 이 PC에서만이라 그대로
@@ -104,7 +132,15 @@ class VoicePickerCard(Card):
             btn.setEnabled(not self.locked)
 
     def done(self, index: Optional[int], note: Optional[str] = None) -> None:
-        """고름(또는 취소): 단추를 모두 끈다."""
-        self.close_card(note if note is not None else S.VOICE_PICKED.format(n=(index or 0) + 1))
+        """고름: 카드를 한 줄("목소리는 소리 2로 정했어요 …")로 접는다. 취소: 줄은 두고 단추만 끈다."""
+        self._play_timer.stop()
+        if note is None and index is not None:
+            text = S.fill(S.VOICE_PICKED, n=index + 1)
+            self.clear_body()
+            self.listen_buttons, self.pick_buttons = {}, {}
+            self.title.setText(text)
+            self.close_card(None, announce=text)
+        else:
+            self.close_card(note if note is not None else S.CARD_CANCELLED)
         self.locked = True
         self._apply_enabled()

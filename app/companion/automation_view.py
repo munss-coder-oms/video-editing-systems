@@ -1,7 +1,7 @@
 """자동화 버튼 1·2·3 (설계 B1.1, B1.2, B2).
 
-버튼마다 이름, 설정 요약 한 줄, 마지막 결과(또는 못 쓰는 이유) 한 줄. 준비 중인 일(소리 고르게 등)은
-"준비 중"으로 꺼 두고 풍선 도움말로 까닭을 적는다.
+버튼마다 "번호 · 이름", 설정 요약 한 줄, 마지막 결과(또는 못 쓰는 이유) 한 줄. 준비 중인 일(소리 고르게 등)은
+"준비 중"으로 꺼 두고 풍선 도움말로 까닭을 적는다. 꺼 둔 버튼은 점선 테두리와 흐린 이름으로 보인다.
 
 넓은 화면: 버튼마다 한 줄(60) + ⚙(40×40). 낮은 화면: 세 칸 타일(약 116×68), ⚙는 타일 아래 한 줄
 (설계 B1.2 "⚙는 늘 누를 수 있다": 1080p·150%인 화면은 낮은 모양이라 숨기면 설정을 바꿀 길이 없다).
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -68,10 +68,11 @@ class SlotButton(QPushButton):
         self.name = slot.get("name") or S.SLOT_DEFAULT_NAMES.get(self.number, "")
         self.ready = is_ready(self.kind)
         self.last_receipt: Optional[str] = None
+        self._min_h = theme.SLOT_ROW_H
         box = QVBoxLayout(self)
         box.setContentsMargins(10, 4, 10, 4)
         box.setSpacing(0)
-        self.title = QLabel(self.name)
+        self.title = QLabel(S.SLOT_TITLE.format(n=self.number, name=self.name))
         self.title.setProperty("role", "slot-title")
         self.summary = QLabel(slot_summary(slot))
         self.summary.setProperty("role", "secondary")
@@ -81,19 +82,29 @@ class SlotButton(QPushButton):
             label.setAttribute(Qt.WA_TransparentForMouseEvents)
             label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             box.addWidget(label)
-        self.setAccessibleName(self.name)
+        self.setAccessibleName(S.SLOT_TITLE.format(n=self.number, name=self.name))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.set_mode("rows")
+
+    # 스타일(min-height: 40)이 다시 입혀져도 버튼 줄 60이 줄지 않게: 크기 힌트에 바닥을 둔다
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt 이름
+        return super().sizeHint().expandedTo(QSize(0, self._min_h))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return super().minimumSizeHint().expandedTo(QSize(0, self._min_h))
 
     def set_mode(self, mode: str) -> None:
         tiles = mode != "rows"
         if tiles:
             # 좁은 타일: 이름은 조금 작게(14/600), 이름과 이유는 줄을 바꿔 잘리지 않게
+            self._min_h = theme.TILE_H
             self.setMinimumSize(theme.TILE_W - 20, theme.TILE_H)
             self.setMaximumHeight(theme.TILE_H + 8)
         else:
+            self._min_h = theme.SLOT_ROW_H
             self.setMinimumSize(0, theme.SLOT_ROW_H)
             self.setMaximumHeight(theme.SLOT_ROW_H + 16)
+        self.updateGeometry()
         self.summary.setVisible(not tiles)
         self.title.setProperty("role", "tile-title" if tiles else "slot-title")
         for label in (self.title, self.receipt):
@@ -109,13 +120,15 @@ class SlotButton(QPushButton):
 
 
 class ProgressRow(QWidget):
-    """계산·넣기 진행: 한 줄 글, 얇은 막대, [멈추기] (멈출 수 없는 일이면 숨긴다)."""
+    """계산·넣기 진행: "쉬는 곳 표시 · 1/3 단계: …" 한 줄, 작은 글 한 줄(리졸브는 그대로 쓰셔도 돼요),
+    얇은 막대, [멈추기] (멈출 수 없는 일이면 숨긴다). 카드처럼 테두리 있는 바탕 (WA_StyledBackground)."""
 
     stop_clicked = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("progressRow")
+        self.setAttribute(Qt.WA_StyledBackground, True)  # 그냥 QWidget은 스타일의 바탕·테두리를 그리지 않는다
         box = QVBoxLayout(self)
         box.setContentsMargins(10, 4, 4, 4)
         box.setSpacing(2)
@@ -131,6 +144,12 @@ class ProgressRow(QWidget):
         top.addWidget(self.label, 1)
         top.addWidget(self.stop_btn)
         box.addLayout(top)
+        self.note = QLabel("")
+        self.note.setWordWrap(True)
+        self.note.setProperty("role", "secondary")
+        self.note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.note.setVisible(False)
+        box.addWidget(self.note)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.bar.setTextVisible(False)
@@ -138,8 +157,10 @@ class ProgressRow(QWidget):
         box.addWidget(self.bar)
         self.setMinimumHeight(theme.SLOT_ROW_H - 8)
 
-    def set_progress(self, text: str, frac: Optional[float], can_stop: bool) -> None:
+    def set_progress(self, text: str, frac: Optional[float], can_stop: bool, note: Optional[str] = None) -> None:
         self.label.setText(text)
+        self.note.setText(note or "")
+        self.note.setVisible(bool(note))
         if frac is None:
             self.bar.setRange(0, 0)  # 얼마나 남았는지 모름: 움직이는 막대
         else:
@@ -242,7 +263,7 @@ class AutomationView(QWidget):
         for btn in self.buttons:
             if not btn.ready:
                 btn.set_reason(S.SLOT_DISABLED_NOT_READY)
-                btn.setToolTip(S.TIP_SLOT_NOT_READY.format(name=kind_name(btn.kind)))
+                btn.setToolTip(S.fill(S.TIP_SLOT_NOT_READY, name=kind_name(btn.kind)))
             elif running is not None and btn.number == running:
                 btn.set_reason(S.SLOT_RUNNING)
             elif running is not None:
@@ -257,10 +278,11 @@ class AutomationView(QWidget):
                 if btn.isEnabled():
                     btn.receipt.setText(text or S.SLOT_NEVER_RUN)
 
-    def show_progress(self, number: Optional[int], text: str, frac: Optional[float], can_stop: bool) -> None:
+    def show_progress(self, number: Optional[int], text: str, frac: Optional[float], can_stop: bool,
+                      note: Optional[str] = None) -> None:
         was = (self.running, self.progress.isVisibleTo(self))
         self.running = number
-        self.progress.set_progress(text, frac, can_stop)
+        self.progress.set_progress(text, frac, can_stop, note)
         self.progress.setVisible(True)
         if was != (number, True):
             self._place()

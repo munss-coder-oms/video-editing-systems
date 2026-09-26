@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from .. import ffmpeg
 from ..analysis_cache import AnalysisCache, StreamAnalysis
+from ..edits.apply import LEGACY_TEST_TRACK
 from ..edits.journal import key_for
 from ..edits.proposal import (MarkerRow, Proposal, VoiceInfo, build_specs, new_proposal_id, pause_name,
                               spike_name)
@@ -23,6 +24,7 @@ from ..loudness import find_spikes, quiet_runs
 from ..probe import MediaInfo, probe
 from ..resolve_link.bridge import BridgeCancelled, BridgeError, BridgeTimeout
 from ..resolve_link.ops import Item, ResolveOps
+from ..resolve_link.testfiles import TEST_TONE_NAME
 from ..timeline.audio_map import (StreamAssignment, assign_streams, best_speech_moment, detect_mix,
                                   doubled_voice, layout_signature, profile_change, stream_channels,
                                   track_streams_from_probe)
@@ -281,6 +283,18 @@ def plan_slot(req: SlotRequest, env: PlanEnv, voice: VoiceMemory, *, override: O
         raise
 
 
+def helper_own(snap: TimelineSnapshot, it: Item) -> bool:
+    """도우미가 스스로 넣은 것: 예전 시험 트랙("AI 도우미 시험") 위의 클립, 시험 삐 소리, 기능 점검 파일."""
+    if snap.track_name(it.track) == LEGACY_TEST_TRACK:
+        return True
+    path = str(it.path or "").replace("\\", "/")
+    name = path.rsplit("/", 1)[-1].lower()
+    if name == TEST_TONE_NAME:
+        return True
+    folder = path.rsplit("/", 2)[-2].lower() if path.count("/") >= 1 else ""
+    return folder == "probe" and name.startswith("probe_") and name.endswith(".wav")
+
+
 def _plan_slot(req: SlotRequest, env: PlanEnv, voice: VoiceMemory, *, override: Optional[VoiceOverride],
                ask_voice: bool, proposal_id: Optional[str]) -> Union[Proposal, VoiceQuestion]:
     k = get_kind(req.kind)
@@ -296,6 +310,11 @@ def _plan_slot(req: SlotRequest, env: PlanEnv, voice: VoiceMemory, *, override: 
     fps, tl_start, tl_end = float(snap.fps), snap.start, snap.end
     on_tracks = snap.enabled_tracks("audio")
     usable = [it for it in snap.items if it.enabled is not False and it.track in on_tracks and it.path]
+    own = [it for it in usable if helper_own(snap, it)]
+    if own:
+        # 도우미가 시험으로 넣은 삐 소리·점검 파일은 목소리가 아니다 (트랙 줄에 A5가 끼지 않게)
+        debug["own_items"] = len(own)
+        usable = [it for it in usable if it not in own]
     if not usable:
         raise PlanRefused("no_audio_items")
 
@@ -382,7 +401,11 @@ def _plan_slot(req: SlotRequest, env: PlanEnv, voice: VoiceMemory, *, override: 
         if p == primary:
             continue
         if len(m.audio_tracks) == 1:
-            voice_of[p] = 0
+            if len(pm.audio_tracks) == 1:
+                voice_of[p] = 0
+            else:
+                # 목소리를 고른 녹화 옆의 소리 하나짜리 파일 (음악·효과음일 때가 많다): 목소리로 보지 않고 알린다
+                warnings["single_file"] = warnings.get("single_file", 0) + 1
             continue
         s2 = layout_signature(m)
         c2 = voice.choice(s2)

@@ -32,7 +32,7 @@ from engine.edits.apply import (OUR_PREFIX, ApplyOutcome, active_entries, apply_
                                 resume_markers, scan_ours, undo_proposal)
 from engine.edits.journal import Journal
 from engine.edits.marks import ClearOutcome
-from engine.edits.proposal import Proposal
+from engine.edits.proposal import Proposal, without_near
 from engine.edits.scope import check_proposal
 from engine.probe import probe as probe_media
 from engine.resolve_link.bridge import BridgeTimeout
@@ -45,7 +45,7 @@ from . import steps
 from . import strings_ko as S
 from .cards import Card, ClearCard, ProposalCard, QuestionCard
 from .jobs import JobRunner
-from .voice_picker import VoicePickerCard
+from .voice_picker import VoicePickerCard, doubled_text
 
 WRITE_JOBS = ("apply", "undo", "clear", "remove_all")  # 리졸브와 일지를 바꾸는 일 (도는 동안 맞춰 보기를 쉰다)
 DEFAULT_SEC_PER_MIN = 6.0  # 처음 잴 때 1분에 몇 초 걸릴지 (첫 측정 전 어림)
@@ -107,6 +107,7 @@ class RunController(QObject):
         self.manual_cards: Dict[str, QuestionCard] = {}
         self.probe_file: Callable[[str], Any] = probe_media  # 시험에서 바꾼다
         self.exists: Callable[[str], bool] = os.path.isfile
+        self.doubled_told: set = set()  # "목소리가 두 번 들릴 수 있어요"를 알린 녹화 모양 (세션에 한 번)
 
     # ── 공통 ──────────────────────────────────────────────────────────
 
@@ -145,8 +146,21 @@ class RunController(QObject):
     def _add_card(self, card: Card) -> Card:
         self.cards.append(card)
         card.set_busy(self.cards_blocked())
+        # 이 카드가 띄운 머리말 알림은 카드가 닫힐 때 고친다 (답한 뒤에도 "넣을까요?"가 남지 않게)
+        card.closed.connect(lambda note, c=card: self.w.notice_closed(c, note))
         self.w.chat.add_card(card)
         return card
+
+    def refresh_save_slots(self) -> None:
+        """⚙에서 버튼이 바뀜: 떠 있는 대화 카드의 "자동화 버튼에 저장" 고르기 칸을 새 이름으로."""
+        for card in list(self.cards):
+            if not isinstance(card, ProposalCard):
+                continue
+            try:
+                if card.save_slots is not None:
+                    card.refresh_save_slots(self.save_slots(card.proposal))
+            except RuntimeError:
+                self.cards.remove(card)
 
     def start_write(self, name: str, work: Callable[[ResolveOps, Any], Any], on_done: Callable[[Any], None],
                     on_failed: Callable[[BaseException], None], on_progress=None) -> bool:
@@ -184,9 +198,10 @@ class RunController(QObject):
         if number is not None:
             self.w.automation.set_receipt(number, text)
 
-    def _progress(self, number: Optional[int], text: str, frac: Optional[float], can_stop: bool) -> None:
+    def _progress(self, number: Optional[int], text: str, frac: Optional[float], can_stop: bool,
+                  note: Optional[str] = None) -> None:
         self.running_slot = number
-        self.w.automation.show_progress(number, text, frac, can_stop)
+        self.w.automation.show_progress(number, text, frac, can_stop, note)
         self.w._refresh()
 
     def _explain(self, exc: BaseException) -> str:
@@ -257,7 +272,9 @@ class RunController(QObject):
 
     def _plan_progress(self, state: RunState, stage: int, frac: float, info: Dict[str, Any]) -> None:
         stage = max(1, min(len(S.STAGE_NAMES), int(stage)))
-        parts = [S.PROGRESS_LINE.format(i=stage, n=len(S.STAGE_NAMES), stage=S.STAGE_NAMES[stage - 1])]
+        line = S.PROGRESS_LINE.format(i=stage, n=len(S.STAGE_NAMES), stage=S.STAGE_NAMES[stage - 1])
+        name = (state.req.name if state.req is not None else "") or ""
+        parts = [S.PROGRESS_SLOT.format(name=name, line=line) if name else line]
         media_s = info.get("media_s")
         if stage == 2 and isinstance(media_s, (int, float)) and media_s > 0 and frac < 1.0:
             spm = self.w.settings.sec_per_min(state.req.kind) or DEFAULT_SEC_PER_MIN
@@ -265,9 +282,8 @@ class RunController(QObject):
             if left >= 1.0:
                 parts.append(S.PROGRESS_ETA_M.format(m=int(math.ceil(left / 60.0))) if left >= 90 else
                              S.PROGRESS_ETA_S.format(s=int(math.ceil(left))))
-        parts.append(S.PROGRESS_FREE)
         overall = (stage - 1 + max(0.0, min(1.0, frac))) / len(S.STAGE_NAMES)
-        self._progress(state.number, S.PROGRESS_SEP.join(parts), overall, True)
+        self._progress(state.number, S.PROGRESS_SEP.join(parts), overall, True, S.PROGRESS_FREE)
 
     def _plan_failed(self, state: RunState, exc: BaseException) -> None:
         if self.w.closing:
@@ -293,7 +309,7 @@ class RunController(QObject):
                                     blocked_while_busy=("again",))
                 card.clicked.connect(lambda key, c=card: self._refused_answer(state, c, key))
                 self._add_card(card)
-                self.w.show_message(text)
+                self.w.show_message(text, owner=card)
             else:
                 if exc.code == "unmapped_tracks":
                     # 다시 골라도 소용없으니 [목소리 다시 고르기]를 주지 않는다
@@ -362,26 +378,39 @@ class RunController(QObject):
         if prev:
             n = sum(len((e.get("created") or {}).get("markers") or []) for e in prev)
             word = fmt.color_word(p.color)
-            card = QuestionCard(S.RERUN_QUESTION.format(color_word=word, n=n), [],
+            question = S.RERUN_QUESTION.format(color_word=word, n=n)
+            card = QuestionCard(question, [S.RERUN_EXPLAIN],
                                 [("replace", S.BTN_REPLACE, True), ("add", S.BTN_ADD_MORE, False)])
             ids = [e.get("proposal_id") for e in prev if e.get("proposal_id")]
-            card.clicked.connect(lambda key, c=card: self._rerun_answer(state, p, c, key, ids, n))
+            kept = [m.get("frame") for e in prev for m in ((e.get("created") or {}).get("markers") or [])
+                    if isinstance(m, dict)]
+            card.clicked.connect(lambda key, c=card: self._rerun_answer(state, p, c, key, ids, n, kept))
             self._add_card(card)
             self._receipt(state.number, S.SLOT_RECEIPT_WAITING)
+            self.w.show_message(question, owner=card)
             return
         state.replace = []
         self._show_proposal(state, p, 0)
 
     def _rerun_answer(self, state: RunState, p: Proposal, card: QuestionCard, key: str, ids: List[str],
-                      n: int) -> None:
+                      n: int, kept: Optional[List[Any]] = None) -> None:
         if key == "replace":
             state.replace = list(ids)
-            card.answered(S.BTN_REPLACE)
+            card.answered(S.MANUAL_ANSWERED.format(answer=S.BTN_REPLACE))
             self._show_proposal(state, p, n)
-        else:
-            state.replace = []
-            card.answered(S.BTN_ADD_MORE)
-            self._show_proposal(state, p, 0)
+            return
+        state.replace = []
+        card.answered(S.MANUAL_ANSWERED.format(answer=S.BTN_ADD_MORE))
+        # [더하기]: 이미 표시가 있는 곳(앞뒤 5프레임)은 빼고 새로 찾은 곳만 더한다 (같은 자리에 두 번 넣지 않게)
+        new, dropped = without_near(p, kept or [])
+        if dropped and new.count == 0:
+            self._say(S.RERUN_ADD_NONE)
+            self._receipt(state.number, None)
+            self._record({"kind": p.kind, "slot": state.number, "stage": "card", "status": "nothing_new",
+                          "proposal_id": p.id, "dropped_near": dropped})
+            return
+        note = S.RERUN_ADD_SKIP.format(n=dropped, m=new.count) if dropped else None
+        self._show_proposal(state, new, 0, add_note=note)
 
     def guard_for(self, p) -> Any:
         """대화에서 온 제안만 범위 지킴이로 본다 (버튼은 부탁한 범위가 없다)."""
@@ -410,13 +439,23 @@ class RunController(QObject):
         self.by_pid[p.id] = card
         self.w.show_message(card.title.text())
 
-    def _show_proposal(self, state: RunState, p: Proposal, replace_count: int) -> None:
+    def _doubled_note(self, p: Proposal) -> Optional[str]:
+        """목소리가 두 번 들릴 수 있음: 목소리 고르기 카드가 이미 말했거나 이 세션에 알렸으면 다시 말하지 않는다."""
+        v = getattr(p, "voice", None)
+        if v is None or not v.doubled or v.signature in self.doubled_told:
+            return None
+        self.doubled_told.add(v.signature)
+        return doubled_text(v.mix)
+
+    def _show_proposal(self, state: RunState, p: Proposal, replace_count: int,
+                       add_note: Optional[str] = None) -> None:
         old = self.pending.pop(state.number, None) if state.number is not None else None
         if old is not None:
             old.supersede()
         slot_name = (state.chat or {}).get("slot_name")
         card = ProposalCard(p, replace_count=replace_count, compact=self.w.layout_name == "tight",
-                            guard=self.guard_for(p), save_slots=self.save_slots(p), slot_name=slot_name)
+                            guard=self.guard_for(p), save_slots=self.save_slots(p), slot_name=slot_name,
+                            doubled_note=self._doubled_note(p), add_note=add_note)
         card.clicked.connect(lambda key, c=card: self._card_action(state, c, key))
         self._add_card(card)
         self.by_pid[p.id] = card
@@ -426,10 +465,10 @@ class RunController(QObject):
             if state.number is not None:
                 self.pending[state.number] = card
             self._receipt(state.number, S.SLOT_RECEIPT_WAITING)
-            self.w.show_message(S.CARD_TITLE_FOUND)
+            self.w.show_message(S.CARD_TITLE_FOUND, owner=card)
         else:
-            self._receipt(state.number, S.SLOT_RECEIPT_NONE.format(at=time.strftime("%H:%M")))
-            self.w.show_message(S.CARD_TITLE_NONE)
+            self._receipt(state.number, S.SLOT_RECEIPT_NONE.format(at=fmt.clock_time(time.strftime("%H:%M"))))
+            self.w.show_message(S.CARD_TITLE_NONE, owner=card)
 
     # ── 목소리 고르기 ──────────────────────────────────────────────────
 
@@ -438,9 +477,11 @@ class RunController(QObject):
         card.listen.connect(lambda i, c=card: self.listen(q, i, c))
         card.picked.connect(lambda i, c=card: self._voice_picked(state, q, i, c))
         card.clicked.connect(lambda key, c=card: self._voice_cancel(state, c, key))
+        if q.doubled:
+            self.doubled_told.add(q.signature)  # 이 카드가 알렸다: 뒤따르는 확인 카드는 되풀이하지 않는다
         self._add_card(card)
         self._receipt(state.number, S.SLOT_RECEIPT_WAITING)
-        self.w.show_message(S.VOICE_TITLE)
+        self.w.show_message(S.VOICE_TITLE, owner=card)
         self.w.session.voice.append({"at": time.strftime("%H:%M:%S"), "event": "asked", "reason": q.reason,
                                      "signature": q.signature, "streams": len(q.streams), "mix": q.mix,
                                      "doubled": q.doubled, "previous": q.previous, "change_reason": q.change_reason,
@@ -470,7 +511,12 @@ class RunController(QObject):
                 self.w.show_message(S.LISTEN_FAILED.format(reason=self._explain(error)))
                 return
             if listen.play(wav):
-                self.w.show_message(S.LISTENING.format(n=stream + 1))
+                self.w.show_message(S.fill(S.LISTENING, n=stream + 1), owner=card)
+                if card is not None:
+                    try:
+                        card.set_playing(stream)  # 3초 동안 "■ 듣는 중"
+                    except RuntimeError:
+                        pass
             else:
                 self.w.show_message(S.LISTEN_NO_PLAYER)
 
@@ -570,11 +616,12 @@ class RunController(QObject):
             except RuntimeError:
                 continue
             number = getattr(card.proposal, "slot", None)
+            shown = fmt.clock_time(at)
             if status == "applied" and not isinstance(card, ClearCard):
-                self._receipt(number, S.SLOT_RECEIPT.format(at=at, color_word=fmt.color_word(card.proposal.color),
+                self._receipt(number, S.SLOT_RECEIPT.format(at=shown, color_word=fmt.color_word(card.proposal.color),
                                                             n=found))
             elif status == "partial" and not isinstance(card, ClearCard):
-                self._receipt(number, S.SLOT_RECEIPT_PARTIAL.format(at=at, placed=found, expected=expected))
+                self._receipt(number, S.SLOT_RECEIPT_PARTIAL.format(at=shown, placed=found, expected=expected))
             elif not isinstance(card, ClearCard):
                 self._receipt(number, S.SLOT_RECEIPT_FAILED)
             self._record({"stage": "reconcile", "proposal_id": pid, "status": status, "expected": expected,
@@ -631,7 +678,7 @@ class RunController(QObject):
             self.w.show_message(S.TIMELINE_CHANGED)
             return
         if out.status in ("other_timeline", "missing"):
-            text = S.OTHER_TIMELINE_APPLY.format(name=out.timeline_name or "")
+            text = S.fill(S.OTHER_TIMELINE_APPLY, name=out.timeline_name or "")
             card.show_message(text)
             self.w.show_message(text)
             return
@@ -653,10 +700,11 @@ class RunController(QObject):
             if old_card is not None and old_card is not card:
                 old_card.replaced()
         word = fmt.color_word(p.color)
+        at = fmt.clock_time(out.at)
         if out.status == "applied":
-            self._receipt(state.number, S.SLOT_RECEIPT.format(at=out.at, color_word=word, n=out.placed))
+            self._receipt(state.number, S.SLOT_RECEIPT.format(at=at, color_word=word, n=out.placed))
         elif out.status == "partial":
-            self._receipt(state.number, S.SLOT_RECEIPT_PARTIAL.format(at=out.at, placed=out.placed,
+            self._receipt(state.number, S.SLOT_RECEIPT_PARTIAL.format(at=at, placed=out.placed,
                                                                       expected=out.expected))
         else:
             self._receipt(state.number, S.SLOT_RECEIPT_FAILED)
@@ -665,8 +713,10 @@ class RunController(QObject):
         if state.chat is not None:
             self.w.chat_flow.applied(card, out)
         if out.placed:
-            # 넣은 뒤의 예문 칩 (설계 B1.5 "After apply"): 누르면 입력 칸만 채운다
-            self.w.chat.add_helper(S.CHAT_TRY_AFTER_APPLY, [(t, t) for t in S.CHIPS_AFTER_APPLY])
+            if not self.w.after_apply_chips_shown:
+                # 넣은 뒤의 예문 칩 (설계 B1.5 "After apply"): 세션에 한 번만. 누르면 입력 칸만 채운다
+                self.w.after_apply_chips_shown = True
+                self.w.chat.add_helper(S.CHAT_TRY_AFTER_APPLY, [(t, t) for t in S.CHIPS_AFTER_APPLY])
             self.ask_manual("M3")
             if p.kind == "mark_spikes":
                 self.ask_manual("M2")
@@ -684,8 +734,11 @@ class RunController(QObject):
 
     # ── 되돌리기 ──────────────────────────────────────────────────────
 
-    def undo(self, pid: str, *, card: Optional[ProposalCard] = None, request: Optional[str] = None) -> bool:
-        """카드 하나를 뺀다 (delete_markers prefix). 그 일지의 타임라인이 열려 있을 때만."""
+    def undo(self, pid: str, *, card: Optional[ProposalCard] = None, request: Optional[str] = None,
+             asked: Optional[QuestionCard] = None) -> bool:
+        """카드 하나를 뺀다 (delete_markers prefix). 그 일지의 타임라인이 열려 있을 때만.
+
+        asked: "이걸 뺄까요?" 카드 (대화의 "방금 거 취소"). 뺀 결과를 그 카드 아래에도 적는다."""
         if self.jobs.busy or self.w.closing:
             return False
         card = card or self.by_pid.get(pid)
@@ -696,8 +749,8 @@ class RunController(QObject):
         def work(ops, ctx):
             return undo_proposal(ops, pid, root=root, journal_key=key)
 
-        started = self.start_write("undo", work, lambda out: self._undone(pid, card, number, request, out),
-                                   lambda exc: self._undo_failed(pid, card, exc))
+        started = self.start_write("undo", work, lambda out: self._undone(pid, card, number, request, out, asked),
+                                   lambda exc: self._undo_failed(pid, card, exc, asked))
         if started:
             if card is not None:
                 card.lock()
@@ -705,7 +758,7 @@ class RunController(QObject):
         return started
 
     def _undone(self, pid: str, card: Optional[ProposalCard], number: Optional[int], request: Optional[str],
-                out) -> None:
+                out, asked: Optional[QuestionCard] = None) -> None:
         if self.w.closing:
             return
         self._record({"stage": "undo", "proposal_id": pid, "status": out.status, "deleted": out.deleted,
@@ -715,23 +768,30 @@ class RunController(QObject):
             text = out.message or S.UNDO_FAILED.format(reason=out.status)
             if card is not None:
                 card.show_message(text)
+            _note(asked, text, "warning")
             self._say(text)
             return
         if out.status == "missing":
             if card is not None:
                 card.show_message(S.UNDO_MISSING)
+            _note(asked, S.UNDO_MISSING, "warning")
             self._say(S.UNDO_MISSING)
             return
-        at = time.strftime("%H:%M")
+        at = fmt.clock_time(time.strftime("%H:%M"))
         if card is not None:
             card.show_undone(out, at)
             self.w.show_message(card.title.text())
+            _note(asked, card.title.text())
         elif out.restored:
-            self._say(S.CLEAR_UNDONE.format(at=at, n=out.deleted))
+            text = S.CLEAR_UNDONE.format(at=at, n=out.deleted)
+            _note(asked, text)
+            self._say(text)
             if out.already_gone:
                 self.w.chat.add_helper(S.CLEAR_UNDO_SKIPPED.format(n=out.already_gone))
         else:
-            self._say(S.UNDO_DONE_LINE.format(request=request or pid, n=out.deleted))
+            text = S.UNDO_DONE_LINE.format(request=request or pid, n=out.deleted)
+            _note(asked, text)
+            self._say(text)
             if out.already_gone:
                 self.w.chat.add_helper(S.UNDO_SKIPPED.format(n=out.already_gone))
         for other in out.reopened:
@@ -748,12 +808,14 @@ class RunController(QObject):
         self._receipt(number, S.SLOT_RECEIPT_UNDONE.format(at=at))
         self.w.refresh_undo(force=True)
 
-    def _undo_failed(self, pid: str, card: Optional[ProposalCard], exc: BaseException) -> None:
+    def _undo_failed(self, pid: str, card: Optional[ProposalCard], exc: BaseException,
+                     asked: Optional[QuestionCard] = None) -> None:
         if self.w.closing:
             return
         text = S.UNDO_FAILED.format(reason=self._explain(exc))
         if card is not None:
             card.show_message(text)
+        _note(asked, text, "warning")
         self._say(text)
         self._record({"stage": "undo", "proposal_id": pid, "status": "error", "error": f"{type(exc).__name__}: {exc}"})
 
@@ -764,7 +826,7 @@ class RunController(QObject):
         entry = next((e for e in self.w.footer.entries if e.get("proposal_id") == pid), None)
         request = (entry or {}).get("request") or pid
         n = int((entry or {}).get("markers") or 0)
-        what = S.UNDO_WHAT.format(request=request, n=n)
+        what = undo_what(request, n, (entry or {}).get("colors"))
         if (entry or {}).get("op") == "clear_marks":
             what = S.UNDO_WHAT_CLEAR.format(request=request, n=int((entry or {}).get("deleted") or 0))
         if self.w.choose(S.UNDO_CONFIRM_TITLE, S.UNDO_CONFIRM.format(what=what), [S.BTN_REMOVE, S.BTN_CANCEL]) != 0:
@@ -785,15 +847,17 @@ class RunController(QObject):
     def _scanned(self, scan) -> None:
         if self.w.closing:
             return
+        # 묻기 전에 "찾는 중" 줄을 걷고 버튼 상태를 맞춘다 (창이 떠 있는 동안 멈춘 것처럼 보이지 않게)
+        self.w.automation.hide_progress()
+        self.w.automation.set_reason(self.w._slot_reason(), None)
         if scan.total == 0:
             self._say(S.REMOVE_ALL_NOTHING)
             self._record({"stage": "remove_all", "status": "nothing", "page": scan.page})
             return
-        text = S.REMOVE_ALL_CONFIRM.format(n=scan.total) + "\n" + S.REMOVE_ALL_DETAIL.format(
-            markers=scan.markers, legacy=scan.legacy_markers, tracks=len(scan.legacy_tracks))
+        text = remove_all_text(scan)
         switch_page, remove_track = False, True
         if scan.needs_edit_page:
-            answer = self.w.choose(S.EDIT_PAGE_QUESTION, text + "\n" + S.EDIT_PAGE_DETAIL,
+            answer = self.w.choose(S.REMOVE_ALL_TITLE, S.EDIT_PAGE_QUESTION + "\n\n" + text + "\n" + S.EDIT_PAGE_DETAIL,
                                    [S.BTN_SWITCH_REMOVE, S.BTN_MARKERS_ONLY, S.BTN_CANCEL])
             if answer == 0:
                 switch_page = True
@@ -827,7 +891,8 @@ class RunController(QObject):
         if out.other_timeline:
             self._say(S.REMOVE_ALL_OTHER)
             return
-        lines = [S.REMOVE_ALL_DONE.format(markers=out.markers_deleted, legacy=out.legacy_deleted)]
+        parts = _parts(out.markers_deleted, out.legacy_deleted, 0)
+        lines = [S.REMOVE_ALL_DONE.format(parts=parts) if parts else S.REMOVE_ALL_NOTHING]
         if out.markers_left:
             lines.append(S.REMOVE_ALL_LEFT.format(n=out.markers_left))
         if scan.legacy_tracks:
@@ -835,14 +900,20 @@ class RunController(QObject):
         for line in lines:
             self.w.chat.add_helper(line)
         self.w.show_message(lines[0])
-        at = time.strftime("%H:%M")
+        at = fmt.clock_time(time.strftime("%H:%M"))
         for pid in out.journal_undone:
             card = self.by_pid.get(pid)
-            if card is not None and card.state == "receipt":
-                card.state = "undone"
-                card.close_card(S.SLOT_RECEIPT_UNDONE.format(at=at))
-                self._receipt(card.proposal.slot, S.SLOT_RECEIPT_UNDONE.format(at=at))
+            try:
+                if card is not None and card.state == "receipt":
+                    card.state = "undone"
+                    card.close_card(S.SLOT_RECEIPT_UNDONE.format(at=at))
+                    self._receipt(card.proposal.slot, S.SLOT_RECEIPT_UNDONE.format(at=at))
+            except RuntimeError:
+                continue
         self.w.refresh_undo(force=True)
+        if scan.legacy_tracks and not out.track_skipped:
+            # 옛 시험 트랙을 뺐다: 머리말의 "소리 트랙 N개"가 맞게 조용히 다시 읽는다 (리졸브 읽기 한 번)
+            self.w.controller.check_now("refresh")
 
     def _remove_failed(self, stage: str, exc: BaseException) -> None:
         if self.w.closing:
@@ -934,6 +1005,46 @@ class RunController(QObject):
             self._save_manual("M3", record)
 
         self.w.controller.submit("manual", step, done, failed)
+
+
+def _note(card: Optional[Card], text: str, role: Optional[str] = "secondary") -> None:
+    """"이걸 뺄까요?" 카드 아래에 뺀 결과 한 줄 (카드를 지웠으면 그냥 넘어간다)."""
+    if card is None:
+        return
+    try:
+        card.set_note(text, role)
+    except RuntimeError:
+        pass
+
+
+def undo_what(request: str, n: int, colors: Optional[List[str]] = None) -> str:
+    """되돌리기 확인의 "빠지는 것": "'3분 20초에 빨간 표시해줘'로 넣은 빨간 표시 1개를 빼요"."""
+    words = S.COLOR_JOIN.join(fmt.color_word(c) for c in (colors or []) if c)
+    if not words:
+        return S.UNDO_WHAT.format(request=request, n=n)
+    return S.fill(S.UNDO_WHAT_MARKS, request=request, color_word=words, n=n)
+
+
+def _parts(markers: int, legacy: int, tracks: int) -> str:
+    """모두 빼기의 "도우미 표시 3개 · 옛 시험 표시 1개": 0개인 것은 빼고 적는다."""
+    out = []
+    if markers:
+        out.append(S.REMOVE_ALL_PART_MARKERS.format(n=markers))
+    if legacy:
+        out.append(S.REMOVE_ALL_PART_LEGACY.format(n=legacy))
+    if tracks:
+        out.append(S.REMOVE_ALL_PART_TRACKS.format(n=tracks))
+    return S.REMOVE_ALL_PART_SEP.join(out)
+
+
+def remove_all_text(scan) -> str:
+    """모두 빼기 확인 창의 글: 물음, 빠지는 것(0개는 빼고), 옛 시험 것의 설명, 그대로인 것."""
+    lines = [S.REMOVE_ALL_CONFIRM.format(n=scan.total),
+             S.REMOVE_ALL_DETAIL.format(parts=_parts(scan.markers, scan.legacy_markers, len(scan.legacy_tracks)))]
+    if scan.legacy_markers or scan.legacy_tracks:
+        lines.append(S.REMOVE_ALL_LEGACY_NOTE)
+    lines.append(S.REMOVE_ALL_KEEP)
+    return "\n".join(lines)
 
 
 def _track_line(out) -> str:

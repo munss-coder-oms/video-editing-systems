@@ -350,7 +350,7 @@ def test_lua_failure_details_reach_the_report(rig):
     text = report.build_report(session, {"connected": True, "last_response": rig.bridge.last_response}, {})
     assert "bad argument #1 to 'ImportMedia' (table expected)" in text
     assert '"Folder.GetClipList": "ok"' in text
-    assert "③ 소리 넣기: 안 됨 - 리졸브가 시험용 소리 파일을 가져오지 못했습니다." in text
+    assert "③ 소리 넣기: 안 됨 - 리졸브가 시험용 소리 파일을 가져오지 못했어요." in text
 
 
 def test_helper_steps_on_drop_frame_timeline(rig):

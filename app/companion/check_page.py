@@ -1,4 +1,5 @@
-"""⋯ > 연결 점검 쪽 (설계 B1.1): 예전 창의 시험 도구(표시 찍기·소리 넣기·시험 흔적 지우기)와 [기능 점검].
+"""⋯ > 점검 도구 쪽 (설계 B1.1): [기능 점검]과 [결과 저장], 그 아래 "예전 시험 도구"
+(표시 찍기·소리 넣기·시험 흔적 지우기).
 [확인 질문 다시 보기]는 Ctrl+Z 시험(M3)과 자르기 시험(M2)의 답 카드를 대화 칸에 다시 띄운다 (설계 B7.3).
 
 [기능 점검]은 확인을 받은 뒤에만 한다 (점검용 복사본을 만들었다 지움). [남은 점검용 복사본 지우기]는
@@ -39,12 +40,21 @@ class CheckPage(QWidget):
 
         self.probe_btn = self._button(root, S.BTN_PROBE, S.TIP_PROBE)
         self.probe_btn.setProperty("kind", "primary")
-        self.marker_btn = self._button(root, S.BTN_TEST_MARKER, S.TIP_TEST_MARKER)
-        self.audio_btn = self._button(root, S.BTN_TEST_AUDIO, S.TIP_TEST_AUDIO)
-        self.cleanup_btn = self._button(root, S.BTN_TEST_CLEANUP, S.TIP_TEST_CLEANUP)
         self.leftover_btn = self._button(root, S.BTN_DELETE_LEFTOVER, "")
         self.leftover_btn.setVisible(False)
         self.manual_btn = self._button(root, S.BTN_MANUAL_CHECKS, S.TIP_MANUAL_CHECKS)
+        # 기능 점검 뒤 보내 줄 결과 파일 (아래쪽 [결과 저장]과 같다)
+        self.report_btn = self._button(root, S.BTN_REPORT, S.TIP_REPORT)
+        self.report_hint = QLabel(S.PROBE_REPORT_HINT)
+        self.report_hint.setWordWrap(True)
+        self.report_hint.setProperty("role", "secondary")
+        root.addWidget(self.report_hint)
+        self.old_tools = QLabel(S.CHECK_OLD_TOOLS)
+        self.old_tools.setProperty("role", "secondary")
+        root.addWidget(self.old_tools)
+        self.marker_btn = self._button(root, S.BTN_TEST_MARKER, S.TIP_TEST_MARKER)
+        self.audio_btn = self._button(root, S.BTN_TEST_AUDIO, S.TIP_TEST_AUDIO)
+        self.cleanup_btn = self._button(root, S.BTN_TEST_CLEANUP, S.TIP_TEST_CLEANUP)
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)

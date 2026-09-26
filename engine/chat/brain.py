@@ -17,12 +17,13 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol, Tuple, Union, runtime_checkable
 
-# 출처 (설계 B4.4). 화면은 strings_ko.PROVENANCE로 "말씀하신 값 / 기본값 / 설정값 / 도우미가 찾음"을 쓴다.
+# 출처 (설계 B4.4). 화면은 strings_ko.PROVENANCE로 "말씀하신 값 / 기본값 / 설정값 / 도우미가 찾음 / 재생 위치"를 쓴다.
 SAID = "said"
 DEFAULT = "default"
 SETTING = "setting"
 FOUND = "found"
-PROVENANCES = (SAID, DEFAULT, SETTING, FOUND)
+PLAYHEAD = "playhead"  # "여기"·"지금"처럼 리졸브의 재생 위치에서 읽은 시간 (말한 숫자가 아니다)
+PROVENANCES = (SAID, DEFAULT, SETTING, FOUND, PLAYHEAD)
 
 # 2.1에서 두뇌가 낼 수 있는 일 (설계 B4.2 "2.1 intents"). 이 밖의 일은 두뇌가 무엇이라 해도 받지 않는다.
 OPS_2_1 = ("mark", "jump_to", "mark_pauses", "mark_spikes", "clear_marks", "undo", "remove_all_ours", "save_slot",

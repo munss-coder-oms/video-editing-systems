@@ -335,7 +335,7 @@ def test_auto_check_with_slow_state_is_connected(qapp, window, fake):
     fake.state_timeout = True
     connect(qapp, window, fake)
     rec = window.session.steps["connect"]
-    assert rec.ok and "DaVinci Resolve 21.1.0.0" in rec.summary and "답이 늦습니다" in rec.summary
+    assert rec.ok and "DaVinci Resolve 21.1.0.0" in rec.summary and "답이 늦어요" in rec.summary
     # ping에는 답했는데 읽기가 늦다: "연결 안 됨"이 아니라 "리졸브가 바빠요" (대화 상자를 닫아 달라고)
     assert window.status.text() == "리졸브가 바빠요" and window.connect_btn.text() == "다시 시도"
     assert rec.data["ping"]["resolve_version"] == "21.1.0.0"
@@ -425,7 +425,7 @@ def test_report_has_step_summary_and_raw_answers(qapp, window, fake, tmp_path):
     assert lines[0] == report.REPORT_TITLE
     assert '① 연결: 됨 - DaVinci Resolve 21.1.0.0 / 프로젝트 "시험 프로젝트" / 타임라인 "타임라인 1"' in lines
     assert any(line.startswith("② 표시 찍기: 됨 - 타임라인 시작에서 240프레임") for line in lines)
-    assert any(line.startswith("③ 소리 넣기: 안 됨 - 리졸브가 대답하지 않습니다.") for line in lines)
+    assert any(line.startswith("③ 소리 넣기: 안 됨 - 리졸브가 대답하지 않아요.") for line in lines)
     assert "시험 흔적 지우기: 아직 안 함" in lines
     assert f"답한 Fusion.prefs: {fake.prefs}" in lines
     assert '"Timeline.AddMarker": "ok"' in text  # 리졸브의 답(calls)이 그대로 들어 있다
@@ -550,7 +550,7 @@ def test_explain_bridge_errors():
     assert "bad_path:outside" in steps.explain(BridgeError("bad_path:outside", "path_guard"))
     info = steps.error_info(BridgeError("import_failed", "MediaPool.ImportMedia", "place_audio"))
     assert info["error"] == "import_failed" and info["func"] == "MediaPool.ImportMedia"
-    assert "가져오지 못했습니다" in info["message"]
+    assert "가져오지 못했어요" in info["message"]
     assert "예상하지 못한 오류" in steps.explain(RuntimeError("x"))
 
 
@@ -578,12 +578,12 @@ def test_marker_problems_from_listing():
                             "custom": steps.TEST_CUSTOM}, **kw)
     assert steps.summarize("marker", dict(out, markers_after={"markers": [mk()]}))[0]
     assert steps.marker_problems(dict(out, markers_after={"markers": [mk(custom="")]})) == [
-        "custom data가 저장되지 않았습니다"]
+        "custom data가 저장되지 않았어요"]
     assert steps.marker_problems(dict(out, markers_after={"markers": [mk(frame=86430)]})) == [
-        "표시가 30프레임이 아니라 86430프레임에 있습니다"]
-    assert steps.marker_problems(dict(out, markers_after={"markers": [mk(note="?")]})) == ["메모가 다르게 저장되었습니다"]
+        "표시가 30프레임이 아니라 86430프레임에 있어요"]
+    assert steps.marker_problems(dict(out, markers_after={"markers": [mk(note="?")]})) == ["메모가 다르게 저장됐어요"]
     ok, text = steps.summarize("marker", out)
-    assert ok and "확인하지는 못했습니다" in text
+    assert ok and "확인하지는 못했어요" in text
 
 
 def test_error_info_keeps_lua_calls():

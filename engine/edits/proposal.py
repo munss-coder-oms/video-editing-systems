@@ -11,16 +11,19 @@
 
 from __future__ import annotations
 
+import bisect
+import dataclasses
 import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..resolve_link.ops import MAX_MARKER_NAME, MAX_MARKER_NOTE, MarkerSpec
 from .journal import marker_prefix
 
 NOTE_SUFFIX = "· AI 도우미"
+MARKER_SHIFT = 5  # [더하기]: 이미 넣은 표시에서 이만큼(프레임) 안이면 같은 곳으로 본다
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 
@@ -164,3 +167,32 @@ def build_specs(pid: str, rows: List[MarkerRow], tl_start: int, color: str, *, p
         specs.append(MarkerSpec(frame=row.start - tl_start, dur=dur, color=color, name=row.name,
                                 note=marker_note(note_for(row)), custom=row.custom))
     return specs
+
+
+def _near(frame: int, kept: List[int], shift: int) -> bool:
+    i = bisect.bisect_left(kept, frame - shift)
+    return i < len(kept) and kept[i] <= frame + shift
+
+
+def without_near(p: Proposal, frames: Iterable[Any], shift: int = MARKER_SHIFT) -> Tuple[Proposal, int]:
+    """[더하기]: 이미 넣어 둔 표시(절대 프레임) 앞뒤 shift 프레임 안의 줄을 뺀 새 제안과 뺀 수.
+
+    남은 줄의 꼬리표는 aih:<P>:1부터 다시 매긴다 (넣을 때 빈 번호가 없게). 뺀 것이 없으면 그대로 돌려준다.
+    """
+    kept = sorted(int(f) for f in frames if isinstance(f, (int, float)) and not isinstance(f, bool))
+    if not kept or not p.rows:
+        return p, 0
+    pairs = [(r, s) for r, s in zip(p.rows, p.specs) if not _near(int(r.start), kept, shift)]
+    dropped = len(p.rows) - len(pairs)
+    if not dropped:
+        return p, 0
+    rows: List[MarkerRow] = []
+    specs: List[MarkerSpec] = []
+    for n, (r, s) in enumerate(pairs, start=1):
+        custom = f"{marker_prefix(p.id)}{n}"
+        rows.append(dataclasses.replace(r, custom=custom))
+        specs.append(dataclasses.replace(s, custom=custom))
+    new = dataclasses.replace(p, rows=rows, specs=specs, debug=dict(p.debug, dropped_near=dropped))
+    if p.kind == "mark_pauses":
+        new.total_s = round(sum(float(r.value) for r in rows), 3)
+    return new, dropped

@@ -26,7 +26,7 @@ from tests.fakes import FakeLuaBridge, timeline_info  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 UI_MODULES = ("window", "header_view", "automation_view", "chat_view", "undo_view", "check_page", "connection",
-              "cards", "voice_picker", "slot_settings", "runs", "fmt", "jobs", "listen", "chat_flow")
+              "cards", "voice_picker", "slot_settings", "runs", "fmt", "jobs", "listen", "chat_flow", "steps")
 HANGUL = re.compile(r"[ㄱ-ㆎ가-힣]")
 
 
@@ -406,7 +406,8 @@ def test_probe_copy_warning_and_switch_back(qapp, make_window, fake):
     i = fake.requests.index("switch_timeline")
     assert fake.args[i] == {"uid": "tl-1", "name": "Timeline 1"}
     assert not w.header.warning_row.isVisible()
-    assert S.SWITCHED_BACK.format(name="Timeline 1") in w.message.text()
+    assert S.fill(S.SWITCHED_BACK, name="Timeline 1") in w.message.text()
+    assert "'Timeline 1'로 돌아왔어요" in w.message.text()
     assert w.automation.buttons[0].isEnabled()
 
 
@@ -495,7 +496,7 @@ def test_leftover_copy_is_deleted_only_after_confirm(qapp, make_window, fake, tm
     w.confirm = lambda *a: asked.append(a) or False
     w.check_page.leftover_btn.click()
     settle(qapp, 0.2)
-    assert sent == [] and asked[0][1] == S.LEFTOVER_CONFIRM.format(name="AI 도우미 점검용 101500")
+    assert sent == [] and asked[0][1] == S.fill(S.LEFTOVER_CONFIRM, name="AI 도우미 점검용 101500")
     w.confirm = lambda *a: True
     w.check_page.leftover_btn.click()
     wait_until(qapp, lambda: w.action is None and w.pending == 0)

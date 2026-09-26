@@ -1,7 +1,10 @@
 """AI 편집 도우미 창 (설계 B1). 화면 오른쪽 끝에 좁게 붙는다.
 
 위에서 아래로: 머리말(연결 불빛, [연결 확인], ⋯, 타임라인 요약) · 자동화 버튼 1·2·3 · 대화 칸 ·
-[↶ 되돌리기 ▾] [결과 저장]. ⋯ > 연결 점검에는 예전 시험 도구와 [기능 점검]이 있다. ⚙는 버튼 설정 쪽.
+[↶ 되돌리기 ▾] [결과 저장]. ⋯ > 점검 도구에는 [기능 점검]과 예전 시험 도구가 있다. ⚙는 버튼 설정 쪽.
+
+머리말 알림 줄은 누가 띄웠는지 기억한다: 카드가 띄운 알림은 그 카드가 닫히면(답함·취소) 카드가 남긴 말로
+바뀌고, 연결 확인이 띄운 알림은 연결이 끊기면 지운다 (지난 상태를 말하는 알림이 남지 않게).
 ⋯ > 새 판 받기는 확인을 받고 update_windows.bat을 따로 띄운 뒤 창을 닫는다 (띄우는 일은 app/update.py).
 
 이 파일은 얇게 둔다: 화면 조각은 *_view.py / check_page.py / slot_settings.py / cards.py, 연결 상태는
@@ -217,6 +220,12 @@ class HelperWindow(QMainWindow):
             auto_ping_ms=auto_ping_ms, extras=self._connect_extras, parent=self,
         )
         self._chips_shown = False  # 처음 연결됐을 때의 예문 칩을 보였는지
+        self.after_apply_chips_shown = False  # 넣은 뒤의 예문 칩은 세션에 한 번만
+        self._notice_owner: Optional[QWidget] = None  # 머리말 알림을 띄운 카드
+        self._notice_source: Optional[str] = None  # 머리말 알림을 띄운 일 ("connect" 등)
+        self._probe_report: Optional[Path] = None  # 기능 점검 전에 먼저 저장한 결과 파일 (끝나면 덮어쓴다)
+        self._probe_done_text = ""
+        self._resave_probe = False
         self.runs = RunController(self)
         self.chat_flow = ChatController(self)
         self.controller.job_busy = lambda: self.runs.busy
@@ -279,6 +288,7 @@ class HelperWindow(QMainWindow):
         self.settings_page.move_requested.connect(self._settings_move)
         self.settings_page.restore_requested.connect(self._settings_restore)
         self.check_page.manual_btn.clicked.connect(self.on_manual_checks)
+        self.check_page.report_btn.clicked.connect(self.on_report)
         self.check_page.back_clicked.connect(self.show_panel)
         self.check_page.probe_btn.clicked.connect(self.on_probe)
         self.check_page.marker_btn.clicked.connect(self.on_marker)
@@ -449,7 +459,9 @@ class HelperWindow(QMainWindow):
         act = getattr(self, "scale_actions", {}).get(scale)
         if act is not None and not act.isChecked():
             act.setChecked(True)
-        self.setStyleSheet(theme.stylesheet(scale))
+        if not hasattr(self, "_arrow"):
+            self._arrow = theme.arrow_image(self.state_root / "cache" / "theme")
+        self.setStyleSheet(theme.stylesheet(scale, arrow=self._arrow))
         self._apply_layout()
 
     def _save_ui(self, key: str, value: Any) -> None:
@@ -477,8 +489,18 @@ class HelperWindow(QMainWindow):
 
     # ── 상태를 화면에 ──────────────────────────────────────────────────
 
-    def show_message(self, text: str) -> None:
+    def show_message(self, text: str, owner: Optional[QWidget] = None, source: Optional[str] = None) -> None:
+        """머리말 알림 한 줄. owner: 이 알림을 띄운 카드 (닫히면 notice_closed가 고친다). source: 띄운 일."""
         self.header.set_message(text)
+        self._notice_owner = owner
+        self._notice_source = source
+
+    def notice_closed(self, card: QWidget, note: str) -> None:
+        """카드가 닫힘 (답함·취소·바뀜): 그 카드가 띄운 알림이면 카드가 남긴 말로 바꾸거나 지운다."""
+        if self._notice_owner is card and not self.closing:
+            self._notice_owner = None
+            self._notice_source = None
+            self.header.set_message(note or "")
 
     def log(self, text: str) -> None:
         self.check_page.log(text)
@@ -519,6 +541,10 @@ class HelperWindow(QMainWindow):
         c = self.controller
         idle = not self.busy and not self.closing
         self.header.set_status(c.status, checking=c.checking)
+        if c.status in (conn.NOT_CONNECTED, conn.RESOLVE_QUIT) and not c.checking:
+            self.header.clear_summary()  # 끊긴 뒤에는 지난 연결의 타임라인 요약을 남기지 않는다
+        if c.status != conn.CONNECTED and self._notice_source == "connect_ok":
+            self.show_message("")  # "연결돼 있어요"는 연결이 끊기거나 예전 스크립트면 지운다
         self.header.set_probe_copy(c.probe_copy_name, can_switch=self._switch_target() is not None)
         self.header.back_btn.setEnabled(idle and c.connected)
         # [연결 확인]은 작업 중에도 누를 수 있다 (설계 B10). 줄 뒤에 선다.
@@ -549,14 +575,25 @@ class HelperWindow(QMainWindow):
         info = self.controller.info
         self.header.show_info(info.get("ping"), info.get("state"), info.get("state_kind"), self.audio_items)
 
-    def _finish(self, name: str, ok: bool, summary: str) -> None:
+    def _step_line(self, name: str, ok: bool, summary: str) -> str:
         title = S.STEP_TITLES.get(name, name)
-        line = S.STEP_LINE.format(title=title, result=S.RESULT_OK if ok else S.RESULT_BAD, summary=summary)
+        result = S.RESULT_OK if ok else S.RESULT_BAD
+        if not summary:
+            return S.STEP_LINE_BARE.format(title=title, result=result)
+        return S.STEP_LINE.format(title=title, result=result, summary=summary)
+
+    def _finish(self, name: str, ok: bool, summary: str, notice: Optional[str] = None) -> None:
+        """단계 끝: 점검 도구의 기록에 한 줄, 머리말에 알림 (notice가 있으면 그 쉬운 말로)."""
+        line = self._step_line(name, ok, summary)
         self.log(line)
-        self.show_message(line)
+        self.show_message(notice if notice is not None else line, source=f"{name}_ok" if ok else name)
+        if name == "probe":
+            self._probe_done_text = summary
         if name == self.action:
             self.session.timing(name, time.monotonic() - self._action_t0)
             self.action = None
+        if name == "probe":
+            self._probe_resave()
         self._refresh()
 
     def _check_script_version(self) -> None:
@@ -648,6 +685,16 @@ class HelperWindow(QMainWindow):
         self._chips_shown = True
         self.chat.add_helper(S.CHAT_TRY_CONNECTED, [(t, t) for t in S.CHIPS_AFTER_CONNECT])
 
+    def _connect_notice(self, ok: bool, out: Dict[str, Any]) -> str:
+        """[연결 확인]의 머리말 알림: 쉬운 말 한 줄 (리졸브 판·프로젝트 같은 자세한 줄은 점검 도구의 기록에)."""
+        if out.get("old_script"):
+            return S.OLD_SCRIPT_HINT
+        state = out.get("state") if isinstance(out.get("state"), dict) else {}
+        timeline = state.get("timeline")
+        if ok and isinstance(timeline, str) and timeline:
+            return S.CONNECT_OK.format(timeline=timeline)
+        return S.CONNECT_OK_NO_TIMELINE if ok else self._step_line("connect", ok, "")
+
     @Slot(str, object)
     def _on_answered(self, name: str, out: Dict[str, Any]) -> None:
         if self.closing:
@@ -656,9 +703,15 @@ class HelperWindow(QMainWindow):
         self._remember(out)
         self._show_info()
         ok, summary = steps.summarize("connect", out)
+        if out.get("old_script"):
+            ok = False  # 답은 했지만 예전 스크립트: 자동화 버튼을 쓸 수 없다
         self.session.record("connect", ok, summary, out)
-        if name != "focus":
-            self._finish("connect", ok, summary)
+        if name == "connect":
+            # [연결 확인]을 누름: 머리말에 쉬운 말로 알린다
+            self._finish("connect", ok, summary, notice=self._connect_notice(ok, out))
+        elif name not in ("focus", "refresh"):
+            # 버튼·대화 전의 확인, 자동 확인: 기록에만 (머리말 알림은 그 일이 쓴다)
+            self.log(self._step_line("connect", ok, summary))
         self._check_script_version()
         self._refresh()
 
@@ -682,8 +735,10 @@ class HelperWindow(QMainWindow):
             message = steps.explain(cause, answered)
             self.session.record("connect", False, message, partial, steps.error_info(cause, answered))
             self._show_info()
-            if name != "focus":
+            if name == "connect":
                 self._finish("connect", False, message)
+            elif name not in ("focus", "refresh"):
+                self.log(self._step_line("connect", False, message))
         self._refresh()
 
     # ── 버튼 작업 (시험 도구, 기능 점검, 원래 타임라인으로, 남은 복사본 지우기) ────────
@@ -751,23 +806,20 @@ class HelperWindow(QMainWindow):
 
     # 기능 점검
 
-    def _ask(self, title: str, text: str, ok_label: str) -> bool:
-        if not self.interactive:
-            return False  # 자동 검사에서는 묻는 창을 띄우지 않는다 (아무것도 하지 않음)
+    def ask_box(self, title: str, text: str, ok_label: str) -> Tuple[QMessageBox, Any]:
+        """확인 창 (띄우지는 않는다): 창의 어두운 모양을 그대로 물려받는다. (창, 확인 단추)."""
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Question)
         box.setWindowTitle(title)
         box.setText(text)
         ok = box.addButton(ok_label, QMessageBox.AcceptRole)
+        ok.setProperty("kind", "primary")
         cancel = box.addButton(S.BTN_CANCEL, QMessageBox.RejectRole)
         box.setDefaultButton(cancel)
-        box.exec()
-        return box.clickedButton() is ok
+        return box, ok
 
-    def _choose(self, title: str, text: str, options: List[str]) -> Optional[int]:
-        """단추 여러 개 중 하나. 마지막 단추는 취소(기본). 자동 검사에서는 묻지 않는다 (None)."""
-        if not self.interactive or not options:
-            return None
+    def choose_box(self, title: str, text: str, options: List[str]) -> Tuple[QMessageBox, List[Any]]:
+        """여러 답 중 하나를 고르는 창 (띄우지는 않는다). 첫 단추가 권하는 답, 마지막 단추는 취소(기본)."""
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Question)
         box.setWindowTitle(title)
@@ -776,8 +828,25 @@ class HelperWindow(QMainWindow):
         for i, label in enumerate(options):
             role = QMessageBox.RejectRole if i == len(options) - 1 else (
                 QMessageBox.AcceptRole if i == 0 else QMessageBox.ActionRole)
-            buttons.append(box.addButton(label, role))
+            btn = box.addButton(label, role)
+            if i == 0 and len(options) > 1:
+                btn.setProperty("kind", "primary")
+            buttons.append(btn)
         box.setDefaultButton(buttons[-1])
+        return box, buttons
+
+    def _ask(self, title: str, text: str, ok_label: str) -> bool:
+        if not self.interactive:
+            return False  # 자동 검사에서는 묻는 창을 띄우지 않는다 (아무것도 하지 않음)
+        box, ok = self.ask_box(title, text, ok_label)
+        box.exec()
+        return box.clickedButton() is ok
+
+    def _choose(self, title: str, text: str, options: List[str]) -> Optional[int]:
+        """단추 여러 개 중 하나. 마지막 단추는 취소(기본). 자동 검사에서는 묻지 않는다 (None)."""
+        if not self.interactive or not options:
+            return None
+        box, buttons = self.choose_box(title, text, options)
         box.exec()
         clicked = box.clickedButton()
         return next((i for i, b in enumerate(buttons) if b is clicked), None)
@@ -790,11 +859,31 @@ class HelperWindow(QMainWindow):
             return
         self.action = "probe"
         self._action_t0 = time.monotonic()
+        self._probe_report = None
+        self._probe_done_text = ""
         self.show_message(S.PROBE_SAVING)
         self._refresh()
-        # 리졸브가 점검 중에 멈춰도 그 전까지의 결과가 남게 먼저 결과 파일을 저장한다
-        if not self._save_report(then=lambda _path: self._probe_start(), silent=True):
+        # 리졸브가 점검 중에 멈춰도 그 전까지의 결과가 남게 먼저 결과 파일을 저장한다 (끝나면 같은 파일을 덮어쓴다)
+        if not self._save_report(then=self._probe_saved_first, silent=True, log_as=S.PROBE_SAVED_FIRST):
             self._probe_start()
+
+    def _probe_saved_first(self, path: Optional[Path]) -> None:
+        self._probe_report = path
+        self._probe_start()
+
+    def _probe_resave(self) -> None:
+        """기능 점검이 끝남(또는 멈춤): 점검 전에 저장한 결과 파일을 점검 결과로 덮어쓰고 그 위치를 알린다."""
+        if self.closing:
+            return
+        if not self._save_report(then=self._probe_resaved, silent=True, target=self._probe_report):
+            self._resave_probe = True  # [결과 저장]이 도는 중: 그게 끝나면 한다
+
+    def _probe_resaved(self, path: Optional[Path]) -> None:
+        if path is None:
+            return
+        self._probe_report = path
+        saved = S.PROBE_REPORT_SAVED.format(path=path)
+        self.show_message(f"{self._probe_done_text}\n{saved}" if self._probe_done_text else saved, source="probe")
 
     def _probe_start(self) -> None:
         if self.closing:
@@ -810,10 +899,15 @@ class HelperWindow(QMainWindow):
             return
         title = S.PROBE_STAGE_NAMES.get(stage, stage)
         data = data if isinstance(data, dict) else {}
-        ok = data.get("ok") is not False and not data.get("error")
+        error = data.get("error")
+        ok = data.get("ok") is not False and not error
         self.show_message(S.PROBE_RUNNING.format(stage=title))
-        self.log(S.STEP_LINE.format(title=title, result=S.RESULT_OK if ok else S.RESULT_BAD,
-                                    summary=data.get("error") or data.get("fingerprint") or ""))
+        # 기록에는 됨/안 됨과 (있으면) 오류만: 복사본 지문 같은 속값은 결과 파일에만 남긴다
+        result = S.RESULT_OK if ok else S.RESULT_BAD
+        if error:
+            self.log(S.STEP_LINE.format(title=title, result=result, summary=str(error)))
+        else:
+            self.log(S.STEP_LINE_BARE.format(title=title, result=result))
 
     def _probe_summary(self, out: Dict[str, Any]) -> Tuple[bool, str]:
         run = out.get("probe_run") or {}
@@ -826,9 +920,16 @@ class HelperWindow(QMainWindow):
         if isinstance(cleanup, dict):
             stages.append(cleanup)
         ok = sum(1 for r in stages if r.get("ok"))
+        total = len(stages)
+        read = run.get("read")
+        if isinstance(read, dict):
+            # 읽기 점검도 센다 (그것이 안 되면 점검 전체가 "안 됨")
+            total += 1
+            if read.get("ok") is not False and not read.get("error"):
+                ok += 1
         if run.get("leftover"):
             return False, S.PROBE_DONE_LEFTOVER
-        return ok == len(stages), S.PROBE_DONE.format(ok=ok, bad=len(stages) - ok)
+        return ok == total, S.PROBE_DONE.format(ok=ok, bad=total - ok)
 
     # 원래 타임라인으로
 
@@ -844,8 +945,8 @@ class HelperWindow(QMainWindow):
     def _switch_summary(self, out: Dict[str, Any]) -> Tuple[bool, str]:
         r = out.get("switch") or {}
         if r.get("switched"):
-            return True, S.SWITCHED_BACK.format(name=r.get("readback_name") or "")
-        return False, S.SWITCH_NOT_CONFIRMED.format(name=r.get("readback_name") or S.INFO_NO_NAME)
+            return True, S.fill(S.SWITCHED_BACK, name=r.get("readback_name") or "")
+        return False, S.fill(S.SWITCH_NOT_CONFIRMED, name=r.get("readback_name") or S.INFO_NO_NAME)
 
     # 남은 점검용 복사본
 
@@ -858,7 +959,7 @@ class HelperWindow(QMainWindow):
             self.show_message(S.LEFTOVER_NO_STATE)
             self._refresh()
             return
-        if not self.confirm(S.LEFTOVER_CONFIRM_TITLE, S.LEFTOVER_CONFIRM.format(name=st.copy_name or st.copy_uid),
+        if not self.confirm(S.LEFTOVER_CONFIRM_TITLE, S.fill(S.LEFTOVER_CONFIRM, name=st.copy_name or st.copy_uid),
                             S.BTN_DELETE):
             return
         self.start_action("leftover", functools.partial(leftover_step, store=self.probe_store), self._leftover_summary)
@@ -927,6 +1028,7 @@ class HelperWindow(QMainWindow):
     def _slots_changed(self) -> None:
         self.automation.set_slots(self.settings.slots)
         self._apply_layout()
+        self.runs.refresh_save_slots()  # 대화 카드의 "자동화 버튼에 저장" 고르기 칸도 새 이름으로
         self._refresh()
 
     @Slot(int, str, str, dict)
@@ -968,11 +1070,11 @@ class HelperWindow(QMainWindow):
         self._slots_changed()
         self.show_panel()
         name = self.settings.slot(number).get("name") or ""
-        self.show_message(S.SETTINGS_RESTORED.format(name=name))
+        self.show_message(S.fill(S.SETTINGS_RESTORED, name=name))
 
     @Slot()
     def on_manual_checks(self) -> None:
-        """연결 점검 쪽 [확인 질문 다시 보기]: Ctrl+Z 시험(M3)과 자르기 시험(M2) 질문을 다시 띄운다."""
+        """점검 도구 쪽 [확인 질문 다시 보기]: Ctrl+Z 시험(M3)과 자르기 시험(M2) 질문을 다시 띄운다."""
         self.show_panel()
         self.runs.ask_manual("M3", again=True)
         self.runs.ask_manual("M2", again=True)
@@ -1073,8 +1175,11 @@ class HelperWindow(QMainWindow):
     def on_report(self) -> None:
         self._save_report()
 
-    def _save_report(self, then: Optional[Callable[[Optional[Path]], None]] = None, silent: bool = False) -> bool:
-        """결과를 모아 저장한다. 파일만 읽으므로 리졸브 줄을 기다리지 않는다 (작업 중에도 된다)."""
+    def _save_report(self, then: Optional[Callable[[Optional[Path]], None]] = None, silent: bool = False,
+                     target: Optional[Path] = None, log_as: Optional[str] = None) -> bool:
+        """결과를 모아 저장한다. 파일만 읽으므로 리졸브 줄을 기다리지 않는다 (작업 중에도 된다).
+
+        target: 이 파일을 덮어쓴다 (기능 점검 전에 저장한 파일). log_as: 기록에 남길 줄의 틀 ({path})."""
         if self.report_pending or self.closing:
             return False
         self.report_pending = True
@@ -1096,18 +1201,22 @@ class HelperWindow(QMainWindow):
             return env
 
         self.shorts.run(job, lambda env, error: self.write_report(
-            env if env is not None else {"error": steps.explain(error)}, then=then, silent=silent),
-            name="report")
+            env if env is not None else {"error": steps.explain(error)}, then=then, silent=silent, target=target,
+            log_as=log_as), name="report")
         return True
 
-    def write_report(self, env: Dict[str, Any], then=None, silent: bool = False) -> None:
+    def write_report(self, env: Dict[str, Any], then=None, silent: bool = False, target: Optional[Path] = None,
+                     log_as: Optional[str] = None) -> None:
         self.report_pending = False
         self._refresh()
         text = self.report_text(env)
         folder = self.report_dir if self.report_dir is not None else desktop_dir()
         path: Optional[Path] = None
         try:
-            path = save_report(text, folder)
+            if target is not None:
+                path = save_report(text, Path(target).parent, name=Path(target).name)
+            else:
+                path = save_report(text, folder)
         except OSError:
             # 바탕 화면에 쓸 수 없으면 앱 기록 폴더에라도 남긴다.
             try:
@@ -1116,13 +1225,16 @@ class HelperWindow(QMainWindow):
                 self.show_message(S.REPORT_FAILED.format(error=exc))
         if path is not None:
             self.last_report = path
-            self.log(S.REPORT_SAVED_LOG.format(path=path))
+            self.log((log_as or S.REPORT_SAVED_LOG).format(path=path))
             if not silent:
                 self.show_message(S.REPORT_SAVED.format(path=path))
                 if self.interactive:
                     QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
         if then is not None:
             then(path)
+        if self._resave_probe and not self.report_pending and not self.closing:
+            self._resave_probe = False
+            self._probe_resave()
 
     # ── 자동 검사용 ───────────────────────────────────────────────────
 

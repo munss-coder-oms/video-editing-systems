@@ -86,3 +86,26 @@ def test_summaries_and_all_journals(tmp_path):
     s = j.summaries()
     assert len(s) == 20 and s[-1]["proposal_id"] == "P24" and s[-1]["calls"] == {"Timeline.AddMarker": "ok"}
     assert [x.key for x in all_journals(tmp_path)] == [j.key]
+
+
+def test_summaries_say_how_an_entry_ended_and_its_colours(tmp_path):
+    """되돌리기 목록의 낱말(모두 빼기로 끝남·지워짐)과 확인 글의 색("빨간 표시 1개")은 일지에서 온다."""
+    from engine.edits.journal import entry_colors
+
+    j = Journal.for_timeline(_info(), tmp_path)
+    j.begin("Pa", origin="chat:rule", request="1분에 빨간 표시", commands=[{"op": "mark", "items": [
+        {"at": 1, "color": "Red"}, {"at": 2, "color": "Blue"}]}],
+        expected_markers=[{"frame": 1, "custom": "aih:Pa:1", "color": "Red"}])
+    j.finish("Pa", created_markers=[{"frame": 1, "custom": "aih:Pa:1"}])  # 다시 읽은 줄에는 색이 없다
+    j.begin("Pb", origin="button:1", request="쉬는 곳", commands=[])
+    j.finish("Pb", created_markers=[{"frame": 5, "custom": "aih:Pb:1", "color": "Blue"}])
+    j.entry("Pa")["status"] = "undone"
+    j.entry("Pa")["undo"] = {"at": "x", "by": "remove_all"}
+    j.entry("Pb")["status"] = "undone"
+    j.entry("Pb")["undo"] = {"at": "x", "by": "clear:Pc"}
+    s = {x["proposal_id"]: x for x in j.summaries()}
+    assert s["Pa"]["closed_by"] == "remove_all" and s["Pb"]["closed_by"] == "clear:Pc"
+    assert s["Pa"]["colors"] == ["Red"] and s["Pb"]["colors"] == ["Blue"]
+    assert entry_colors({"commands": [{"items": [{"color": "Red"}, {"color": "Blue"}, {"color": "Red"}]}]}) == [
+        "Red", "Blue"]
+    assert entry_colors({}) == []

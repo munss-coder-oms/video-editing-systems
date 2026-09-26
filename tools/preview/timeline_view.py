@@ -5,8 +5,10 @@
 
 - 위: 이름표 "리졸브 타임라인 (흉내)"와 표시 수 (도우미 표시, 옛 시험 표시, 직접 찍은 표시).
 - 눈금: 타임라인의 타임코드(01:00:00:00부터)와 분.
-- 표시: 리졸브 표시 색. 길이 있는 표시는 막대. 도우미 표시(aih)는 채운 깃발, 직접 찍은 표시는 속이 빈 깃발.
-- 재생 위치: 흰 세로줄.
+- 표시: 리졸브 표시 색. 도우미 표시(aih)는 채운 깃발, 직접 찍은 표시는 속이 빈 깃발.
+  길이 있는 표시는 깃발 아래의 가는 막대 (아주 짧아도 보이게 최소 너비).
+- 재생 위치: 흰 세로줄과 눈금 글씨 아래의 세모.
+- 범례: 깃발 모양은 색과 상관없이 회색으로, 옛 시험 표시(노랑)는 있을 때만.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ COUNTS = "도우미 표시 {ours}개 · 직접 찍은 표시 {user}개"
 COUNTS_LEGACY = "도우미 표시 {ours}개 · 옛 시험 표시 {legacy}개 · 직접 찍은 표시 {user}개"
 LEGEND_OURS = "도우미가 넣은 표시"
 LEGEND_USER = "직접 찍은 표시"
+LEGEND_LEGACY = "옛 시험 표시"
 LEGEND_PLAYHEAD = "재생 위치 {tc}"
 MINUTE = "{m}분"
 
@@ -38,6 +41,9 @@ MARKER_RGB = {
 }
 BG, RULER_BG, LANE_BG = "#16171a", "#1f2125", "#25272c"
 TEXT, MUTED, TICK = "#e4e6eb", "#9a9ea8", "#5d616b"
+NEUTRAL = "#b8bcc6"  # 범례의 깃발 모양 (색은 표시마다 다르므로 회색)
+RANGE_Y, RANGE_H, RANGE_MIN_W = 60, 4, 3.0  # 길이 있는 표시의 막대: 깃발 아래
+PLAYHEAD_TOP = 40  # 세모가 눈금 글씨(25~37)와 겹치지 않게
 KOREAN = ["Noto Sans CJK KR", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", "sans-serif"]
 MONO = ["IBM Plex Mono", "DejaVu Sans Mono", "Consolas", "Menlo", "monospace"]
 
@@ -129,8 +135,8 @@ def render(markers: Dict[int, Dict[str, Any]], info: Dict[str, Any], path: Path,
         x0 = x_of(frame)
         dur = max(1, int(m.get("duration") or 1))
         if dur > 1:
-            x1 = max(x0 + 2.5, x_of(frame + dur))
-            p.fillRect(QRectF(x0, 49, x1 - x0, 8), color)
+            x1 = max(x0 + RANGE_MIN_W, x_of(frame + dur))
+            p.fillRect(QRectF(x0, RANGE_Y, x1 - x0, RANGE_H), color)
         line = QColor(color)
         line.setAlpha(170)
         pen = QPen(line, 1.2)
@@ -155,22 +161,26 @@ def render(markers: Dict[int, Dict[str, Any]], info: Dict[str, Any], path: Path,
     if ph is not None and 0 <= ph <= length:
         x = x_of(ph)
         p.setPen(QPen(QColor("#f5f6f8"), 1.5))
-        p.drawLine(QPointF(x, 36), QPointF(x, 82))
+        p.drawLine(QPointF(x, PLAYHEAD_TOP + 4), QPointF(x, 82))
         p.setBrush(QColor("#f5f6f8"))
         p.setPen(Qt.NoPen)
-        p.drawPolygon(QPolygonF([QPointF(x - 4, 34), QPointF(x + 4, 34), QPointF(x, 40)]))
+        p.drawPolygon(QPolygonF([QPointF(x - 4, PLAYHEAD_TOP), QPointF(x + 4, PLAYHEAD_TOP),
+                                 QPointF(x, PLAYHEAD_TOP + 6)]))
         p.setBrush(Qt.NoBrush)
 
     # 범례
     y = 100
     p.setFont(_font(KOREAN, 11))
     x = float(PAD)
-    for filled, text in ((True, LEGEND_OURS), (False, LEGEND_USER)):
+    legend = [(True, NEUTRAL, LEGEND_OURS), (False, NEUTRAL, LEGEND_USER)]
+    if legacy:
+        legend.append((True, MARKER_RGB["Yellow"], LEGEND_LEGACY))
+    for filled, rgb, text in legend:
         swatch = QRectF(x, y + 2, 9, 9)
         if filled:
-            p.fillRect(swatch, QColor(MARKER_RGB["Blue"]))
+            p.fillRect(swatch, QColor(rgb))
         else:
-            p.setPen(QPen(QColor(MARKER_RGB["Blue"]), 1.4))
+            p.setPen(QPen(QColor(rgb), 1.4))
             p.drawRect(swatch)
         p.setPen(QColor(MUTED))
         w = p.fontMetrics().horizontalAdvance(text)

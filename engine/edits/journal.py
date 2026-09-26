@@ -92,6 +92,27 @@ def entry_op(entry: Dict[str, Any]) -> Optional[str]:
     return cmds[0].get("op") if cmds and isinstance(cmds[0], dict) else None
 
 
+def entry_colors(entry: Dict[str, Any]) -> List[str]:
+    """일지 한 줄이 넣은 표시의 색 (처음 나온 차례대로): 적어 둔 표시 줄, 없으면 부탁(commands)의 색."""
+    out: List[str] = []
+
+    def add(c: Any) -> None:
+        if isinstance(c, str) and c and c not in out:
+            out.append(c)
+
+    for key in ("created", "expected"):
+        for m in ((entry.get(key) or {}).get("markers") or []):
+            add(m.get("color") if isinstance(m, dict) else None)
+        if out:
+            return out
+    cmds = entry.get("commands") or []
+    first = cmds[0] if cmds and isinstance(cmds[0], dict) else {}
+    add(first.get("color"))
+    for it in first.get("items") or []:
+        add(it.get("color") if isinstance(it, dict) else None)
+    return out
+
+
 def proposal_of(custom: Any) -> Optional[str]:
     """꼬리표 "aih:<P>:<n>"의 제안 번호 P."""
     if not isinstance(custom, str) or not custom.startswith("aih:"):
@@ -489,6 +510,9 @@ class Journal:
                 "markers": len(e.get("created", {}).get("markers", [])),
                 "deleted": len(e.get("deleted") or []),
                 "calls": receipt.get("calls") if isinstance(receipt, dict) else None,
+                # 무엇으로 끝났는지 (되돌리기 목록의 낱말): "remove_all" 또는 "clear:<지운 제안>"
+                "closed_by": (e.get("undo") or {}).get("by") if isinstance(e.get("undo"), dict) else None,
+                "colors": entry_colors(e),
             })
         return out
 

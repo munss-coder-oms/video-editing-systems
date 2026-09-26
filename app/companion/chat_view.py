@@ -5,14 +5,17 @@
 - 한글 입력 중(IME 조합 글자가 있을 때) Enter는 글자만 확정하고 보내지 않는다.
 - 입력 칸은 44에서 세 줄까지 커진다 (긴 한 줄이 접혀도 센다). 대화 목록은 접을 수 있다 (입력 칸은 늘 보인다).
 - 도우미 답 아래의 예문(칩)은 누르면 입력 칸을 채우기만 한다. 보내지 않는다 (고친 뒤 [보내기]).
-- 맨 아래에 늘 "답하는 쪽: 기본 도우미 (AI 아님) · 무료".
+- 맨 아래 한 줄: "기본 도우미가 답해요 (AI 아님 · 무료)"와 [▾ 대화 접기] (대화 칸 위에 줄을 따로 쓰지 않게).
+- 목록은 새 줄이 붙으면 따라 내려간다. 대화 칸보다 큰 카드는 카드 맨 위가 보이게 멈춘다.
+  위로 올려 읽는 중이면 따라가지 않는다 (맨 아래로 다시 내리면 다시 따라간다).
+- 목록 안쪽 너비는 보이는 너비를 넘지 않는다 (카드가 넓어져 오른쪽이 잘리지 않게).
 """
 
 from __future__ import annotations
 
 from typing import List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QInputMethodEvent, QKeyEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -32,6 +35,7 @@ from . import theme
 
 MAX_INPUT_LINES = 3
 MAX_MESSAGES = 200  # 이보다 많으면 오래된 것부터 지운다 (카드 포함)
+FOLLOW_SLACK = 4  # 맨 아래에서 이만큼 안이면 "맨 아래에 있음" (새 줄을 따라간다)
 
 
 class MessageList(QScrollArea):
@@ -54,6 +58,63 @@ class MessageList(QScrollArea):
         self.box.addStretch(1)
         self.setWidget(self.inner)
         self.items: List[QWidget] = []
+        self.follow = True  # 새 줄을 따라 내려감 (사람이 위로 올려 읽는 중이면 False)
+        self._anchor: Optional[QWidget] = None  # 방금 붙인 줄: 대화 칸에 다 안 들어가면 그 맨 위에서 멈춘다
+        self._moving = False  # 이 목록이 스스로 옮기는 중 (사람이 올린 것과 가르려고)
+        bar = self.verticalScrollBar()
+        bar.rangeChanged.connect(self._range_changed)
+        bar.valueChanged.connect(self._value_changed)
+
+    # ── 너비와 따라가기 ────────────────────────────────────────────────
+
+    def _cap_width(self) -> None:
+        """안쪽 너비를 보이는 너비로 묶는다 (넓은 카드가 목록을 옆으로 밀어 오른쪽이 잘리지 않게)."""
+        width = self.viewport().width()
+        if width > 0 and self.inner.maximumWidth() != width:
+            self.inner.setMaximumWidth(width)
+
+    def resizeEvent(self, event) -> None:
+        self._cap_width()
+        super().resizeEvent(event)
+
+    def viewportEvent(self, event) -> bool:
+        if event.type() == QEvent.Resize:
+            self._cap_width()
+        return super().viewportEvent(event)
+
+    def _target(self) -> int:
+        bar = self.verticalScrollBar()
+        target = bar.maximum()
+        w = self._anchor
+        if w is not None:
+            try:
+                # 맨 아래로 가면 새 줄의 맨 위가 가려질 때 (위아래 여백까지 쳐서 칸에 다 안 들어감): 맨 위에서 멈춘다
+                if w.parent() is self.inner:
+                    target = min(target, max(0, w.y() - self.box.spacing()))
+            except RuntimeError:
+                self._anchor = None
+        return target
+
+    def _reveal(self) -> None:
+        bar = self.verticalScrollBar()
+        target = self._target()
+        if bar.value() != target:
+            self._moving = True
+            try:
+                bar.setValue(target)
+            finally:
+                self._moving = False
+
+    def _range_changed(self, _lo: int, _hi: int) -> None:
+        if self.follow:
+            self._reveal()
+
+    def _value_changed(self, value: int) -> None:
+        if self._moving:
+            return
+        # 사람이 옮김 (휠, 끌기, 키): 맨 아래면 다시 따라가고, 아니면 멈춘다
+        self._anchor = None
+        self.follow = value >= self.verticalScrollBar().maximum() - FOLLOW_SLACK
 
     def appendPlainText(self, text: str) -> QLabel:
         label = QLabel(text)
@@ -70,12 +131,16 @@ class MessageList(QScrollArea):
             old = self.items.pop(0)
             self.box.removeWidget(old)
             old.deleteLater()
-        QTimer.singleShot(0, self.scroll_to_end)
+        # 새 줄은 늘 보여 준다 (위로 올려 읽던 중이어도: 사람이 방금 보냈거나 답을 기다리는 카드다).
+        # 옮기는 것은 목록 높이가 바뀐 뒤(rangeChanged)에 한다: 그때라야 새 줄의 자리와 높이를 안다
+        self.follow = True
+        self._anchor = widget
         return widget
 
     def scroll_to_end(self) -> None:
-        bar = self.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        self.follow = True
+        self._anchor = None
+        self._reveal()
 
     def toPlainText(self) -> str:
         out = []
@@ -201,9 +266,8 @@ class ChatView(QWidget):
         self.toggle = QToolButton()
         self.toggle.setText(S.CHAT_COLLAPSE)
         self.toggle.setCheckable(True)
-        self.toggle.setMinimumHeight(theme.HIT_MIN)
+        self.toggle.setProperty("role", "link")
         self.toggle.toggled.connect(self._set_collapsed)
-        root.addWidget(self.toggle, 0, Qt.AlignLeft)
 
         self.log = MessageList()
         self.log.setAccessibleName(S.CHAT_TITLE)
@@ -223,9 +287,16 @@ class ChatView(QWidget):
         root.addLayout(row)
 
         self.last_chips: Optional[ChipRow] = None
+        # 맨 아래 한 줄: 누가 답하는지 + [▾ 대화 접기]
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(6)
         self.brain = QLabel(S.CHAT_BRAIN_LINE)
         self.brain.setProperty("role", "secondary")
-        root.addWidget(self.brain)
+        self.brain.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        bottom.addWidget(self.brain, 1)
+        bottom.addWidget(self.toggle, 0, Qt.AlignRight | Qt.AlignVCenter)
+        root.addLayout(bottom)
         self.add_helper(S.CHAT_GREETING)
 
     @property

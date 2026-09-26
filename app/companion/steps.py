@@ -11,13 +11,16 @@ import functools
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from engine.edits.apply import LEGACY_TEST_TRACK
 from engine.resolve_link.bridge import OLD_SCRIPT_MESSAGE, BridgeCancelled, BridgeError, BridgeTimeout
 from engine.resolve_link.testfiles import TEST_TONE_NAME, make_test_tone
 from engine.resolve_link.timecode import is_drop_frame, parse_fps, tc_offset, tc_to_frames
 
-TEST_NAME = "AI 도우미 시험"  # 표시 이름이자 오디오 트랙 이름
+from . import strings_ko as S
+
+TEST_NAME = LEGACY_TEST_TRACK  # 표시 이름이자 오디오 트랙 이름
 TEST_CUSTOM = "aih_test"  # 표시의 custom data. 지울 때 이것으로 찾는다
-TEST_NOTE = "AI 도우미 연결 시험 표시입니다. [시험 흔적 지우기]로 지울 수 있습니다."
+TEST_NOTE = S.TEST_NOTE
 TONE_SECONDS = 3.0  # 타임라인에 올리는 길이
 # 시험용 소리 파일의 길이. 올리는 길이보다 길게 만들어, 29.97처럼 딱 나누어떨어지지 않는 속도에서도
 # 요청한 마지막 프레임(endFrame)이 파일 끝을 넘지 않게 한다.
@@ -28,10 +31,7 @@ PING_TIMEOUT = 5.0  # 버튼을 누를 때 먼저 하는 연결 확인
 AUTO_PING_TIMEOUT = 1.5  # 연결 전 2초마다 하는 확인
 
 # ping에는 답했는데 그다음 작업의 답이 늦을 때 (Scripts 메뉴를 다시 누르라고 하면 안 된다)
-SLOW_TEXT = (
-    "리졸브와 연결은 되어 있지만 이 작업의 답이 늦습니다. 리졸브가 아직 일하는 중이거나 "
-    "리졸브에 창(대화 상자)이 열려 있을 수 있습니다. 잠시 뒤 다시 눌러 주세요."
-)
+SLOW_TEXT = S.STEP_SLOW_TEXT
 
 Out = Dict[str, Any]
 Step = Callable[[Any, Out], None]
@@ -61,23 +61,7 @@ def run_step(step: Step, bridge) -> Out:
 
 # ── 오류를 쉬운 말로 ───────────────────────────────────────────────────
 
-_ERROR_TEXT = {
-    "no_project": "리졸브에서 프로젝트를 열어 주세요.",
-    "no_timeline": "리졸브에서 타임라인을 열어 주세요 (편집 화면 아래에 타임라인이 보여야 합니다).",
-    "no_resolve": "스크립트가 리졸브를 찾지 못했습니다. 리졸브의 Workspace → Scripts 메뉴에서 실행했는지 확인해 주세요.",
-    "no_project_manager": "스크립트가 리졸브의 프로젝트 관리자를 열지 못했습니다.",
-    "no_media_pool": "리졸브의 미디어 풀을 열지 못했습니다.",
-    "no_root_folder": "리졸브 미디어 풀의 맨 위 폴더를 찾지 못했습니다.",
-    "add_bin_failed": "미디어 풀에 'AI 도우미' 폴더를 만들지 못했습니다.",
-    "import_failed": "리졸브가 시험용 소리 파일을 가져오지 못했습니다.",
-    "add_track_failed": "리졸브가 오디오 트랙을 추가하지 못했습니다.",
-    "track_count_failed": "리졸브가 오디오 트랙 수를 알려 주지 않았습니다.",
-    "too_large": "리졸브의 답이 너무 커서 받지 못했습니다.",
-    "need_edit_page": "리졸브 편집(Edit) 화면에서 눌러 주세요. 트랙은 편집 화면에서만 지웁니다.",
-    "unknown_op": OLD_SCRIPT_MESSAGE,
-    "not_original": "점검 때 적어 둔 원래 타임라인이 아니라서 옮기지 않았습니다.",
-    "timeline_not_found": "원래 타임라인을 찾지 못했습니다. 리졸브에서 직접 골라 주세요.",
-}
+_ERROR_TEXT = dict(S.STEP_ERRORS, unknown_op=OLD_SCRIPT_MESSAGE)
 
 
 def explain(exc: BaseException, answered: bool = False) -> str:
@@ -93,9 +77,9 @@ def explain(exc: BaseException, answered: bool = False) -> str:
         if exc.error in _ERROR_TEXT:
             return _ERROR_TEXT[exc.error]
         if exc.error.startswith("bad_path"):
-            return f"시험용 소리 파일 위치를 스크립트가 받아들이지 않았습니다 ({exc.error})."
+            return S.STEP_BAD_PATH.format(error=exc.error)
         return str(exc)
-    return f"예상하지 못한 오류: {type(exc).__name__}: {exc}"
+    return S.STEP_UNEXPECTED.format(name=type(exc).__name__, error=exc)
 
 
 def error_info(exc: BaseException, answered: bool = False) -> Dict[str, Any]:
@@ -152,7 +136,7 @@ def timeline_start_frame(state: Out) -> int:
     try:
         return tc_to_frames(state.get("start_tc") or "", state.get("fps"), state.get("drop_frame"))
     except (TypeError, ValueError):
-        raise StepProblem("리졸브가 타임라인 시작 위치를 알려 주지 않았습니다.") from None
+        raise StepProblem(S.STEP_NO_START) from None
 
 
 def drop_frame_used(state: Out) -> bool:
@@ -184,9 +168,9 @@ def playhead_offset(state: Out) -> Tuple[int, str]:
 
 def need_timeline(state: Out) -> None:
     if state.get("project") is None:
-        raise StepProblem("리졸브에서 프로젝트를 열어 주세요.")
+        raise StepProblem(S.STEP_NO_PROJECT)
     if state.get("timeline") is None:
-        raise StepProblem("리졸브에서 타임라인을 열어 주세요 (편집 화면 아래에 타임라인이 보여야 합니다).")
+        raise StepProblem(S.STEP_NO_TIMELINE)
 
 
 # ── 단계 ─────────────────────────────────────────────────────────────
@@ -276,25 +260,25 @@ def cleanup_step(bridge, out: Out) -> None:
 # ── 결과를 한 줄로 ────────────────────────────────────────────────────
 
 def _quote(value) -> str:
-    return f'"{value}"' if isinstance(value, str) else "없음"
+    return f'"{value}"' if isinstance(value, str) else S.DESCRIBE_NONE
 
 
 def describe_state(ping: Optional[Out], state: Optional[Out]) -> str:
     parts = []
     if ping:
-        product = ping.get("product") or "리졸브"
-        version = ping.get("resolve_version") or "판 모름"
-        parts.append(f"{product} {version}")
+        product = ping.get("product") or S.DESCRIBE_RESOLVE
+        version = ping.get("resolve_version") or S.DESCRIBE_NO_VERSION
+        parts.append(S.DESCRIBE_PRODUCT.format(product=product, version=version))
     if state:
         if state.get("project") is None:
-            parts.append("열린 프로젝트 없음")
+            parts.append(S.DESCRIBE_NO_PROJECT)
         else:
-            parts.append(f"프로젝트 {_quote(state.get('project'))}")
+            parts.append(S.DESCRIBE_PROJECT.format(name=_quote(state.get("project"))))
             if state.get("timeline") is None:
-                parts.append("열린 타임라인 없음")
+                parts.append(S.DESCRIBE_NO_TIMELINE)
             else:
-                parts.append(f"타임라인 {_quote(state.get('timeline'))}")
-    return " / ".join(parts)
+                parts.append(S.DESCRIBE_TIMELINE.format(name=_quote(state.get("timeline"))))
+    return S.DESCRIBE_SEP.join(parts)
 
 
 def _test_markers(listing: Optional[Out]) -> Optional[List[Out]]:
@@ -316,16 +300,16 @@ def marker_problems(out: Out) -> Optional[List[str]]:
         same_name = [m for m in listing["markers"] if isinstance(m, dict) and m.get("frame") == frame
                      and m.get("name") == TEST_NAME]
         if same_name:
-            return ["custom data가 저장되지 않았습니다"]
+            return [S.MARKER_NO_CUSTOM]
         if ours:
-            frames = ", ".join(str(m.get("frame")) for m in ours)
-            return [f"표시가 {frame}프레임이 아니라 {frames}프레임에 있습니다"]
-        return [f"{frame}프레임에서 시험 표시를 다시 찾지 못했습니다"]
+            frames = S.LIST_SEP.join(str(m.get("frame")) for m in ours)
+            return [S.MARKER_OTHER_FRAME.format(frame=frame, frames=frames)]
+        return [S.MARKER_NOT_FOUND.format(frame=frame)]
     problems = []
     if here[0].get("name") != TEST_NAME:
-        problems.append("이름이 다르게 저장되었습니다")
+        problems.append(S.MARKER_NAME_DIFF)
     if here[0].get("note") != TEST_NOTE:
-        problems.append("메모가 다르게 저장되었습니다")
+        problems.append(S.MARKER_NOTE_DIFF)
     return problems
 
 
@@ -339,34 +323,31 @@ def summarize(name: str, out: Out) -> Tuple[bool, str]:
     if name in ("connect", "auto"):
         text = describe_state(out.get("ping"), out.get("state"))
         if "state_error" in out:
-            text += f" (타임라인 정보는 못 읽음: {out['state_error']['message']})"
+            text += S.DESCRIBE_STATE_ERROR.format(message=out["state_error"]["message"])
         return True, text
     if name == "marker":
         marker = out.get("marker") or {}
-        where = "재생 위치" if out.get("offset_how") == "playhead" else "재생 위치를 못 읽어 시작 + 1초"
+        where = S.MARKER_WHERE_PLAYHEAD if out.get("offset_how") == "playhead" else S.MARKER_WHERE_FALLBACK
         if not marker.get("added"):
-            return False, "리졸브가 표시를 넣지 않았습니다 (AddMarker가 거절)."
-        text = f"타임라인 시작에서 {marker.get('frame')}프레임({where})에 노란 표시를 넣었습니다."
+            return False, S.MARKER_REFUSED
+        text = S.MARKER_ADDED.format(frame=marker.get("frame"), where=where)
         problems = marker_problems(out)
         if problems is None:
-            return True, text + " (넣은 표시를 다시 읽어 확인하지는 못했습니다)"
+            return True, text + S.MARKER_UNVERIFIED
         if problems:
-            return False, text + " 그런데 다시 읽어 보니 " + ", ".join(problems) + "."
+            return False, text + S.MARKER_PROBLEMS.format(problems=S.LIST_SEP.join(problems))
         return True, text
     if name == "audio":
         audio = out.get("audio") or {}
         if (audio.get("appended") or 0) < 1:
-            return False, "트랙은 만들었지만 소리가 타임라인에 올라가지 않았습니다 (AppendToTimeline이 빈 답)."
-        text = (f"오디오 트랙 {audio.get('track_index')}번(\"{TEST_NAME}\")에 "
-                f"{TONE_SECONDS:g}초짜리 시험 소리를 넣었습니다.")
+            return False, S.AUDIO_NOT_PLACED
+        text = S.AUDIO_PLACED.format(track=audio.get("track_index"), name=TEST_NAME, seconds=f"{TONE_SECONDS:g}")
         if audio.get("length_ok") is False:
             # 1.1.0 스크립트는 놓인 길이(GetEnd - GetStart)를 다시 읽어 알려 준다
-            text += (f" 그런데 {out.get('frames')}프레임을 부탁했는데 {audio.get('placed_frames')}프레임으로 "
-                     "놓였습니다.")
+            text += S.AUDIO_LENGTH_DIFF.format(asked=out.get("frames"), placed=audio.get("placed_frames"))
         if audio.get("track_named") is False:
             # 이름이 없으면 [시험 흔적 지우기]가 이 트랙을 찾지 못한다
-            return False, text + (f" 그런데 트랙 이름을 \"{TEST_NAME}\"로 바꾸지 못해 [시험 흔적 지우기]로는 "
-                                  "지워지지 않습니다. 리졸브에서 직접 지워 주세요.")
+            return False, text + S.fill(S.AUDIO_NOT_NAMED, name=TEST_NAME)
         return audio.get("length_ok") is not False, text
     if name == "cleanup":
         problems = [out[k]["message"] for k in ("delete_markers_error", "remove_audio_error") if k in out]
@@ -376,23 +357,22 @@ def summarize(name: str, out: Out) -> Tuple[bool, str]:
         deleted = deleted_answer.get("deleted_count")
         if deleted is None:
             deleted = 1 if deleted_answer.get("deleted") else 0
-        text = f"{'시험 표시 %d개 지움' % deleted if deleted else '시험 표시 없음'}, 시험 트랙 {removed}개 지움"
+        marks = S.CLEANUP_DELETED.format(n=deleted) if deleted else S.CLEANUP_NONE
+        text = S.CLEANUP_LINE.format(markers=marks, tracks=removed)
         # 지운 뒤 다시 읽은 표시 목록 (못 읽었으면 스크립트가 센 남은 수)
         left_markers = _test_markers(out.get("markers_after"))
         left = len(left_markers) if left_markers is not None else deleted_answer.get("remaining")
         if isinstance(left, int) and left > 0:
-            problems.append(f"시험 표시 {left}개가 아직 남아 있습니다. 리졸브에서 직접 지워 주세요")
+            problems.append(S.CLEANUP_MARKERS_LEFT.format(n=left))
         if skipped:
             # 이 창이 넣은 소리인지 확인할 수 없는 클립이 있으면 지우지 않는다 (사용자 것일 수 있음)
-            problems.append(f"'{TEST_NAME}' 트랙 {skipped}개는 이 창이 넣은 것인지 확인하지 못해 남겨 두었습니다. "
-                            "필요하면 리졸브에서 직접 지워 주세요")
+            problems.append(S.CLEANUP_TRACKS_SKIPPED.format(name=TEST_NAME, n=skipped))
         else:
             audio_left = [i for i in ((out.get("state") or {}).get("items") or {}).get("audio") or []
                           if _is_test_tone(i)]
             if audio_left:
-                problems.append(f"시험 소리 {len(audio_left)}개가 타임라인에 아직 남아 있습니다. "
-                                "리졸브에서 직접 지워 주세요")
+                problems.append(S.CLEANUP_AUDIO_LEFT.format(n=len(audio_left)))
         if problems:
-            return False, text + " (" + " / ".join(problems) + ")"
+            return False, text + S.CLEANUP_PROBLEMS.format(problems=S.PROBLEM_SEP.join(problems))
         return True, text
     return True, ""

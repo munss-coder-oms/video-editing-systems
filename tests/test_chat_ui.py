@@ -79,9 +79,13 @@ def test_mark_card_inline_edit_apply_then_undo_last(qapp, make_window, resolve):
     assert p.rows[0].start == TL0 + 200 * FPS
     text = card.plain_text()
     assert card.title.text() == S.CARD_TITLE_PROPOSE
-    assert S.TAGGED.format(value="3:20.0", source=S.PROVENANCE["said"]) in text  # 언제 · 말씀하신 값
-    assert S.ITEM_SOURCE.format(at=S.PROVENANCE["said"], color=S.PROVENANCE["said"], name=S.PROVENANCE["said"]) in text
-    assert "01:03:20:00" in text and S.KEEP_MARKERS in text
+    # 적으신 값은 꼬리표를 달지 않는다 (기본값·설정값·재생 위치만). 한 줄짜리 카드는 줄마다 출처를 되풀이하지 않는다
+    assert f"\n{S.ROW_WHEN}\n3:20.0\n" in text and S.PROVENANCE["said"] not in text
+    assert S.ITEM_SOURCE.split("{")[0] not in text
+    # 리졸브 시간(01:03:20:00)은 줄의 풍선 도움말로 (카드 글에는 안 나온다)
+    assert "01:03:20:00" not in text and "01:03:20:00" in card.extra["view:0"].toolTip()
+    assert card.item_labels[0].toolTip() == card.extra["view:0"].toolTip()
+    assert S.KEEP_MARKERS in text
     assert card.buttons["apply"].isEnabled() and not card.blocked
 
     # [+] 0.1초: 두뇌도 리졸브도 다시 부르지 않고 고친다
@@ -109,7 +113,8 @@ def test_mark_card_inline_edit_apply_then_undo_last(qapp, make_window, resolve):
     _send(qapp, w, "방금 거 취소")
     assert _mutating(fake, since) == []  # 묻기 전에는 빼지 않는다
     q = [c for c in _cards(w, QuestionCard) if c.title.text() == S.CARD_TITLE_UNDO][-1]
-    assert S.UNDO_WHAT_MARKS.format(request="3분 20초에 빨간 표시해줘, 메모는 '자막 확인'", n=1) in q.plain_text()
+    what = S.fill(S.UNDO_WHAT_MARKS, request="3분 20초에 빨간 표시해줘, 메모는 '자막 확인'", color_word="빨간", n=1)
+    assert what in q.plain_text() and "'으로 넣은 빨간 표시 1개를 빼요" in what
     q.buttons["remove"].click()
     wait_until(qapp, lambda: card.state == "undone" and not w.busy, 20)
     assert _ours(fr) == {} and 600 in fr.markers
@@ -159,7 +164,8 @@ def test_jump_moves_the_playhead_without_a_card(qapp, make_window, resolve):
     _send(qapp, w, "3분 20초로 가줘")
     assert fr.jumps == [(TL0 + 200 * FPS, "01:03:20:00")]
     assert len(w.runs.cards) == cards and _mutating(fake) == []
-    assert S.CHAT_JUMP_DONE.format(at="3:20.0", tc="01:03:20:00") in w.chat.log.toPlainText()
+    assert S.fill(S.CHAT_JUMP_DONE, at="3:20.0", tc="01:03:20:00") in w.chat.log.toPlainText()
+    assert "3:20.0으로 옮겼어요" in w.chat.log.toPlainText()
     fr.info["page"] = "media"
     _send(qapp, w, "처음으로 가줘")
     assert len(fr.jumps) == 1 and S.CHAT_JUMP_PAGE in w.chat.log.toPlainText()
@@ -188,8 +194,12 @@ def test_clear_blue_removes_only_ours_and_undo_puts_them_back(qapp, make_window,
     assert card.proposal.count == 2 and set(card.proposal.colors) == {"Blue"}
     text = card.plain_text()
     assert card.title.text() == S.CARD_TITLE_CLEAR and S.CLEAR_RESOLVE.format(n=2) in text
-    # 범위를 말하지 않은 지우기는 타임라인 전체에 적용된다: 설계 B4의 "전체" 경고 (막지는 않는다)
-    assert S.GUARD["whole"].format(length="18분 46초") in text and card.buttons["apply"].isEnabled()
+    # 범위를 말하지 않은 지우기는 타임라인 전체에 적용된다: "언제" 줄이 "전체 18분 46초"라고 적으니 경고 줄은 되풀이하지 않는다
+    assert S.WHEN_WHOLE.format(length="18분 46초") in text and card.buttons["apply"].isEnabled()
+    assert S.GUARD["whole"].format(length="18분 46초") not in text
+    assert card.buttons["apply"].text() == S.BTN_CLEAR_APPLY  # 지우는 카드의 단추는 "지우기"
+    assert [r for r in (S.ROW_WHAT, S.ROW_WHEN, S.ROW_CLEAR) if f"\n{r}\n" in f"\n{text}\n"] == [
+        S.ROW_WHAT, S.ROW_WHEN, S.ROW_CLEAR]
     card.buttons["apply"].click()
     wait_until(qapp, lambda: card.state == "receipt" and not w.busy, 20)
     ours = _ours(fr)
@@ -228,8 +238,10 @@ def test_range_pauses_card_clips_saves_slot_and_view_jumps(qapp, make_window, tm
     assert p.scope["kind"] == "range" and p.scope["lo"] == 108000 + 330 and p.scope["hi"] == 108000 + 645
     assert len(p.rows) == 2 and p.rows[0].start == 108000 + 330 and p.rows[1].end == 108000 + 645
     text = card.plain_text()
-    assert S.TAGGED.format(value=S.WHEN_RANGE.format(a="0:11.0", b="0:21.5"), source=S.PROVENANCE["said"]) in text
-    assert S.TAGGED.format(value=S.COUNT_LINE.format(n=2), source=S.PROVENANCE["found"]) in text
+    assert S.WHEN_RANGE.format(a="0:11.0", b="0:21.5") in text and S.PROVENANCE["said"] not in text
+    colors = S.TAGGED.format(value=S.RESOLVE_RANGE.format(color_word="파란", n=2),
+                             source=S.PROVENANCE_SLOT.format(name="쉬는 곳 표시"))
+    assert colors in text and "((" not in text and "))" not in text  # 괄호 안에 괄호가 없다
     assert not card.blocked and _mutating(fake) == []
 
     # [+] 쉰 길이: 다시 계산 (리졸브는 읽기만), 같은 카드가 바뀐다
@@ -258,8 +270,10 @@ def test_range_pauses_card_clips_saves_slot_and_view_jumps(qapp, make_window, tm
     assert slot["kind"] == "mark_pauses" and slot["params"]["min_s"] == 0.5 and "range" not in slot["params"]
     assert slot["previous"]["kind"] == "balance_voice"
     log = w.chat.log.toPlainText()
-    assert S.SAVE_DONE.format(n=3) in log and S.SAVE_RANGE_DROPPED.format(a="0:11.0", b="0:21.5") in log
-    assert w.automation.buttons[2].name == S.KIND_NAMES["mark_pauses"]
+    assert S.fill(S.SAVE_DONE, n=3) == "자동화 3을 바꿨어요" and S.fill(S.SAVE_DONE, n=3) in log and S.SAVE_RANGE_DROPPED.format(a="0:11.0", b="0:21.5") in log
+    # 1번 버튼이 이미 "쉬는 곳 표시"라서 같은 이름 두 개가 되지 않게 번호를 붙인다
+    assert w.automation.buttons[2].name == S.SAVE_SLOT_NAME.format(name=S.KIND_NAMES["mark_pauses"], n=3)
+    assert w.automation.buttons[0].name == S.KIND_NAMES["mark_pauses"]
     assert w.settings.restore_previous(3) and w.settings.slot(3)["kind"] == "balance_voice"
 
 

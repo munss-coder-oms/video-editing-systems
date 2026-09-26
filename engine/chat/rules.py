@@ -16,7 +16,7 @@
    (취소·되돌려·저장처럼 앞뒤 말로 대상을 아는 동작은 빼고).
 7. 타임라인(TimeContext)이 있으면 시간을 절대 프레임으로 푼다. 없으면 NeedTimeline (화면이 연결 확인 뒤 다시 부른다).
 
-리졸브에 들어가는 표시 이름("표시", "여기 6dB 줄이기", "자르기 후보")만 여기서 만든다. 화면 글은 code로 돌려준다.
+리졸브에 들어가는 표시 이름("도우미 표시", "여기 6dB 줄이기", "자르기 후보")만 여기서 만든다. 화면 글은 code로 돌려준다.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import intents_ko as K
-from .brain import (DEFAULT, SAID, SETTING, BrainResult, Chip, Command, NeedTimeline, NotUnderstood, ProposalDraft,
-                    Question, Reply, RequestedScope)
+from .brain import (DEFAULT, PLAYHEAD, SAID, SETTING, BrainResult, Chip, Command, NeedTimeline, NotUnderstood,
+                    ProposalDraft, Question, Reply, RequestedScope)
 from .context import AssistContext
 from .intents_ko import Found, Span, inside, normalize, overlaps
 from .timeparse import (AROUND_S, Around, Clock, Edge, Hms3, InOut, Playhead, RangeExpr, Relative, TC4, TimeContext,
@@ -38,7 +38,7 @@ MAX_MARK_ITEMS = 200  # 한 카드에 넣는 표시 (설계 B4.5)
 GAIN_MIN_DB, GAIN_MAX_DB = -24.0, 12.0  # 설계 B4.5 clamps
 POINT_TOL_S = 0.5  # 점 하나를 지울 때 앞뒤로 보는 여유 (설계 B4.3 tolerance)
 MAX_NAME = 40
-DEFAULT_MARK_NAME = "표시"
+DEFAULT_MARK_NAME = "도우미 표시"  # 이름을 말하지 않은 표시 (리졸브에서 직접 찍은 "Marker 1"과 구별되게)
 CUT_MARK_NAME = "자르기 후보"
 AUDIO_MARK_NAME = "여기 {db}dB {verb}"
 AUDIO_VERB_WORD = {"down": "줄이기", "up": "키우기"}
@@ -636,7 +636,7 @@ class RuleBrain:
         for i, t in enumerate(c.times):
             color = colors[i] if len(colors) == len(c.times) else (colors[0] if colors else None)
             items.append({"time": t, "color": color, "name": name, "note": note,
-                          "src": {"at": SAID, "color": SAID if color else DEFAULT, "name": name_src}})
+                          "src": {"at": at_source(t), "color": SAID if color else DEFAULT, "name": name_src}})
         used_colors = c.colors if len(colors) in (1, len(c.times)) else c.colors[:1]
         consumed += [x.span for x in used_colors]
         cmd.params = {"items": items}
@@ -649,7 +649,7 @@ class RuleBrain:
         시간을 여럿 말하면 ("3분과 5분에서 잘라줘") 시간마다 하나씩 (앞의 하나만 넣고 나머지를 버리지 않는다)."""
         times = list(c.times) or [TimeToken(c.start, c.start, "", Playhead(""))]
         items = [{"time": t, "color": OFFER_COLOR[offer], "name": name, "note": None,
-                  "src": {"at": SAID if t.text else DEFAULT, "color": DEFAULT, "name": DEFAULT}} for t in times]
+                  "src": {"at": at_source(t), "color": DEFAULT, "name": DEFAULT}} for t in times]
         return Command("mark", {"items": items}, clause=c.text, span=c.span, offer=offer)
 
     def _audio(self, c: _Clause, verbs: List[Found]) -> _Result:
@@ -862,6 +862,16 @@ def _neighbour(results: List[_Result], i: int, ops: Sequence[str], prefer_prev: 
     return None
 
 
+def at_source(t: TimeToken) -> str:
+    """표시 자리의 출처: "여기"·"지금"(재생 위치, 그 앞뒤·근처 포함)이면 재생 위치, 숫자로 말했으면 말씀하신 값."""
+    expr = t.expr
+    if isinstance(expr, Around):
+        expr = expr.point
+    elif isinstance(expr, Relative):
+        expr = expr.anchor
+    return PLAYHEAD if isinstance(expr, Playhead) else SAID
+
+
 def _merge_times(target: _Result, r: _Result) -> None:
     items = target.command.params["items"]
     base = items[0]
@@ -870,7 +880,7 @@ def _merge_times(target: _Result, r: _Result) -> None:
     for i, t in enumerate(r.clause.times):
         color = colors[i] if i < len(colors) else base["color"]
         new.append({"time": t, "color": color, "name": base["name"], "note": base["note"],
-                    "src": {"at": SAID, "color": SAID if color else DEFAULT, "name": base["src"]["name"]}})
+                    "src": {"at": at_source(t), "color": SAID if color else DEFAULT, "name": base["src"]["name"]}})
     items += new
     items.sort(key=lambda it: it["time"].start)
     target.consumed += r.consumed
@@ -919,7 +929,7 @@ def _merge_modifier(target: _Result, r: _Result) -> None:
 
 
 def _names(c: _Clause) -> Tuple[Optional[str], Optional[str], str]:
-    """표시 이름과 메모: 따옴표 안의 글. 없으면 기본 이름 ("표시")."""
+    """표시 이름과 메모: 따옴표 안의 글. 없으면 기본 이름 ("도우미 표시")."""
     if c.quotes:
         body = c.quotes[0].value
         return body[:MAX_NAME], body, SAID

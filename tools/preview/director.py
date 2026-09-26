@@ -6,6 +6,9 @@
 - 기다리기는 processEvents 고리 + 시간 제한. 시간이 지나면 SceneError(단계, 무엇을 기다렸는지).
 - 그림은 창을 grab()한 것 그대로. 메뉴와 묻는 창은 창 그림 위 실제 자리에 겹쳐 그린다 (묻는 창의 제목 줄은
   윈도우가 그리는 테두리라 offscreen에는 없어서, 제목만 담은 줄을 그려 넣는다).
+- 대화 칸은 창이 스스로 굴린 자리 그대로 찍는다 (새 카드를 따라 내려가는지도 보인다). 대화 칸보다 큰 카드는
+  위(창이 멈춘 자리)와 아래를 한 장씩. 예전 카드를 다시 볼 때만 사용자처럼 위로 굴린다.
+- 묻는 창의 글씨 대비는 그려진 그림에서 잰다 (스타일시트 바탕은 팔레트에 없다).
 """
 
 from __future__ import annotations
@@ -27,15 +30,16 @@ from . import timeline_view
 
 TITLE_BAR_H = 32  # 묻는 창 위에 그려 넣는 제목 줄 (논리 픽셀)
 SHOW_DELAY_S = 0.15  # 메뉴·묻는 창이 뜬 뒤 찍기 전에 기다리는 시간 (그리기가 끝나게)
-FAINT_RATIO = 3.0  # 묻는 창의 글씨와 바탕 대비가 이보다 낮으면 찾은 문제로 적는다 (읽기 어려움)
+FAINT_RATIO = 4.5  # 묻는 창의 글씨와 바탕 대비가 이보다 낮으면 찾은 문제로 적는다 (WCAG AA 글씨 대비)
 
 # 찍으면서 재어 본 창의 문제 (그 단계의 "찾은 문제"로 적는다). 같은 문제가 또 보이면 짧은 알림으로.
 ISSUE_HIDDEN_BUTTON = "{what}: 창에서는 대화 칸 오른쪽 밖이라 보이지 않아요 (미리보기는 그대로 눌렀어요)."
-NOTE_CLIPPED = ("카드 오른쪽이 잘린 것은 '{title}' 카드가 대화 칸을 넓혀서예요 (최소 {need}픽셀, 대화 칸 {view}픽셀). "
-                "카드만 따로 찍은 그림도 함께 두었어요.")
+ISSUE_CLIPPED = ("카드가 대화 칸보다 넓어서 오른쪽이 잘려요 ('{title}', 최소 {need}픽셀, 대화 칸 {view}픽셀). "
+                 "카드만 따로 찍은 그림도 함께 두었어요.")
+ISSUE_CUT_OFF = "카드가 필요한 높이를 받지 못해 아래가 잘려요 ('{title}', 필요 {need}픽셀, 받은 높이 {got}픽셀)."
+ISSUE_NOT_SHOWN = "새 카드가 대화 칸에 보이지 않는 자리에서 멈췄어요 ('{title}'): 창이 새 카드를 따라 내려가지 않았어요."
 ISSUE_FAINT = ("묻는 창의 글씨가 바탕과 거의 같은 색이라 잘 안 읽혀요 (글씨 {fg}, 바탕 {bg}, 대비 {ratio:.1f}:1). "
-               "도우미 창의 밝은 글씨 색이 묻는 창에도 들어가는데 바탕은 기본 밝은 색이라서예요. 윈도우를 밝은 "
-               "모드로 쓰면 실제 창도 이렇게 보일 수 있어요. 창에 적힌 글은 '보이는 것'에 옮겨 적었어요.")
+               "창에 적힌 글은 '보이는 것'에 옮겨 적었어요.")
 ISSUE_FAINT_AGAIN = "이 묻는 창도 글씨가 흐려요 ({first}단계에 적은 문제와 같아요, 대비 {ratio:.1f}:1)."
 
 
@@ -151,6 +155,26 @@ class Director:
         log.horizontalScrollBar().setValue(0)
         self.settle(0.05)
 
+    def show_bottom(self, widget: QWidget) -> None:
+        """대화 칸 안의 것의 아래 끝이 보이게 굴린다 (큰 카드의 아래쪽, 카드 맨 아래에 붙은 줄)."""
+        log = self.w.chat.log
+        if not log.inner.isAncestorOf(widget):
+            return
+        self.settle(0.02)
+        bottom = widget.mapTo(log.inner, QPoint(0, widget.height())).y()
+        bar = log.verticalScrollBar()
+        bar.setValue(max(0, min(bar.maximum(), bottom - log.viewport().height() + 12)))
+        self.settle(0.05)
+
+    def visible_top(self, widget: QWidget) -> bool:
+        """대화 칸 안의 것의 맨 위(제목)가 지금 보이는지."""
+        log = self.w.chat.log
+        top = widget.mapTo(log.viewport(), QPoint(0, 0)).y()
+        return 0 <= top < log.viewport().height() - 20
+
+    def taller_than_chat(self, widget: QWidget) -> bool:
+        return widget.height() > self.w.chat.log.viewport().height()
+
     def chat_bottom(self) -> None:
         """대화 칸을 맨 아래로 굴린다 (방금 나온 말이 보이게)."""
         self.settle(0.05)
@@ -183,18 +207,19 @@ class Director:
         return (title.text() if isinstance(title, QLabel) else ""), widest.minimumSizeHint().width(), view
 
     def check_clipped(self, widget: QWidget) -> None:
-        """대화 칸 안의 것이 옆으로 잘려 보이면 그 까닭(가장 넓은 카드)을 알아 둘 것에 적는다.
-
-        문제 자체는 그 넓은 카드의 단계(scenes의 Ctrl+Z 질문 카드)에 잰 값으로 한 번 적는다.
-        """
+        """대화 칸 안의 것이 옆으로 잘려 보이면 그 까닭(가장 넓은 카드)을, 아래가 잘리면 그 높이를 찾은 문제에 적는다."""
+        if widget.hasHeightForWidth():
+            need = widget.heightForWidth(widget.width())
+            if widget.height() < need:
+                title = getattr(widget, "title", None)
+                self.issue(ISSUE_CUT_OFF.format(title=title.text() if title is not None else "",
+                                                need=need, got=widget.height()))
         if self.hidden_part(widget) <= 0.01:
             return
         over = self.chat_overflow()
         if over is not None:
             title, need, view = over
-            text = NOTE_CLIPPED.format(title=title, need=need, view=view)
-            if text not in self.notes:
-                self.notes.append(text)
+            self.issue(ISSUE_CLIPPED.format(title=title, need=need, view=view))
 
     def press(self, widget: Optional[QWidget], what: str) -> None:
         if widget is None:
@@ -410,12 +435,11 @@ class Director:
         return self._finish(state, timeout)
 
     def _check_faint(self, box: QMessageBox) -> None:
-        """묻는 창의 글씨와 바탕의 대비 (그려진 색 그대로: 글씨는 스타일시트, 바탕은 창 팔레트)."""
+        """묻는 창의 글씨와 바탕의 대비: 그려진 그림에서 가장 많은 색(바탕)과 바탕에서 가장 먼 색(글씨)."""
         label = box.findChild(QLabel, "qt_msgbox_label")
-        if label is None:
+        if label is None or label.width() <= 0:
             return
-        fg = label.palette().color(label.foregroundRole())
-        bg = box.palette().color(box.backgroundRole())
+        fg, bg = drawn_colors(label.grab().toImage())
         ratio = contrast(fg, bg)
         if ratio >= FAINT_RATIO:
             return
@@ -450,6 +474,18 @@ class Director:
         self.settle(0.15)
         if (self.w.width(), self.w.height()) != (width, height):
             raise self.fail(f"창 크기가 {width}×{height}이 되지 않음 ({self.w.width()}×{self.w.height()})")
+
+
+def drawn_colors(img: QImage) -> Tuple[QColor, QColor]:
+    """그림의 (글씨 색, 바탕 색): 바탕은 가장 많은 색, 글씨는 세 번 넘게 나온 색 중 바탕과 대비가 가장 큰 색."""
+    counts: Dict[int, int] = {}
+    for y in range(img.height()):
+        for x in range(img.width()):
+            rgb = img.pixel(x, y) & 0xFFFFFF
+            counts[rgb] = counts.get(rgb, 0) + 1
+    bg = QColor(max(counts, key=counts.get))
+    fg = max((QColor(rgb) for rgb, n in counts.items() if n >= 3), key=lambda c: contrast(c, bg), default=bg)
+    return fg, bg
 
 
 def contrast(a: QColor, b: QColor) -> float:

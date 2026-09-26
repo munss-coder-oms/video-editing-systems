@@ -5,6 +5,8 @@
 - [이전 설정으로 되돌리기]는 바로 전 설정(previous)이 있을 때만 보인다 (한 단계).
 - 적용 범위 In~Out은 기능 점검에서 In~Out 읽기가 확인된 뒤에만 고를 수 있다 ("점검 뒤 켜져요").
 - 값을 바꾸면 아래 "버튼 아래 요약" 줄이 바로 바뀐다. [저장]을 눌러야 버튼에 들어간다.
+- 숫자 칸은 작은 화살표 대신 누르기 쉬운 [−] [+] (40×40)를 옆에 둔다. 색은 "파랑·빨강"처럼 색 이름으로.
+- 할 일·버튼 이름·설정 항목은 한 표(QFormLayout)에 두어 이름 칸 너비가 같다.
 작업 중에도 열 수 있다 (설계 B10).
 """
 
@@ -23,9 +25,12 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QAbstractSpinBox,
+    QFrame,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -35,7 +40,10 @@ from engine.resolve_link.ops import MARKER_COLORS
 
 from . import fmt
 from . import strings_ko as S
+from . import theme
 from .automation_view import kind_name, slot_summary
+
+FIXED_ROWS = 3  # 표의 처음 세 줄(할 일, 버튼 이름, 준비 중 안내)은 그대로 두고 그 아래 설정 항목만 새로 그린다
 
 
 def _decimals(step: Optional[float]) -> int:
@@ -43,6 +51,36 @@ def _decimals(step: Optional[float]) -> int:
         return 1
     text = fmt.num(step)
     return len(text.split(".")[1]) if "." in text else 0
+
+
+def _with_steppers(spin: QAbstractSpinBox) -> QWidget:
+    """숫자 칸 [−] 값 [+]: 작은 화살표 대신 40×40 단추 (stepBy로 한 칸씩). 값 칸도 높이 40.
+
+    크기는 스타일(box="field", stepped)이 정한다: 스타일의 min-height는 테두리 안쪽 높이라서,
+    setFixedSize만 두면 스타일이 단추를 42로 키워 줄 아래가 1픽셀 잘린다.
+    """
+    host = QWidget()
+    row = QHBoxLayout(host)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(4)
+    for text, delta in ((S.BTN_MINUS, -1), (S.BTN_PLUS, 1)):
+        btn = QToolButton()
+        btn.setText(text)
+        btn.setProperty("role", "step")
+        btn.setProperty("box", "field")
+        btn.setAccessibleName(text)
+        btn.setFixedSize(theme.HIT_MIN, theme.HIT_MIN)
+        btn.clicked.connect(lambda _=False, d=delta: spin.stepBy(d))
+        if delta < 0:
+            host.minus = btn  # type: ignore[attr-defined]
+            row.addWidget(btn)
+            row.addWidget(spin, 1)
+        else:
+            host.plus = btn  # type: ignore[attr-defined]
+            row.addWidget(btn)
+    spin.setProperty("stepped", True)
+    spin.steppers = host  # type: ignore[attr-defined]
+    return host
 
 
 class SlotSettingsPage(QWidget):
@@ -74,12 +112,14 @@ class SlotSettingsPage(QWidget):
         root.addLayout(top)
 
         self.scroll = QScrollArea()
+        self.scroll.setObjectName("settingsScroll")
+        self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         inner = QWidget()
         inner.setObjectName("settingsInner")
         self.inner_box = QVBoxLayout(inner)
-        self.inner_box.setContentsMargins(0, 0, 4, 0)
+        self.inner_box.setContentsMargins(8, 8, 8, 8)
         self.inner_box.setSpacing(6)
         self.form = QFormLayout()
         self.form.setRowWrapPolicy(QFormLayout.WrapLongRows)
@@ -95,17 +135,12 @@ class SlotSettingsPage(QWidget):
         self.name_edit.textChanged.connect(self._update_preview)
         self.form.addRow(S.SETTINGS_KIND, self.kind_box)
         self.form.addRow(S.SETTINGS_NAME, self.name_edit)
-        self.inner_box.addLayout(self.form)
         self.not_ready = QLabel(S.SETTINGS_NOT_READY)
         self.not_ready.setWordWrap(True)
         self.not_ready.setProperty("role", "warning")
-        self.inner_box.addWidget(self.not_ready)
-        self.params_host = QWidget()
-        self.params_form = QFormLayout(self.params_host)
-        self.params_form.setContentsMargins(0, 0, 0, 0)
-        self.params_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
-        self.params_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        self.inner_box.addWidget(self.params_host)
+        self.form.addRow(self.not_ready)
+        self.params_form = self.form  # 설정 항목도 같은 표에 (이름 칸 너비가 같게)
+        self.inner_box.addLayout(self.form)
         self.inner_box.addStretch(1)
         self.scroll.setWidget(inner)
         root.addWidget(self.scroll, 1)
@@ -149,7 +184,7 @@ class SlotSettingsPage(QWidget):
         self.number = int(slot["slot"])
         self.in_out_ok = in_out_ok
         self._params_by_kind = {slot.get("kind"): dict(slot.get("params") or {})}
-        self.title.setText(S.SETTINGS_TITLE.format(name=slot.get("name") or ""))
+        self.title.setText(S.SETTINGS_TITLE.format(n=self.number, name=slot.get("name") or ""))
         self.name_edit.blockSignals(True)
         self.name_edit.setText(slot.get("name") or "")
         self.name_edit.blockSignals(False)
@@ -179,8 +214,8 @@ class SlotSettingsPage(QWidget):
         self._build_params(new_kind)
 
     def _build_params(self, key: str) -> None:
-        while self.params_form.rowCount():
-            self.params_form.removeRow(0)
+        while self.form.rowCount() > FIXED_ROWS:
+            self.form.removeRow(FIXED_ROWS)
         self.fields = {}
         self._kind = key
         k = get_kind(key)
@@ -192,18 +227,19 @@ class SlotSettingsPage(QWidget):
         for p in k.params:
             widget = self._field(p, current.get(p.key))
             label = S.PARAM_LABELS.get(p.key, p.key)
-            help_text = S.PARAM_HELP.get(p.key)
+            help_text = S.PARAM_HELP_MAX.get(key) if p.key == "max" else S.PARAM_HELP.get(p.key)
             if help_text:
                 widget.setToolTip(help_text)
+            shown = _with_steppers(widget) if isinstance(widget, (QSpinBox, QDoubleSpinBox)) else widget
             if p.type == "bool":
-                self.params_form.addRow(widget)
+                self.form.addRow(shown)
             else:
-                self.params_form.addRow(label, widget)
+                self.form.addRow(label, shown)
             if help_text:
                 note = QLabel(help_text)
                 note.setWordWrap(True)
                 note.setProperty("role", "secondary")
-                self.params_form.addRow(note)
+                self.form.addRow(note)
             self.fields[p.key] = widget
         self._update_preview()
 
@@ -211,6 +247,7 @@ class SlotSettingsPage(QWidget):
         unit = S.PARAM_UNITS.get(p.key, "")
         if p.type == "float":
             w = QDoubleSpinBox()
+            w.setButtonSymbols(QAbstractSpinBox.NoButtons)
             w.setDecimals(_decimals(p.step))
             w.setRange(p.lo if p.lo is not None else -1e6, p.hi if p.hi is not None else 1e6)
             w.setSingleStep(p.step or 0.1)
@@ -220,6 +257,7 @@ class SlotSettingsPage(QWidget):
             return w
         if p.type == "int":
             w = QSpinBox()
+            w.setButtonSymbols(QAbstractSpinBox.NoButtons)
             w.setRange(int(p.lo if p.lo is not None else 0), int(p.hi if p.hi is not None else 10 ** 6))
             w.setSingleStep(int(p.step or 1))
             w.setSuffix(unit)
@@ -234,7 +272,7 @@ class SlotSettingsPage(QWidget):
         if p.type == "color":
             w = QComboBox()
             for c in MARKER_COLORS:
-                w.addItem(fmt.color_word(c), c)
+                w.addItem(S.COLOR_NAMES.get(c, fmt.color_word(c)), c)
             w.setCurrentIndex(max(0, w.findData(value)))
             w.currentIndexChanged.connect(self._update_preview)
             return w
@@ -292,6 +330,12 @@ class SlotSettingsPage(QWidget):
     def current(self) -> Dict[str, Any]:
         return {"slot": self.number, "kind": self._kind, "name": self.name_edit.text().strip() or kind_name(self._kind),
                 "params": self.values()}
+
+    def step(self, key: str, steps: int) -> None:
+        """숫자 칸 옆 [−][+]: 한 칸 줄이거나 늘린다 (범위 끝에서는 그대로)."""
+        w = self.fields.get(key)
+        if isinstance(w, (QSpinBox, QDoubleSpinBox)):
+            w.stepBy(int(steps))
 
     def _update_preview(self, *_args) -> None:
         self.preview.setText(S.SETTINGS_PREVIEW.format(summary=slot_summary(self.current())))

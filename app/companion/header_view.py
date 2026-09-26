@@ -95,9 +95,11 @@ class HeaderView(QWidget):
         self.status.setWordWrap(False)
         self.status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.check_btn = QPushButton(S.BTN_CHECK_CONNECTION)
+        self.check_btn.setObjectName("checkBtn")  # 높이 40 (theme): ⋯와 같은 높이
         self.check_btn.setToolTip(S.TIP_CHECK_CONNECTION)
         self.check_btn.clicked.connect(self.check_clicked)
         self.more_btn = QToolButton()
+        self.more_btn.setObjectName("moreBtn")
         self.more_btn.setText(S.BTN_MORE)
         self.more_btn.setToolTip(S.TIP_MORE)
         self.more_btn.setAccessibleName(S.TIP_MORE)
@@ -124,10 +126,10 @@ class HeaderView(QWidget):
         self.details_btn.setToolTip(S.TIP_DETAILS)
         self.details_btn.setAccessibleName(S.TIP_DETAILS)
         self.details_btn.setCheckable(True)
-        self.details_btn.setMinimumSize(theme.HIT_MIN, theme.HIT_MIN)
+        self.details_btn.setProperty("role", "link")  # "자세히 ▸": 글자 단추 (높이 32)
         self.details_btn.toggled.connect(self._toggle_details)
         summary_row.addWidget(self.summary, 1)
-        summary_row.addWidget(self.details_btn)
+        summary_row.addWidget(self.details_btn, 0, Qt.AlignTop)
         self.summary_row = QWidget()
         self.summary_row.setLayout(summary_row)
         summary_row.setContentsMargins(0, 0, 0, 0)
@@ -236,6 +238,13 @@ class HeaderView(QWidget):
         self.info["clips"].setText(clips)
         first = next((file_name(p) for p in paths if file_name(p)), "")
         self.info["first_clip"].setText(first or S.INFO_EMPTY)
+
+    def clear_summary(self) -> None:
+        """연결이 끊김: 지난 타임라인 요약 대신 "아직 몰라요"."""
+        if self._summary != S.SUMMARY_NONE:
+            self._summary = S.SUMMARY_NONE
+            self.summary.setText(S.SUMMARY_NONE)
+            self.summary.setToolTip(S.SUMMARY_NONE)
 
     def set_probe_copy(self, name: Optional[str], can_switch: bool) -> None:
         self.warning_row.setVisible(bool(name))

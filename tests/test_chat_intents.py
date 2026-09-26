@@ -14,8 +14,8 @@ from __future__ import annotations
 import pytest
 
 from engine.chat import actions
-from engine.chat.brain import (DEFAULT, FOUND, OPS_2_1, SAID, SETTING, ChatBrain, Command, NeedTimeline, NotUnderstood,
-                               ProposalDraft, Question, Reply, validate_draft)
+from engine.chat.brain import (DEFAULT, FOUND, OPS_2_1, PLAYHEAD, SAID, SETTING, ChatBrain, Command, NeedTimeline,
+                               NotUnderstood, ProposalDraft, Question, Reply, validate_draft)
 from engine.chat.context import AssistContext
 from engine.chat.rules import MAX_MARK_ITEMS, RuleBrain, audio_mark_name
 from engine.chat.session import ChatSession
@@ -83,7 +83,7 @@ def mark(*items, offer=None):
     return ("mark", offer, tuple(items))
 
 
-def pt(s, color="Green", name="표시"):
+def pt(s, color="Green", name="도우미 표시"):
     return (s, None, color, name)
 
 
@@ -174,8 +174,8 @@ MARKS = [
     ("01:03:20:00에 표시해줘", draft(mark(pt(200.0)))),
     ("1:03:20에 표시해줘", draft(mark(pt(200.0)))),  # 지난 시간이면 밖 → 리졸브 시간으로 (카드에 적는다)
     ("3분쯤 표시해줘", draft(mark(pt(180.0)))),  # 표시 넣기의 "쯤"은 그 자리
-    ("여기 앞뒤 2초 표시해줘", draft(mark((8.0, 12.0, "Green", "표시")))),
-    ("여기서부터 10초 표시해줘", draft(mark((10.0, 20.0, "Green", "표시")))),
+    ("여기 앞뒤 2초 표시해줘", draft(mark((8.0, 12.0, "Green", "도우미 표시")))),
+    ("여기서부터 10초 표시해줘", draft(mark((10.0, 20.0, "Green", "도우미 표시")))),
     ("3분에 빨강 마커 찍어줘", draft(mark(pt(180.0, "Red")))),
     ("3분에 노란 표시", draft(mark(pt(180.0, "Yellow")))),
     ("3분에 노랑 표시", draft(mark(pt(180.0, "Yellow")))),
@@ -196,12 +196,12 @@ MARKS = [
     ("3분에 표시하고 4분에 자르기", draft(mark(pt(180.0)), cut(240.0))),
     ("1분에 표시해줘. 2분으로 가줘", draft(mark(pt(60.0)), jump(120.0))),
     ("끝에 표시해줘", ask("mark_where")),  # "끝에"는 시간 말이 아니다 (2.1): 넣지 않고 어디에 할지 묻는다
-    ("여기서부터 끝까지 표시해줘", draft(mark((10.0, 600.0, "Green", "표시")))),
+    ("여기서부터 끝까지 표시해줘", draft(mark((10.0, 600.0, "Green", "도우미 표시")))),
     # "3분 20"의 생략한 초 뒤에 다른 말이 와도 3분 20초 (3분으로 줄이지 않는다)
     ("3분 20 표시해줘", draft(mark(pt(200.0)))),
     ("3분 20 빨간 표시", draft(mark(pt(200.0, "Red")))),
     ("3분 20, 표시해줘", draft(mark(pt(200.0)))),  # 시간만 있는 마디가 "어디에?" 마디에 붙는다
-    ("1~2분 30초 표시해줘", draft(mark((60.0, 150.0, "Green", "표시")))),  # 1분~2분 30초
+    ("1~2분 30초 표시해줘", draft(mark((60.0, 150.0, "Green", "도우미 표시")))),  # 1분~2분 30초
 ]
 
 # ── 쉬는 곳·튀는 소리 찾기 ─────────────────────────────────────────────
@@ -404,10 +404,15 @@ def test_mark_provenance_is_per_value():
     it = _draft("3분 20초에 빨간 표시, 메모는 '자막 확인'").commands[0].params["items"][0]
     assert it["src"] == {"at": SAID, "color": SAID, "name": SAID} and it["note"] == "자막 확인"
     it = _draft("여기 표시해줘", default_color="Blue").commands[0].params["items"][0]
-    assert it["color"] == "Blue" and it["src"] == {"at": SAID, "color": DEFAULT, "name": DEFAULT}
+    # "여기"는 말한 숫자가 아니라 리졸브의 재생 위치 (카드에 "(재생 위치)"로 적는다)
+    assert it["color"] == "Blue" and it["src"] == {"at": PLAYHEAD, "color": DEFAULT, "name": DEFAULT}
     assert it["note"] == "여기 표시해줘"  # 메모를 말하지 않으면 부탁 글 그대로
     it = _draft("이 클립 옮겨줘").commands[0].params["items"][0]
-    assert it["src"]["at"] == DEFAULT  # 자리를 말하지 않아서 재생 위치
+    assert it["src"]["at"] == PLAYHEAD  # 자리를 말하지 않아서 재생 위치
+    for text in ("여기 앞뒤 2초 표시해줘", "여기서부터 10초 표시해줘", "지금 여기 쯤 표시해줘"):
+        assert _draft(text).commands[0].params["items"][0]["src"]["at"] == PLAYHEAD, text
+    for text in ("3분 20초 표시해줘", "1~2분 30초 표시해줘"):
+        assert _draft(text).commands[0].params["items"][0]["src"]["at"] == SAID, text
     assert actions.mark_provenance([it, dict(it, src={"at": SAID, "color": DEFAULT, "name": DEFAULT})])["at"] == "mixed"
 
 

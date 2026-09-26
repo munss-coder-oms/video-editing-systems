@@ -8,9 +8,11 @@
 
 글은 모두 strings_ko.py에서 온다. 리졸브에는 아무것도 묻지 않는다 (단추를 누르면 창이 일을 시작한다).
 
-표시 줄마다 [보기](리졸브에서 보기: 재생 위치만 옮김, jump_to)가 있고 줄을 눌러도 된다 (2.1c).
-대화에서 온 카드는 값마다 출처(말씀하신 값 / 기본값 / 설정값 / 도우미가 찾음)를 붙이고, 범위 지킴이의
-막음(빨강, [리졸브에 넣기]를 누를 수 없음)과 경고(주황)를 보이고, 숫자를 [−][+]로 고칠 수 있다.
+표시 줄마다 [이동](리졸브에서 보기: 재생 위치만 옮김, jump_to)이 있고 줄을 눌러도 된다 (2.1c).
+리졸브 타임코드는 줄의 풍선 도움말에 둔다 (좁은 창에서 줄이 두 줄로 접히지 않게).
+대화에서 온 카드는 도우미가 정한 값에만 출처(기본값 / 설정값 / 재생 위치)를 붙이고 (적으신 값은 그대로),
+범위 지킴이의 막음(빨강, [리졸브에 넣기]를 누를 수 없음)과 경고(주황)를 보이고, 숫자를 [−][+]로 고칠 수 있다.
+단추 줄은 창이 좁으면 다음 줄로 넘어간다 (FlowLayout): 380px 창에서도 오른쪽이 잘리지 않는다.
 쉬는 곳·튀는 소리 카드에는 "이대로 자동화 버튼에 저장 ▸"이 붙는다 (구간은 저장하지 않는다).
 영수증의 [되돌리기]는 묻지 않고 바로 뺀다 (그 카드의 것만, 되돌리기 목록 쪽은 먼저 묻는다).
 """
@@ -19,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractButton,
     QComboBox,
@@ -27,6 +29,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QPushButton,
     QSizePolicy,
     QToolButton,
@@ -38,6 +41,89 @@ from . import fmt
 from . import strings_ko as S
 
 INLINE_ITEMS = 3  # 몇 곳: 처음 세 곳은 바로 보이고 나머지는 ▸
+TAGGED_SOURCES = ("default", "setting", "playhead")  # 도우미가 정한 값에만 출처를 붙인다 (적으신 값은 그대로)
+
+
+class FlowLayout(QLayout):
+    """단추를 왼쪽부터 늘어놓고, 자리가 모자라면 다음 줄로 넘긴다 (좁은 창에서 잘리지 않게).
+
+    최소 너비는 가장 넓은 단추 하나의 너비다. 높이는 너비에 따라 바뀐다 (heightForWidth).
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None, spacing: int = 6) -> None:
+        super().__init__(parent)
+        self._items: List[Any] = []
+        self._spacing = spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item) -> None:  # noqa: N802 - Qt 이름
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):  # noqa: N802
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int):  # noqa: N802
+        if 0 <= index < len(self._items):
+            item = self._items.pop(index)
+            self.invalidate()
+            return item
+        return None
+
+    def spacing(self) -> int:
+        return self._spacing
+
+    def expandingDirections(self):  # noqa: N802
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._do_layout(QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._do_layout(rect, apply=True)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        w = h = 0
+        shown = [i for i in self._items if not i.isEmpty()]
+        for item in shown:
+            hint = item.sizeHint()
+            w += hint.width()
+            h = max(h, hint.height())
+        w += self._spacing * max(0, len(shown) - 1)
+        m = self.contentsMargins()
+        return QSize(w + m.left() + m.right(), h + m.top() + m.bottom())
+
+    def minimumSize(self) -> QSize:  # noqa: N802
+        size = QSize(0, 0)
+        for item in self._items:
+            if not item.isEmpty():
+                size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        return size + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _do_layout(self, rect: QRect, apply: bool) -> int:
+        m = self.contentsMargins()
+        area = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, line_h = area.x(), area.y(), 0
+        shown = [i for i in self._items if not i.isEmpty()]
+        for item in shown:
+            hint = item.sizeHint()
+            w = min(hint.width(), max(item.minimumSize().width(), area.width()))
+            if x > area.x() and x + w > area.x() + area.width():
+                x = area.x()
+                y += line_h + self._spacing
+                line_h = 0
+            if apply:
+                item.setGeometry(QRect(QPoint(x, y), QSize(w, hint.height())))
+            x += w + self._spacing
+            line_h = max(line_h, hint.height())
+        return (y + line_h - area.y() if shown else 0) + m.top() + m.bottom()
 
 
 def _label(text: str, role: Optional[str] = None, wrap: bool = True) -> QLabel:
@@ -47,6 +133,14 @@ def _label(text: str, role: Optional[str] = None, wrap: bool = True) -> QLabel:
     lab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
     if role:
         lab.setProperty("role", role)
+    return lab
+
+
+def _value_label(text: str) -> QLabel:
+    """[−] 값 [+]의 값: 글 너비만큼 (줄을 바꾸지 않고, [+]가 값 바로 옆에 오게)."""
+    lab = QLabel(text)
+    lab.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    lab.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
     return lab
 
 
@@ -69,15 +163,21 @@ class ClickLabel(QLabel):
 
 
 class Card(QFrame):
-    """카드 한 장. 열쇠로 단추를 찾고, plain_text()는 결과 파일과 시험에 쓴다."""
+    """카드 한 장. 열쇠로 단추를 찾고, plain_text()는 결과 파일과 시험에 쓴다.
+
+    closed(남긴 줄): 더 할 것이 없게 됨 (답함, 취소, 바뀜). 창은 이 카드가 띄운 머리말 알림을 이것으로 고친다.
+    """
 
     clicked = Signal(str)
+    closed = Signal(str)
 
     def __init__(self, title: str = "", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("card")
         self.setFrameShape(QFrame.StyledPanel)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        # 세로는 Preferred: Maximum이면 한 줄짜리 sizeHint가 최대 높이가 되어, 좁은 창에서 버튼 줄이
+        # 두 줄로 쌓일 때 카드 아래가 잘린다. 남는 자리는 대화 목록 맨 위의 빈칸(stretch)이 가져간다.
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.box = QVBoxLayout(self)
         self.box.setContentsMargins(10, 8, 10, 8)
         self.box.setSpacing(4)
@@ -88,12 +188,12 @@ class Card(QFrame):
         self.body_box.setContentsMargins(0, 0, 0, 0)
         self.body_box.setSpacing(4)
         self.box.addWidget(self.body)
-        self.button_row = QHBoxLayout()
-        self.button_row.setSpacing(6)
+        self.button_row = FlowLayout(spacing=6)
         self.box.addLayout(self.button_row)
         self.buttons: Dict[str, QPushButton] = {}
         self.extra: Dict[str, QAbstractButton] = {}  # 줄 안의 단추 ([−][+], 보기, 저장): 열쇠 → 단추
         self._extra_busy: List[str] = []  # 다른 일을 하는 동안 꺼 둘 줄 안 단추
+        self._closing_line: Optional[QLabel] = None  # 닫을 때 남긴 줄 (빼는 중이에요 → 결과로 바뀐다)
         self.busy = False
         self.locked = False  # 눌러서 일을 시작했음 (끝나면 창이 새 모양으로 바꾼다)
         self._primary: List[str] = []  # 작업 중에 꺼 둘 단추 (리졸브에 넣기, 되돌리기 ...)
@@ -109,7 +209,8 @@ class Card(QFrame):
         self.body_box.addWidget(lab)
         return lab
 
-    def add_rows(self, rows: Sequence[Tuple[str, str]]) -> QGridLayout:
+    def add_rows(self, rows: Sequence[Tuple[str, str]], tips: Optional[Dict[str, str]] = None) -> QGridLayout:
+        """(열쇠, 값) 표. tips: 열쇠 → 값 줄의 풍선 도움말 (좁은 모양에서 줄 대신 보이는 설명)."""
         grid = QGridLayout()
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(2)
@@ -117,7 +218,11 @@ class Card(QFrame):
             k = _label(key, "secondary", wrap=False)
             k.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
             grid.addWidget(k, r, 0, Qt.AlignTop)
-            grid.addWidget(_label(value), r, 1)
+            v = _label(value)
+            tip = (tips or {}).get(key)
+            if tip:
+                v.setToolTip(tip)
+            grid.addWidget(v, r, 1)
         grid.setColumnStretch(1, 1)
         self.body_box.addLayout(grid)
         return grid
@@ -132,11 +237,10 @@ class Card(QFrame):
             btn = QPushButton(text)
             if primary:
                 btn.setProperty("kind", "primary")
-            btn.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             btn.clicked.connect(lambda _=False, k=key: self._press(k))
             self.button_row.addWidget(btn)
             self.buttons[key] = btn
-        self.button_row.addStretch(1)
         self._apply_enabled()
 
     def _press(self, key: str) -> None:
@@ -180,8 +284,10 @@ class Card(QFrame):
             except RuntimeError:
                 self.extra.pop(key, None)  # 지운 줄
 
-    def close_card(self, note: Optional[str] = None) -> None:
-        """더 할 것이 없는 카드: 단추를 없애고 (있으면) 한 줄을 남긴다. 줄의 [보기]만 남긴다."""
+    def close_card(self, note: Optional[str] = None, *, announce: Optional[str] = None) -> None:
+        """더 할 것이 없는 카드: 단추를 없애고 (있으면) 한 줄을 남긴다. 줄의 [이동]만 남긴다.
+
+        announce: closed로 알릴 글 (없으면 남긴 줄)."""
         self.set_buttons([])
         for key in [k for k in self.extra if not k.startswith("view:")]:
             btn = self.extra.pop(key)
@@ -189,8 +295,23 @@ class Card(QFrame):
                 btn.hide()
             except RuntimeError:
                 pass
-        if note:
-            self.add_line(note, "secondary")
+        self._closing_line = self.add_line(note, "secondary") if note else None
+        self.closed.emit(announce if announce is not None else (note or ""))
+
+    def set_note(self, text: str, role: Optional[str] = "secondary") -> QLabel:
+        """닫힌 카드의 결과 한 줄: 닫을 때 남긴 "하는 중" 줄을 결과로 바꾼다 (이걸 뺄까요? → 빼는 중이에요 → 뺐어요).
+        그 줄이 없으면 한 줄 더한다."""
+        line, self._closing_line = self._closing_line, None
+        if line is not None:
+            try:
+                line.setText(text)
+                line.setProperty("role", role)
+                line.style().unpolish(line)
+                line.style().polish(line)
+                return line
+            except RuntimeError:
+                pass
+        return self.add_line(text, role)
 
     def plain_text(self) -> str:
         parts = [self.title.text()]
@@ -256,8 +377,8 @@ def _params_text(params: Dict[str, Any]) -> Dict[str, str]:
 
 
 def tagged(value: str, src: Optional[str], slot_name: Optional[str] = None) -> str:
-    """값 뒤에 출처 (설계 B4.4): "2초 넘게 쉰 곳 표시 · 말씀하신 값"."""
-    if not src or src not in S.PROVENANCE:
+    """도우미가 정한 값 뒤에 출처 (설계 B4.4): "초록 표시 1개 (기본값)". 적으신 값·찾은 값은 그대로."""
+    if not src or src not in TAGGED_SOURCES or src not in S.PROVENANCE:
         return value
     word = S.PROVENANCE_SLOT.format(name=slot_name) if src == "setting" and slot_name else S.PROVENANCE[src]
     return S.TAGGED.format(value=value, source=word)
@@ -302,13 +423,17 @@ def _when(p) -> str:
 
 
 def _item_line(p, i: int) -> str:
+    """목록 한 줄: "3:20.0  빨간 '표시'" (리졸브 타임코드는 _item_tip의 풍선 도움말에)."""
     row = p.rows[i]
     at = fmt.clock(_secs(p, row.start))
     if p.kind == "mark":
         spec = p.specs[i]
-        return S.ITEM_LINE.format(at=at, color_word=fmt.color_word(spec.color), name=row.name,
-                                  tc=_tc(p, row.start)).rstrip()
-    return f"{at}  {row.name}  {_tc(p, row.start)}".rstrip()
+        return S.ITEM_LINE.format(at=at, color_word=fmt.color_word(spec.color), name=row.name).rstrip()
+    return f"{at}  {row.name}".rstrip()
+
+
+def _item_tip(p, frame: int) -> str:
+    return S.ITEM_TIP.format(tc=_tc(p, frame), tip=S.TIP_VIEW)
 
 
 def _item_source(p, i: int) -> Optional[str]:
@@ -363,18 +488,24 @@ def note_lines(notes: Sequence[Tuple[str, Dict[str, Any]]], fps: float = 1.0) ->
 
 
 def _fill(tmpl: str, data: Dict[str, Any]) -> str:
+    """틀에 값을 넣고 조사를 받침에 맞춘다 (값이 모자라면 틀의 앞부분만)."""
     try:
-        return tmpl.format(**data)
+        return S.josa(tmpl.format(**data))
     except (KeyError, IndexError, ValueError):
-        return tmpl.split("{")[0].strip()
+        return S.josa(tmpl.split("{")[0].strip())
 
 
-def guard_lines(guard) -> List[Tuple[str, str]]:
-    """범위 지킴이 줄: (글, 역할). 막음은 error, 경고는 warning."""
+def guard_lines(guard, skip_whole: bool = False) -> List[Tuple[str, str]]:
+    """범위 지킴이 줄: (글, 역할). 막음은 error, 경고는 warning.
+
+    skip_whole: 언제 줄이 이미 "전체 …"라고 말할 때 같은 말("전체 …에 적용돼요")을 되풀이하지 않는다.
+    """
     out: List[Tuple[str, str]] = []
     if guard is None:
         return out
     for g in guard.lines:
+        if skip_whole and g.code == "whole":
+            continue
         d = dict(g.data)
         if g.code == "outside_tracks":
             d["tracks"] = ", ".join(f"A{t}" for t in d.get("tracks") or [])
@@ -385,9 +516,17 @@ def guard_lines(guard) -> List[Tuple[str, str]]:
     return out
 
 
-def voice_row_text(voice) -> str:
+def voice_row_text(voice, tracks: Sequence[int] = ()) -> str:
+    """목소리 줄: "소리 2 · A2 (지난번 선택)". tracks: 그 소리가 놓인 타임라인 트랙 (없으면 소리 번호만)."""
     why = S.VOICE_REMEMBERED if voice.remembered else S.VOICE_JUST_PICKED
+    if tracks:
+        words = S.COLOR_JOIN.join(S.TRACK_WORD.format(t=t) for t in tracks)
+        return S.VOICE_ROW_TRACKS.format(n=voice.stream + 1, tracks=words, why=why)
     return S.VOICE_ROW.format(n=voice.stream + 1, why=why)
+
+
+def _whole_scope(p) -> bool:
+    return (p.scope or {}).get("kind") not in ("in_out", "range") or (p.scope or {}).get("lo") is None
 
 
 def _mark_rows(p, compact: bool) -> List[Tuple[str, str]]:
@@ -396,8 +535,8 @@ def _mark_rows(p, compact: bool) -> List[Tuple[str, str]]:
     n = p.count
     if n == 1:
         spec = p.specs[0]
-        what = tagged(S.WHAT_MARK.format(color_word=fmt.color_word(spec.color), name=spec.name),
-                      (items[0].get("src") or {}).get("name") if items else None)
+        # 할 일에는 이름의 출처를 붙이지 않는다 (색·시각은 아래 줄에)
+        what = S.WHAT_MARK.format(color_word=fmt.color_word(spec.color), name=spec.name)
         row = p.rows[0]
         if row.end - row.start > 1:
             when = S.WHEN_SPAN.format(a=fmt.clock(_secs(p, row.start)), b=fmt.clock(_secs(p, row.end)))
@@ -419,18 +558,16 @@ def _mark_rows(p, compact: bool) -> List[Tuple[str, str]]:
         how = S.HOW_POINT
     color_src = prov.get("color") if prov.get("color") in S.PROVENANCE else None
     resolve = tagged(S.RESOLVE_MARKS.format(colors=colors_word(p), n=n), color_src)
-    rows = [(S.ROW_WHAT, what), (S.ROW_WHEN, when), (S.ROW_HOW, how), (S.ROW_TRACK, S.TRACK_NONE),
-            (S.ROW_COUNT, S.COUNT_LINE.format(n=n))]
-    if compact:
-        rows.append((S.ROW_RESOLVE, f"{resolve} · {S.KEEP_MARKERS}"))
-    else:
-        rows += [(S.ROW_RESOLVE, resolve), (S.ROW_KEEP, S.KEEP_MARKERS)]
-    return rows
+    return [(S.ROW_WHAT, what), (S.ROW_WHEN, when), (S.ROW_HOW, how), (S.ROW_RESOLVE, resolve)]
 
 
 def proposal_rows(p, replace_count: int = 0, compact: bool = False,
                   slot_name: Optional[str] = None) -> List[Tuple[str, str]]:
-    """카드의 고정 줄 (설계 B4.5). compact이면 리졸브와 그대로를 한 줄로. 대화 카드는 값마다 출처."""
+    """카드의 고정 줄 (설계 B4.5): 할 일 · 언제 · 얼마나 · 리졸브에 넣을 것.
+
+    몇 곳은 리졸브 줄의 "파란 표시 12개"가, 트랙은 목소리 줄이 말한다. "안 바뀌는 것"은 카드가 줄 아래에
+    작은 글로(좁은 모양에서는 리졸브 줄의 풍선 도움말로) 붙인다. 대화 카드는 도우미가 정한 값에만 출처.
+    """
     if p.kind == "mark":
         return _mark_rows(p, compact)
     params = _params_text(p.params)
@@ -445,39 +582,43 @@ def proposal_rows(p, replace_count: int = 0, compact: bool = False,
         how = S.HOW_SPIKES.format(max=fmt.num(round(top, 1)))
     what = tagged(what, prov.get(MAIN_PARAM.get(p.kind, "")), slot_name)
     when = tagged(_when(p), prov.get("range"), slot_name)
-    tracks = ", ".join(f"A{t}" for t in p.tracks)
     resolve = (S.RESOLVE_POINT if p.point_only else S.RESOLVE_RANGE).format(color_word=color, n=p.count)
     resolve = tagged(resolve, prov.get("color"), slot_name)
     if replace_count:
         resolve += "\n" + S.RESOLVE_REPLACE.format(color_word=color, n=replace_count)
-    count = S.COUNT_LINE.format(n=p.count)
-    if prov:
-        count = tagged(count, prov.get("places"))
-    rows = [(S.ROW_WHAT, what), (S.ROW_WHEN, when), (S.ROW_HOW, how), (S.ROW_TRACK, tracks), (S.ROW_COUNT, count)]
-    if compact:
-        rows.append((S.ROW_RESOLVE, f"{resolve} · {S.KEEP_MARKERS}"))
-    else:
-        rows += [(S.ROW_RESOLVE, resolve), (S.ROW_KEEP, S.KEEP_MARKERS)]
-    return rows
+    return [(S.ROW_WHAT, what), (S.ROW_WHEN, when), (S.ROW_HOW, how), (S.ROW_RESOLVE, resolve)]
 
 
 def receipt_text(outcome, color: Optional[str], word: Optional[str] = None) -> str:
     """영수증 첫 줄 (다시 읽은 수로). word: 여러 색이면 "빨간·파란"."""
     word = word or fmt.color_word(color)
     if outcome.status == "applied":
-        return S.RECEIPT_OK.format(at=outcome.at, color_word=word, n=outcome.placed)
+        return S.RECEIPT_OK.format(at=fmt.clock_time(outcome.at), color_word=word, n=outcome.placed)
     if outcome.status == "partial":
         return S.RECEIPT_PARTIAL.format(expected=outcome.expected, placed=outcome.placed)
     return S.RECEIPT_NONE
 
 
 def _step_button(text: str, tip: str) -> QToolButton:
+    """카드 안의 작은 단추 ([−][+], 이동): 높이 32 (카드가 대화 칸보다 커지지 않게)."""
     btn = QToolButton()
     btn.setText(text)
     btn.setToolTip(tip)
     btn.setAccessibleName(tip)
     btn.setProperty("role", "step")
+    btn.setProperty("box", "small")  # "size"는 QWidget의 크기 속성이라 쓰지 않는다
     return btn
+
+
+def _keep_line(card: "Card", text: str, compact: bool, grid: Optional[QGridLayout]) -> None:
+    """안 바뀌는 것: 줄 아래 작은 글 (좁은 모양이면 리졸브 줄의 풍선 도움말)."""
+    if compact:
+        if grid is not None and grid.rowCount():
+            item = grid.itemAtPosition(grid.rowCount() - 1, 1)
+            if item is not None and item.widget() is not None:
+                item.widget().setToolTip(text)
+        return
+    card.add_line(text, "secondary")
 
 
 class ProposalCard(Card):
@@ -486,6 +627,7 @@ class ProposalCard(Card):
 
     def __init__(self, proposal, *, replace_count: int = 0, compact: bool = False, guard=None,
                  save_slots: Optional[Sequence[Tuple[int, str]]] = None, slot_name: Optional[str] = None,
+                 doubled_note: Optional[str] = None, add_note: Optional[str] = None,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__("", parent)
         self.proposal = proposal
@@ -501,6 +643,8 @@ class ProposalCard(Card):
         self.voice_btn: Optional[QPushButton] = None
         self.save_combo: Optional[QComboBox] = None
         self.item_labels: List[ClickLabel] = []
+        self.doubled_note = doubled_note  # 목소리가 두 번 들릴 수 있음 (창이 세션에 한 번만 붙인다)
+        self.add_note = add_note  # [더하기]: 이미 표시가 있는 곳은 뺐어요
         self.show_proposal()
 
     @property
@@ -541,7 +685,10 @@ class ProposalCard(Card):
             self.title.setText(S.OFFER_TITLES.get(p.offer, S.CARD_TITLE_PROPOSE) if p.offer else S.CARD_TITLE_PROPOSE)
         else:
             self.title.setText(S.CARD_TITLE_FOUND)
-        self.add_rows(proposal_rows(p, self.replace_count, self.compact, self.slot_name))
+        grid = self.add_rows(proposal_rows(p, self.replace_count, self.compact, self.slot_name))
+        _keep_line(self, S.KEEP_MARKERS, self.compact, grid)
+        if self.add_note:
+            self.add_line(self.add_note, "secondary")
         if self.editable and p.kind in MAIN_PARAM:
             self._edit_row()
         if self.editable and p.offer == "audio":
@@ -576,8 +723,9 @@ class ProposalCard(Card):
         row.addWidget(name)
         row.addWidget(self.add_extra(f"dec:{key}", _step_button(S.BTN_MINUS, S.TIP_MINUS_VALUE)))
         value = (S.EDIT_VALUE_S if key == "min_s" else S.EDIT_VALUE_DB).format(v=fmt.num(p.params.get(key)))
-        row.addWidget(_label(tagged(value, (p.provenance or {}).get(key), self.slot_name)), 1)
+        row.addWidget(_value_label(tagged(value, (p.provenance or {}).get(key), self.slot_name)))
         row.addWidget(self.add_extra(f"inc:{key}", _step_button(S.BTN_PLUS, S.TIP_PLUS_VALUE)))
+        row.addStretch(1)
 
     def _db_row(self) -> None:
         """권하는 노란 표시의 이름에 적을 크기 [−] 6dB [+] (소리는 바꾸지 않는다)."""
@@ -590,8 +738,9 @@ class ProposalCard(Card):
         name.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         row.addWidget(name)
         row.addWidget(self.add_extra("dec:db", _step_button(S.BTN_MINUS, S.TIP_MINUS_VALUE)))
-        row.addWidget(_label(tagged(S.EDIT_VALUE_DB.format(v=fmt.num(db)), (p.provenance or {}).get("db"))), 1)
+        row.addWidget(_value_label(tagged(S.EDIT_VALUE_DB.format(v=fmt.num(db)), (p.provenance or {}).get("db"))))
         row.addWidget(self.add_extra("inc:db", _step_button(S.BTN_PLUS, S.TIP_PLUS_VALUE)))
+        row.addStretch(1)
 
     def _items(self) -> None:
         p = self.proposal
@@ -626,17 +775,19 @@ class ProposalCard(Card):
         row = QHBoxLayout()
         row.setSpacing(4)
         line = ClickLabel(_item_line(p, i))
-        line.setToolTip(S.TIP_VIEW)
+        tip = _item_tip(p, p.rows[i].start)
+        line.setToolTip(tip)
         line.clicked.connect(lambda k=f"view:{i}": self._press(k))
         self.item_labels.append(line)
         row.addWidget(line, 1)
         if self.editable and p.kind == "mark":
             row.addWidget(self.add_extra(f"dec:at:{i}", _step_button(S.BTN_MINUS, S.TIP_MINUS_TIME)))
             row.addWidget(self.add_extra(f"inc:at:{i}", _step_button(S.BTN_PLUS, S.TIP_PLUS_TIME)))
-        view = _step_button(S.BTN_VIEW_SHORT, S.TIP_VIEW)
+        view = _step_button(S.BTN_VIEW_SHORT, tip)
         row.addWidget(self.add_extra(f"view:{i}", view, blocked_while_busy=False))
         box.addLayout(row)
-        if p.from_chat and p.kind == "mark":
+        # 여러 곳을 한 번에 넣는 대화 카드만 줄마다 출처를 적는다 (한 곳이면 위 표가 이미 말한다. 영수증은 뺀다)
+        if p.from_chat and p.kind == "mark" and len(p.rows) > 1 and self.state == "proposal":
             src = _item_source(p, i)
             if src:
                 box.addWidget(_label(src, "secondary"))
@@ -655,7 +806,7 @@ class ProposalCard(Card):
             self.add_line(_fill(S.CARD_NOTES["count_kept"], kept), "secondary")
 
     def _guard(self) -> None:
-        for text, role in guard_lines(self.guard):
+        for text, role in guard_lines(self.guard, skip_whole=_whole_scope(self.proposal)):
             self.add_line(text, role)
         if self.guard is not None and any(g.code == "leftover" for g in self.guard.lines):
             btn = QToolButton()
@@ -668,20 +819,45 @@ class ProposalCard(Card):
         p = self.proposal
         if not self.save_slots or p.kind not in MAIN_PARAM:
             return
+        # 글은 한 줄 위에, 고르기 칸과 [저장]은 그 아래 한 줄 (좁은 창에서도 [저장]이 보이게)
+        self.add_line(S.SAVE_ROW, "secondary")
         row = self._row_box()
-        row.addWidget(_label(S.SAVE_ROW, "secondary"), 1)
         self.save_combo = QComboBox()
-        for number, label in self.save_slots:
-            self.save_combo.addItem(label, number)
+        self.save_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.save_combo.setMinimumContentsLength(6)
+        self._fill_save_combo(self.save_slots)
         self.save_combo.setAccessibleName(S.SAVE_CHOOSE)
-        self.save_combo.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        row.addWidget(self.save_combo)
+        self.save_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        row.addWidget(self.save_combo, 1)
         save = QPushButton(S.BTN_SAVE)
+        save.setProperty("role", "small")
         save.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         save.clicked.connect(self._press_save)
         self.extra["save"] = save
         self._apply_enabled()
         row.addWidget(save)
+
+    def _fill_save_combo(self, slots: Sequence[Tuple[int, str]]) -> None:
+        keep = self.save_combo.currentData()
+        self.save_combo.blockSignals(True)
+        self.save_combo.clear()
+        for number, label in slots:
+            self.save_combo.addItem(label, number)
+            self.save_combo.setItemData(self.save_combo.count() - 1, label, Qt.ToolTipRole)
+        i = self.save_combo.findData(keep) if keep is not None else -1
+        self.save_combo.setCurrentIndex(max(0, i))
+        self.save_combo.blockSignals(False)
+
+    def refresh_save_slots(self, slots: Optional[Sequence[Tuple[int, str]]]) -> None:
+        """⚙에서 버튼 이름·순서가 바뀜: 저장 줄의 고르기 칸을 새 이름으로 (고른 버튼은 그대로)."""
+        if slots is None:
+            return
+        self.save_slots = list(slots)
+        if self.save_combo is not None:
+            try:
+                self._fill_save_combo(self.save_slots)
+            except RuntimeError:
+                self.save_combo = None  # 지운 줄
 
     def _press_save(self) -> None:
         if self.save_combo is not None:
@@ -702,15 +878,16 @@ class ProposalCard(Card):
         key = _label(S.ROW_VOICE, "secondary", wrap=False)
         key.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         row.addWidget(key)
-        row.addWidget(_label(voice_row_text(v)), 1)
+        row.addWidget(_label(voice_row_text(v, getattr(self.proposal, "tracks", None) or ())), 1)
         self.voice_btn = QPushButton(S.BTN_CHANGE_VOICE)
         self.voice_btn.setToolTip(S.TIP_CHANGE_VOICE)
+        self.voice_btn.setProperty("role", "small")
         self.voice_btn.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.voice_btn.clicked.connect(lambda: self._press("voice"))
         row.addWidget(self.voice_btn)
         self.body_box.addLayout(row)
-        if v.doubled:
-            self.add_line(S.DOUBLED_VOICE, "warning")
+        if self.doubled_note:
+            self.add_line(self.doubled_note, "warning")  # 창이 이 세션에 처음 한 번만 붙인다
 
     def _apply_enabled(self) -> None:
         super()._apply_enabled()
@@ -742,7 +919,7 @@ class ProposalCard(Card):
         self.title.setText(receipt_text(outcome, p.color, word))
         lines: List[Tuple[str, Optional[str]]] = []
         if outcome.status == "partial":
-            lines.append((S.RECEIPT_OK.format(at=outcome.at, color_word=word, n=outcome.placed), None))
+            lines.append((S.RECEIPT_OK.format(at=fmt.clock_time(outcome.at), color_word=word, n=outcome.placed), None))
         replaced = sum(outcome.replaced.values()) if outcome.replaced else 0
         if replaced:
             lines.append((S.RECEIPT_REPLACED.format(color_word=fmt.color_word(p.color), n=replaced), "secondary"))
@@ -782,7 +959,8 @@ class ProposalCard(Card):
     def show_undone(self, undo, at: str) -> None:
         self.state = "undone"
         self.clear_body()
-        self.title.setText(S.RECEIPT_UNDONE.format(at=at, color_word=colors_word(self.proposal), n=undo.deleted))
+        self.title.setText(S.RECEIPT_UNDONE.format(at=fmt.clock_time(at), color_word=colors_word(self.proposal),
+                                                   n=undo.deleted))
         if undo.already_gone:
             self.add_line(S.UNDO_SKIPPED.format(n=undo.already_gone), "secondary")
         if undo.remaining:
@@ -840,17 +1018,11 @@ def clear_rows(plan, compact: bool = False) -> List[Tuple[str, str]]:
     fps = plan.fps or 1.0
     if params.get("lo") is not None:
         a, b = fmt.clock((params["lo"] - plan.tl_start) / fps), fmt.clock((params["hi"] - plan.tl_start) / fps)
-        when = tagged(S.WHEN_RANGE.format(a=a, b=b), "said")
+        when = S.WHEN_RANGE.format(a=a, b=b)
     else:
-        when = tagged(S.WHEN_WHOLE.format(length=fmt.length((plan.tl_end - plan.tl_start) / fps)), "default")
-    rows = [(S.ROW_WHAT, what), (S.ROW_WHEN, when), (S.ROW_TRACK, S.TRACK_NONE),
-            (S.ROW_COUNT, tagged(S.COUNT_LINE.format(n=plan.count), "found"))]
-    resolve = S.CLEAR_RESOLVE.format(n=plan.count)
-    if compact:
-        rows.append((S.ROW_RESOLVE, f"{resolve} · {S.CLEAR_KEEP}"))
-    else:
-        rows += [(S.ROW_RESOLVE, resolve), (S.ROW_KEEP, S.CLEAR_KEEP)]
-    return rows
+        when = S.WHEN_WHOLE.format(length=fmt.length((plan.tl_end - plan.tl_start) / fps))
+    # 몇 곳은 "도우미 표시 3개를 지워요"가 말한다. 안 바뀌는 것은 카드가 줄 아래에 붙인다
+    return [(S.ROW_WHAT, what), (S.ROW_WHEN, when), (S.ROW_CLEAR, S.CLEAR_RESOLVE.format(n=plan.count))]
 
 
 class ClearCard(Card):
@@ -876,8 +1048,7 @@ class ClearCard(Card):
         p = self.proposal
         t = p.targets[i]
         at = fmt.clock((t["frame"] - p.tl_start) / (p.fps or 1.0))
-        return S.ITEM_LINE.format(at=at, color_word=fmt.color_word(t.get("color")), name=t.get("name") or "",
-                                  tc=_tc(p, t["frame"])).rstrip()
+        return S.ITEM_LINE.format(at=at, color_word=fmt.color_word(t.get("color")), name=t.get("name") or "").rstrip()
 
     def show_plan(self) -> None:
         p = self.proposal
@@ -888,25 +1059,26 @@ class ClearCard(Card):
             self.add_line(S.CLEAR_NONE.format(n=p.total_ours))
             if p.straddling:
                 self.add_line(S.CLEAR_STRADDLE.format(n=p.straddling), "secondary")
-            for text, role in guard_lines(self.guard):
+            for text, role in guard_lines(self.guard, skip_whole=(p.params or {}).get("lo") is None):
                 self.add_line(text, role)
             self.set_buttons([("cancel", S.BTN_CLOSE, False)])
             return
         self.title.setText(S.CARD_TITLE_CLEAR)
-        self.add_rows(clear_rows(p, self.compact))
+        grid = self.add_rows(clear_rows(p, self.compact))
+        _keep_line(self, S.CLEAR_KEEP, self.compact, grid)
         self._targets()
         if p.straddling:
             self.add_line(S.CLEAR_STRADDLE.format(n=p.straddling), "secondary")
         for line in note_lines(p.notes, p.fps):
             self.add_line(line, "secondary")
-        for text, role in guard_lines(self.guard):
+        for text, role in guard_lines(self.guard, skip_whole=(p.params or {}).get("lo") is None):
             self.add_line(text, role)
         if self.guard is not None and any(g.code == "leftover" for g in self.guard.lines):
             btn = QToolButton()
             btn.setText(S.CHIP_LEFTOVER)
             btn.setProperty("role", "chip")
             self.body_box.addWidget(self.add_extra("leftover", btn, blocked_while_busy=False), 0, Qt.AlignLeft)
-        self.set_buttons([("apply", S.BTN_APPLY, True), ("cancel", S.BTN_CANCEL, False)],
+        self.set_buttons([("apply", S.BTN_CLEAR_APPLY, True), ("cancel", S.BTN_CANCEL, False)],
                          blocked_while_busy=("apply",))
 
     def _targets(self) -> None:
@@ -932,10 +1104,11 @@ class ClearCard(Card):
             row = QHBoxLayout()
             row.setSpacing(4)
             line = ClickLabel(self._line(i))
-            line.setToolTip(S.TIP_VIEW)
+            tip = _item_tip(self.proposal, self.proposal.targets[i]["frame"])
+            line.setToolTip(tip)
             line.clicked.connect(lambda k=f"view:{i}": self._press(k))
             row.addWidget(line, 1)
-            row.addWidget(self.add_extra(f"view:{i}", _step_button(S.BTN_VIEW_SHORT, S.TIP_VIEW),
+            row.addWidget(self.add_extra(f"view:{i}", _step_button(S.BTN_VIEW_SHORT, tip),
                                          blocked_while_busy=False))
             (head_box if i < INLINE_ITEMS else rest_box).addLayout(row)
 
@@ -954,7 +1127,7 @@ class ClearCard(Card):
         self.state = "receipt"
         self.clear_body()
         if outcome.status == "applied":
-            self.title.setText(S.CLEAR_RECEIPT.format(at=outcome.at, n=outcome.deleted))
+            self.title.setText(S.CLEAR_RECEIPT.format(at=fmt.clock_time(outcome.at), n=outcome.deleted))
         elif outcome.status == "partial":
             self.title.setText(S.CLEAR_RECEIPT_PARTIAL.format(expected=outcome.expected, n=outcome.deleted))
         else:
@@ -979,7 +1152,7 @@ class ClearCard(Card):
     def show_undone(self, undo, at: str) -> None:
         self.state = "undone"
         self.clear_body()
-        self.title.setText(S.CLEAR_UNDONE.format(at=at, n=undo.deleted))
+        self.title.setText(S.CLEAR_UNDONE.format(at=fmt.clock_time(at), n=undo.deleted))
         if undo.already_gone:
             self.add_line(S.CLEAR_UNDO_SKIPPED.format(n=undo.already_gone), "secondary")
         if undo.remaining:

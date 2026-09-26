@@ -1,6 +1,8 @@
 """아래쪽: [↶ 되돌리기 ▾]와 [결과 저장] (설계 B1.1, B6.3).
 
 되돌리기 목록: 지금 타임라인의 일지(새것이 위). 넣은 것(넣음·일부 넣음)은 눌러서 뺄 수 있다 (먼저 묻는다).
+줄의 상태 낱말은 일에 맞게: 지우기는 "지움 / 다시 넣음", 모두 빼기나 지우기로 끝난 일은 "모두 빼기로 끝남 / 지워짐".
+시각은 "오후 2:02"처럼.
 맨 아래 "도우미가 넣은 것 모두 빼기"는 일지가 아니라 지금 타임라인에서 꼬리표를 직접 찾는다.
 Ctrl+Z 안내: 도우미가 넣은 것은 여기서 빼 달라고 적는다 (Ctrl+Z 시험 답이 "다른 것이 되돌아감"이면 경고를 덧붙인다).
 결과 저장은 작업 중에도 늘 누를 수 있다 (연결이 안 될 때 보내 주는 결과 파일이 가장 중요하므로).
@@ -13,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QMenu, QPushButton, QToolButton, QWidget
 
+from . import fmt
 from . import strings_ko as S
 from . import theme
 
@@ -30,19 +33,19 @@ class UndoView(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
         self.undo_btn = QToolButton()
+        self.undo_btn.setObjectName("undoBtn")  # 높이 40 (theme): [결과 저장]과 같은 높이
         self.undo_btn.setText(S.BTN_UNDO)
         self.undo_btn.setAccessibleName(S.BTN_UNDO)
         self.undo_btn.setPopupMode(QToolButton.InstantPopup)
-        self.undo_btn.setMinimumHeight(theme.FOOTER_H)
         self.menu = QMenu(self.undo_btn)
         self.undo_btn.setMenu(self.menu)
         self.report_btn = QPushButton(S.BTN_REPORT)
+        self.report_btn.setObjectName("reportBtn")
         self.report_btn.setToolTip(S.TIP_REPORT)
-        self.report_btn.setMinimumHeight(theme.FOOTER_H)
         row.addWidget(self.undo_btn)
         row.addStretch(1)
         row.addWidget(self.report_btn)
-        self.setFixedHeight(theme.FOOTER_H + 4)
+        self.setFixedHeight(theme.HIT_MIN + 4)
         self.entries: List[Dict[str, Any]] = []
         self.warn_ctrl_z = False
         self.connected = False
@@ -62,7 +65,7 @@ class UndoView(QWidget):
         for e in reversed(self.entries):
             status = e.get("status") or ""
             text = S.UNDO_ENTRY.format(at=_short_time(e.get("at")), request=e.get("request") or "",
-                                       status=S.UNDO_STATUS.get(status, status))
+                                       status=status_word(e))
             act = self.menu.addAction(text)
             pid = e.get("proposal_id")
             if status in UNDOABLE and pid:
@@ -105,7 +108,17 @@ class UndoView(QWidget):
 
 
 def _short_time(at: Any) -> str:
-    """일지 시각 "2026-09-26T14:02:10+0900" → "14:02"."""
-    if isinstance(at, str) and "T" in at:
-        return at.split("T", 1)[1][:5]
-    return str(at or "")
+    """일지 시각 "2026-09-26T14:02:10+0900" → "오후 2:02"."""
+    return fmt.clock_time(at)
+
+
+def status_word(e: Dict[str, Any]) -> str:
+    """되돌리기 목록 줄의 상태 낱말: 일(넣기·지우기)과 끝난 까닭(모두 빼기, 지우기)에 맞게."""
+    status = e.get("status") or ""
+    by = str(e.get("closed_by") or "")
+    if status == "undone" and by == "remove_all":
+        return S.UNDO_STATUS_CLOSED["remove_all"]
+    if status == "undone" and by.startswith("clear:"):
+        return S.UNDO_STATUS_CLOSED["clear"]
+    table = S.UNDO_STATUS_CLEAR if e.get("op") == "clear_marks" else S.UNDO_STATUS
+    return table.get(status, status)

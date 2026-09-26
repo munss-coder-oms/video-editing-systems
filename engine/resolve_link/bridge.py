@@ -73,7 +73,7 @@ READ_OPS = frozenset({"state", "timeline_info", "timeline_items", "scope", "prob
 LARGE_RESPONSE_BYTES = 20 * 1024
 
 TIMEOUT_MESSAGE = (
-    "리졸브가 대답하지 않습니다.\n"
+    "리졸브가 대답하지 않아요.\n"
     f"리졸브 위 메뉴에서 Workspace(워크스페이스) → Scripts(스크립트) → {SCRIPT_NAME}를 눌러 주세요.\n"
     "이미 눌렀다면 리졸브에 열려 있는 창(대화 상자)이 있는지 보고 닫아 주세요."
 )
@@ -104,11 +104,11 @@ class BridgeTimeout(LinkError):
         self.prefs_changed = list(prefs_changed or [])
 
 
-CLOSING_MESSAGE = "앱을 닫는 중이라 리졸브의 답을 기다리지 않았습니다."
+CLOSING_MESSAGE = "앱을 닫는 중이라 리졸브의 답을 기다리지 않았어요."
 CANCEL_MESSAGE = "멈췄어요. 리졸브의 답은 기다리지 않아요."
 OLD_SCRIPT_MESSAGE = (
     "리졸브 쪽 스크립트가 예전 판이에요. "
-    f"Scripts → {SCRIPT_NAME}를 한 번 더 눌러 주세요"
+    f"Workspace → Scripts → {SCRIPT_NAME}를 한 번 더 눌러 주세요"
 )
 
 

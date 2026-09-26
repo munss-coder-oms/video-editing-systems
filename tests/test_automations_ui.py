@@ -95,8 +95,8 @@ def test_slot_voice_card_apply_receipt_undo(qapp, make_window, obs, shared_cache
     w.automation.buttons[0].click()
     vc = _wait_card(qapp, w, VoicePickerCard)
     text = vc.plain_text()
-    assert S.VOICE_TITLE in text and S.VOICE_INTRO.format(n=4) in text and S.VOICE_MIX.format(n=1) in text
-    assert S.DOUBLED_VOICE in text and sorted(vc.pick_buttons) == [0, 1, 2, 3]
+    assert S.VOICE_TITLE in text and S.VOICE_INTRO.format(n=4) in text and S.fill(S.VOICE_MIX, n=1) in text
+    assert S.DOUBLED_VOICE.format(mix=1) in text and sorted(vc.pick_buttons) == [0, 1, 2, 3]
     assert w.automation.buttons[0].receipt.text() == S.SLOT_RECEIPT_WAITING
     assert _mutating(fake) == [] and fr.mutations == []
 
@@ -104,18 +104,22 @@ def test_slot_voice_card_apply_receipt_undo(qapp, make_window, obs, shared_cache
     before = len(fake.requests)
     vc.listen_buttons[1].click()
     wait_until(qapp, lambda: played)
-    wait_until(qapp, lambda: S.LISTENING.format(n=2) in w.message.text())
+    wait_until(qapp, lambda: S.fill(S.LISTENING, n=2) in w.message.text())
+    assert vc.listen_buttons[1].text() == S.BTN_LISTENING and vc.listen_buttons[0].text() == S.BTN_LISTEN
     assert played[0].suffix == ".wav" and played[0].is_file() and len(fake.requests) == before
 
     vc.pick_buttons[1].click()
     pc = _wait_card(qapp, w, ProposalCard)
-    assert not vc.pick_buttons[0].isEnabled()  # 고른 카드는 닫혔다
+    assert vc.pick_buttons == {} and vc.locked and vc.buttons == {}  # 고른 카드는 한 줄로 접혔다
+    assert vc.title.text() == S.fill(S.VOICE_PICKED, n=2) and vc.title.text().startswith("목소리는 소리 2로 ")
     sig = layout_signature(probe(str(obs_video)))
     assert w.settings.voice_choice(sig)["stream"] == 1
     text = pc.plain_text()
     assert pc.title.text() == S.CARD_TITLE_FOUND
-    assert S.VOICE_ROW.format(n=2, why=S.VOICE_JUST_PICKED) in text and pc.voice_btn.text() == S.BTN_CHANGE_VOICE
-    assert S.DOUBLED_VOICE in text  # 소리 1(전체)과 소리 2가 함께 켜져 있다
+    assert S.VOICE_ROW_TRACKS.format(n=2, tracks="A2", why=S.VOICE_JUST_PICKED) in text
+    assert pc.voice_btn.text() == S.BTN_CHANGE_VOICE
+    # 소리 1(전체)과 소리 2가 함께 켜져 있다: 고르기 카드가 이미 알렸으니 확인 카드는 되풀이하지 않는다
+    assert S.DOUBLED_VOICE.format(mix=1) not in text and S.DOUBLED_VOICE_SHORT not in text
     assert pc.buttons["apply"].isEnabled() and pc.proposal.count == 2
     assert _mutating(fake) == [] and fr.mutations == []  # 누르기 전에는 리졸브에 아무것도 넣지 않는다
 
@@ -198,7 +202,7 @@ def test_settings_then_rerun_offers_replace_or_add(qapp, make_window, obs, share
     w.automation.buttons[0].click()
     first = _wait_card(qapp, w, ProposalCard)
     assert first.proposal.params["min_s"] == 2.0
-    assert S.VOICE_ROW.format(n=2, why=S.VOICE_REMEMBERED) in first.plain_text()
+    assert S.VOICE_ROW_TRACKS.format(n=2, tracks="A2", why=S.VOICE_REMEMBERED) in first.plain_text()
     _pressed(first, "apply")
     wait_until(qapp, lambda: first.state == "receipt" and not w.runs.busy, 30)
     assert len(_ours(fr)) == 2
@@ -219,16 +223,17 @@ def test_settings_then_rerun_offers_replace_or_add(qapp, make_window, obs, share
                                        for f in _ours(fr))
     assert first.state == "undone" and S.CARD_REPLACED in first.plain_text() and first.buttons == {}
 
-    # 한 번 더: [더하기]면 이전 것은 그대로 두고 더 넣는다 (자리가 차 있으면 한 프레임 뒤로)
+    # 한 번 더: [더하기]는 이미 표시가 있는 곳은 빼고 새로 찾은 곳만 더한다. 같은 곳뿐이면 넣을 것이 없다고 알린다
     asked = len(_cards(w, QuestionCard))
+    cards = len(_cards(w, ProposalCard))
     w.automation.buttons[0].click()
     wait_until(qapp, lambda: len(_cards(w, QuestionCard)) > asked and not w.runs.busy, 60)
-    _cards(w, QuestionCard)[-1].buttons["add"].click()
-    third = _cards(w, ProposalCard)[-1]
-    _pressed(third, "apply")
-    wait_until(qapp, lambda: third.state == "receipt" and not w.runs.busy, 30)
-    assert len(_ours(fr)) == 4 and second.state == "receipt"
-    assert len(w.footer.entry_texts()) == 3
+    q = _cards(w, QuestionCard)[-1]
+    assert S.RERUN_EXPLAIN in q.plain_text()
+    q.buttons["add"].click()
+    assert len(_cards(w, ProposalCard)) == cards and S.RERUN_ADD_NONE in w.chat.log.toPlainText()
+    assert len(_ours(fr)) == 2 and second.state == "receipt"
+    assert len(w.footer.entry_texts()) == 2
 
 
 def test_voice_row_change_opens_the_picker(qapp, make_window, obs, shared_cache, obs_video):
@@ -247,7 +252,7 @@ def test_voice_row_change_opens_the_picker(qapp, make_window, obs, shared_cache,
     vc.pick_buttons[2].click()
     new = _wait_card(qapp, w, ProposalCard, after=1)
     assert new.proposal.voice.stream == 2 and pc.state == "closed"  # 이전 카드는 "바뀜"
-    assert S.VOICE_ROW.format(n=3, why=S.VOICE_JUST_PICKED) in new.plain_text()
+    assert S.VOICE_ROW_TRACKS.format(n=3, tracks="A3", why=S.VOICE_JUST_PICKED) in new.plain_text()
     assert fr.mutations == []
 
 
@@ -335,25 +340,35 @@ def test_remove_all_asks_about_the_edit_page(qapp, make_window, tmp_path, shared
     w.choose = lambda title, text, options: asked.append((title, text, options)) or answer
     act = w.footer.remove_all_action()
     assert act.isEnabled()
+    assert w.header.summary.text().endswith("5개")  # 옛 시험 트랙까지 소리 트랙 5개
     before = len(fake.requests)
     act.trigger()
     _idle(qapp, w)
     title, text, options = asked[0]
-    assert title == S.EDIT_PAGE_QUESTION and options == [S.BTN_SWITCH_REMOVE, S.BTN_MARKERS_ONLY, S.BTN_CANCEL]
-    assert S.REMOVE_ALL_CONFIRM.format(n=4) in text
+    assert title == S.REMOVE_ALL_TITLE and options == [S.BTN_SWITCH_REMOVE, S.BTN_MARKERS_ONLY, S.BTN_CANCEL]
+    assert text.startswith(S.EDIT_PAGE_QUESTION) and S.REMOVE_ALL_CONFIRM.format(n=4) in text
+    parts = S.REMOVE_ALL_PART_SEP.join([S.REMOVE_ALL_PART_MARKERS.format(n=1), S.REMOVE_ALL_PART_LEGACY.format(n=2),
+                                        S.REMOVE_ALL_PART_TRACKS.format(n=1)])
+    assert S.REMOVE_ALL_DETAIL.format(parts=parts) in text and S.REMOVE_ALL_KEEP in text
     tracks = [t["name"] for t in fake.info["tracks"]["audio"]]
     if answer is None:
         assert _mutating(fake, before) == [] and len(fr.markers) == 4 and LEGACY_TEST_TRACK in tracks
         return
     assert sorted(fr.markers) == [100]  # 사용자 표시만 남는다
     log = w.chat.log.toPlainText()
-    assert S.REMOVE_ALL_DONE.format(markers=1, legacy=2) in log
+    done = S.REMOVE_ALL_PART_SEP.join([S.REMOVE_ALL_PART_MARKERS.format(n=1), S.REMOVE_ALL_PART_LEGACY.format(n=2)])
+    assert S.REMOVE_ALL_DONE.format(parts=done) in log
     if answer == 0:
         assert LEGACY_TEST_TRACK not in tracks and fr.opened_pages == ["edit", "color"]
         assert S.REMOVE_ALL_TRACK_DONE in log
+        # 트랙을 뺐으니 머리말 요약을 조용히 다시 읽는다 (소리 트랙 5개 → 4개). 알림 줄은 그대로
+        wait_until(qapp, lambda: w.header.summary.text().endswith("4개") and w.pending == 0)
+        assert "timeline_info" in fake.requests[fake.requests.index("remove_audio"):]
+        assert w.message.text() == S.REMOVE_ALL_DONE.format(parts=done)
     else:
         assert LEGACY_TEST_TRACK in tracks and "remove_audio" not in fake.requests
         assert S.REMOVE_ALL_TRACK_KEPT in log
+        assert w.header.summary.text().endswith("5개")
 
 
 def test_remove_all_on_the_edit_page_asks_plainly(qapp, make_window, tmp_path, shared_cache):
@@ -378,7 +393,8 @@ def test_slot_order_and_restore_previous(qapp, make_window, tmp_path, shared_cac
     w = _window(qapp, make_window, fake, shared_cache)
     three = w.automation.buttons[2]
     assert not three.isEnabled() and three.receipt.text() == S.SLOT_DISABLED_NOT_READY
-    assert three.toolTip() == S.TIP_SLOT_NOT_READY.format(name="소리 고르게")
+    assert three.toolTip() == S.fill(S.TIP_SLOT_NOT_READY, name="소리 고르게")
+    assert three.toolTip().startswith("'소리 고르게'는 ")
     w.automation.gears[2].click()
     page = w.settings_page
     assert page.kind_box.currentData() == "balance_voice" and page.not_ready.isVisible()
@@ -401,7 +417,7 @@ def test_slot_order_and_restore_previous(qapp, make_window, tmp_path, shared_cac
     btn = w.automation.button(3)
     assert btn.name == "소리 고르게" and not btn.isEnabled() and btn.receipt.text() == S.SLOT_DISABLED_NOT_READY
     assert w.stack.currentWidget() is w.panel
-    assert S.SETTINGS_RESTORED.format(name="소리 고르게") in w.message.text()
+    assert S.fill(S.SETTINGS_RESTORED, name="소리 고르게") in w.message.text()
     # 설정 바꾸기는 리졸브에 묻지 않는다
     assert _mutating(fake) == []
 

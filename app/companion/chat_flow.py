@@ -35,7 +35,7 @@ from engine.chat.rules import GAIN_MAX_DB, GAIN_MIN_DB, RuleBrain, audio_mark_na
 from engine.chat.session import ChatSession
 from engine.chat.timeparse import context_from_info
 from engine.edits.apply import last_active
-from engine.edits.journal import Journal, entry_op
+from engine.edits.journal import Journal, entry_colors, entry_op
 from engine.edits.marks import apply_clear, mark_proposal, moved_mark, plan_clear, remade_mark
 from engine.edits.scope import check_proposal, requested_dict
 from engine.resolve_link.ops import ResolveOps, TimelineInfo
@@ -47,7 +47,7 @@ from . import steps
 from . import strings_ko as S
 from .automation_view import slot_summary
 from .cards import ClearCard, ProposalCard, QuestionCard, _fill
-from .runs import RunState, _jsonable
+from .runs import RunState, _jsonable, undo_what
 
 TIME_STEP_S = 0.1  # 표시 시각 [−][+]
 DB_STEP = 1.0  # dB [−][+]
@@ -353,7 +353,7 @@ class ChatController(QObject):
         card = ProposalCard(p, compact=self._compact(), guard=guard)
         state = RunState(None, chat=self._chat_meta(text))
         self.w.runs.show_card(state, card)
-        self.w.show_message(card.title.text())
+        self.w.show_message(card.title.text(), owner=card)
         self._record({"event": "card", "text": text, "kind": "mark", "offer": offer, "proposal_id": p.id,
                       "count": p.count, "items": [{k: i[k] for k in ("at", "end", "color", "name")} for i in items],
                       "requested": requested, "guard": guard.to_list(), "provenance": prov})
@@ -406,7 +406,7 @@ class ChatController(QObject):
             guard = check_proposal(plan)
             card = ClearCard(plan, guard=guard, compact=self._compact())
             self.w.runs.show_card(RunState(None, chat=self._chat_meta(text)), card)
-            self.w.show_message(card.title.text())
+            self.w.show_message(card.title.text(), owner=card)
             self._record({"event": "card", "text": text, "kind": "clear_marks", "proposal_id": plan.id,
                           "count": plan.count, "params": plan.params, "straddling": plan.straddling,
                           "total_ours": plan.total_ours, "guard": guard.to_list()})
@@ -437,7 +437,7 @@ class ChatController(QObject):
                 return
             self.w.session.timing("apply", time.monotonic() - t0)
             if out.status == "other_timeline":
-                text = S.OTHER_TIMELINE_APPLY.format(name=out.timeline_name or "")
+                text = S.fill(S.OTHER_TIMELINE_APPLY, name=out.timeline_name or "")
                 card.show_message(text)
                 self.w.show_message(text)
             elif out.status == "unknown":
@@ -448,14 +448,19 @@ class ChatController(QObject):
             else:
                 card.show_receipt(out)
                 self.w.show_message(card.title.text())
-                at = time.strftime("%H:%M")
+                at = fmt.clock_time(time.strftime("%H:%M"))
                 for pid in out.closed:
                     other = self.w.runs.by_pid.get(pid)
-                    if other is not None and other is not card and getattr(other, "state", "") == "receipt":
+                    try:
+                        if other is None or other is card or getattr(other, "state", "") != "receipt":
+                            continue
                         other.state = "undone"
                         other.close_card(S.CARD_CLEARED)
+                        # 버튼 아래 결과 줄: 되돌리기로 뺀 것이 아니라 지우기로 지워졌다
                         self.w.runs._receipt(getattr(other.proposal, "slot", None),
-                                             S.SLOT_RECEIPT_UNDONE.format(at=at))
+                                             S.SLOT_RECEIPT_CLEARED.format(at=at))
+                    except RuntimeError:
+                        continue
             self.w.refresh_undo(force=True)
             self._record({"event": "clear", "proposal_id": plan.id, "status": out.status, "expected": out.expected,
                           "deleted": out.deleted, "left": out.left, "closed": out.closed, "error": out.error,
@@ -520,8 +525,9 @@ class ChatController(QObject):
                           "readback_tc": r.get("readback_tc"), "page": r.get("page"), "set_result": r.get("set_result"),
                           "calls": r.get("calls")})
             if r.get("ok") is True:
-                self.w.show_message(S.CHAT_JUMP_DONE.format(at=at, tc=tc))
-                self.w.chat.add_helper(S.CHAT_JUMP_DONE.format(at=at, tc=tc))
+                done_text = S.fill(S.CHAT_JUMP_DONE, at=at, tc=tc)
+                self.w.show_message(done_text)
+                self.w.chat.add_helper(done_text)
             elif r.get("reason") == "other_timeline":
                 self._say(S.CHAT_JUMP_OTHER_TIMELINE.format(name=want_name or ""))
             elif r.get("reason") == "page":
@@ -529,7 +535,7 @@ class ChatController(QObject):
             elif r.get("reason") == "outside":
                 self._say(S.CHAT_JUMP_OUTSIDE)
             else:
-                self._say(S.CHAT_JUMP_UNCONFIRMED.format(readback=r.get("readback_tc") or "?", tc=tc))
+                self._say(S.fill(S.CHAT_JUMP_UNCONFIRMED, readback=r.get("readback_tc") or "?", tc=tc))
 
         def failed(exc) -> None:
             if self.w.closing:
@@ -559,12 +565,12 @@ class ChatController(QObject):
         if entry_op(e) == "clear_marks":
             what = S.UNDO_WHAT_CLEAR.format(request=request, n=len(e.get("deleted") or []))
         else:
-            what = S.UNDO_WHAT_MARKS.format(request=request, n=len((e.get("created") or {}).get("markers") or []))
+            what = undo_what(request, len((e.get("created") or {}).get("markers") or []), entry_colors(e))
         card = QuestionCard(S.CARD_TITLE_UNDO, [what], [("remove", S.BTN_REMOVE, True), ("cancel", S.BTN_CANCEL, False)],
                             blocked_while_busy=("remove",))
         card.clicked.connect(lambda key, c=card: self._undo_answer(c, key, pid, request))
         self.w.runs._add_card(card)
-        self.w.show_message(S.CARD_TITLE_UNDO)
+        self.w.show_message(S.CARD_TITLE_UNDO, owner=card)
         self._record({"event": "undo_last", "text": text, "proposal_id": pid, "op": entry_op(e),
                       "request": request})
 
@@ -578,8 +584,8 @@ class ChatController(QObject):
                 target = None
         except RuntimeError:
             target = None
-        if self.w.runs.undo(pid, card=target, request=request):
-            card.answered(S.UNDO_STARTED)
+        if self.w.runs.undo(pid, card=target, request=request, asked=card):
+            card.answered(S.UNDO_STARTED)  # 뺀 결과는 runs가 이 카드 아래에 한 줄 더 적는다
 
     def undone(self, pid: str, out) -> None:
         self._record({"event": "undo", "proposal_id": pid, "status": out.status, "count": out.deleted,
@@ -607,7 +613,7 @@ class ChatController(QObject):
                 slot = None
                 now = ""
             if slot is not None:
-                lines.append(S.SAVE_CONFIRM.format(n=slot, what=what, now=now))
+                lines.append(S.fill(S.SAVE_CONFIRM, n=slot, what=what, now=now))
         if (p.scope or {}).get("kind") == "range":
             lines.append(self._range_dropped(p))
         if slot is not None:
@@ -624,7 +630,7 @@ class ChatController(QObject):
             if key.startswith("save:"):
                 n = int(key.split(":", 1)[1])
                 if self.save(p, n):
-                    q.answered(S.SAVE_DONE.format(n=n))
+                    q.answered(S.fill(S.SAVE_DONE, n=n))
             else:
                 q.answered(S.CARD_CANCELLED)
 
@@ -643,20 +649,34 @@ class ChatController(QObject):
         params = copy.deepcopy({k: v for k, v in p.params.items() if not isinstance(v, (list, dict))})
         params = K.normalize_params(kind, params)
         try:
-            self.w.settings.save_slot(int(number), kind, S.KIND_NAMES.get(kind, kind), params)
+            self.w.settings.save_slot(int(number), kind, self._slot_name(int(number), kind), params)
         except (OSError, ValueError, KeyError) as exc:
             self._say(S.SETTINGS_SAVE_FAILED.format(error=exc))
             return False
         self.w._slots_changed()
         dropped = (p.scope or {}).get("kind") == "range"
-        self.w.show_message(S.SAVE_DONE.format(n=number))
-        self.w.chat.add_helper(S.SAVE_DONE.format(n=number))
+        self.w.show_message(S.fill(S.SAVE_DONE, n=number))
+        self.w.chat.add_helper(S.fill(S.SAVE_DONE, n=number))
         if dropped:
             self.w.chat.add_helper(self._range_dropped(p))
         self._record({"event": "save_slot", "slot": int(number), "kind": kind, "params": params,
                       "range_dropped": [p.scope.get("lo"), p.scope.get("hi")] if dropped else None,
                       "from_proposal": p.id})
         return True
+
+    def _slot_name(self, number: int, kind: str) -> str:
+        """저장할 버튼 이름: 같은 일이면 지금 이름(직접 지은 이름)을 두고, 아니면 일 이름.
+        다른 버튼과 이름이 같아지면 번호를 붙인다 ("쉬는 곳 표시 3") — 버튼 셋을 가려 볼 수 있게."""
+        try:
+            current = self.w.settings.slot(number)
+        except KeyError:
+            current = {}
+        if current.get("kind") == kind and current.get("name"):
+            return str(current["name"])
+        name = S.KIND_NAMES.get(kind, kind)
+        others = [s.get("name") or S.SLOT_DEFAULT_NAMES.get(s.get("slot"), "")
+                  for s in self.w.settings.slots if s.get("slot") != number]
+        return S.SAVE_SLOT_NAME.format(name=name, n=number) if name in others else name
 
     # ── 카드의 단추 (runs.py가 넘겨준다) ────────────────────────────────
 

@@ -605,10 +605,13 @@ def build_report(session: TestSession, link: Dict[str, Any], env: Dict[str, Any]
     return "\n".join(lines) + "\n"
 
 
-def save_report(text: str, folder: Path, now: Optional[datetime.datetime] = None) -> Path:
-    """결과 파일을 쓴다. 메모장이 인코딩을 헷갈리지 않게 BOM을 붙인 UTF-8로 저장한다."""
+def save_report(text: str, folder: Path, now: Optional[datetime.datetime] = None,
+                name: Optional[str] = None) -> Path:
+    """결과 파일을 쓴다. 메모장이 인코딩을 헷갈리지 않게 BOM을 붙인 UTF-8로 저장한다.
+
+    name: 이 이름으로 덮어쓴다 (기능 점검 뒤 점검 전에 저장한 파일을 새 결과로 바꿀 때)."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / report_name(now)
+    path = folder / (name or report_name(now))
     path.write_text(text, encoding="utf-8-sig", newline="\r\n" if os.name == "nt" else "\n")
     return path

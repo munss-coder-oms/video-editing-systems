@@ -322,6 +322,54 @@ def test_missing_second_file_is_a_warning(obs_video, cache_dir):
     assert len(p.rows) == 2
 
 
+@requires_ffmpeg
+def test_helper_test_sounds_and_single_stream_extras_are_not_the_voice(obs_video, gap_audio, cache_dir, tmp_path):
+    """옛 시험 트랙("AI 도우미 시험")의 삐 소리, 도우미의 시험·점검 파일은 목소리가 아니다 (트랙 줄에 A5가 끼지 않게).
+    목소리를 고른 녹화 옆의 소리 하나짜리 파일(음악 등)도 목소리로 보지 않고 알린다."""
+    import shutil
+
+    from engine.automation.plan import helper_own, read_snapshot
+    from engine.edits.apply import LEGACY_TEST_TRACK
+
+    tone = tmp_path / "files" / "aih_test_tone.wav"
+    probe_wav = tmp_path / "files" / "probe" / "probe_101500.wav"
+    music = tmp_path / "음악.wav"
+    for target in (tone, probe_wav, music):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(gap_audio, target)
+    fake = _resolve(str(obs_video))
+    audio = fake.info["tracks"]["audio"]
+    audio.append({"index": 5, "name": LEGACY_TEST_TRACK, "enabled": True, "locked": False, "subtype": "mono",
+                  "count": 1})
+    audio.append({"index": 6, "name": "Audio 6", "enabled": True, "locked": False, "subtype": "mono", "count": 2})
+    audio.append({"index": 7, "name": "Audio 7", "enabled": True, "locked": False, "subtype": "mono", "count": 1})
+    fake.items.append(audio_item("t", 5, TL0 + 30, 105, str(music), clip_fps="30"))  # 옛 시험 트랙 위: 무엇이든
+    fake.items.append(audio_item("u", 6, TL0 + 30, 105, str(tone), clip_fps="30"))
+    fake.items.append(audio_item("v", 6, TL0 + 300, 105, str(probe_wav), clip_fps="30"))
+    fake.items.append(audio_item("m", 7, TL0, 900, str(music), clip_fps="30"))  # 배경 음악
+    sig = _sig(obs_video)
+    p = plan_slot(_req(), _env(fake, cache_dir), VoiceMemory(), override=VoiceOverride(sig, 1))
+    assert p.tracks == [2] and p.debug["own_items"] == 3
+    assert p.warnings.get("single_file") == 1 and len(p.rows) == 2
+    snap = read_snapshot(_env(fake, cache_dir))
+    assert [it.track for it in snap.items if helper_own(snap, it)] == [5, 6, 6]
+    _no_mutations(fake)
+
+
+@requires_ffmpeg
+def test_single_stream_recording_with_a_second_mono_file_still_counts(gap_audio, cache_dir, tmp_path):
+    """소리가 하나뿐인 녹화끼리는 (따로 녹음한 마이크 등) 예전처럼 둘 다 목소리로 본다."""
+    import shutil
+
+    second = tmp_path / "마이크 2.wav"
+    shutil.copy(gap_audio, second)
+    fake = FakeResolve(timeline_info(start_frame=TL0, end_frame=TL0 + 900, fps="30", start_tc="01:00:00:00"),
+                       [audio_item("a", 1, TL0, 900, str(gap_audio), clip_fps="30"),
+                        audio_item("b", 2, TL0, 450, str(second), clip_fps="30")])
+    p = plan_slot(_req(), _env(fake, cache_dir), VoiceMemory())
+    assert isinstance(p, Proposal) and p.tracks == [1, 2] and "single_file" not in p.warnings
+
+
 # ── 개수 제한, 점 표시, 멈추기 ───────────────────────────────────────────
 
 @requires_ffmpeg
@@ -375,3 +423,23 @@ def test_cancel_stops_the_plan(obs_video, tmp_path):
                   override=VoiceOverride(_sig(obs_video), 1))
     assert list(tmp_path.glob("*.json")) == []
     _no_mutations(fake)
+
+
+def test_add_more_drops_places_already_marked():
+    """[더하기]: 이미 표시가 있는 곳(앞뒤 5프레임)은 빼고 새로 찾은 곳만. 꼬리표는 1부터 다시."""
+    from engine.edits.proposal import MARKER_SHIFT, MarkerRow, build_specs, without_near
+
+    rows = [MarkerRow(TL0 + f, TL0 + f + 30, 1.5, f"쉼 {f}", "") for f in (100, 400, 700, 1000)]
+    specs = build_specs("Pnew", rows, TL0, "Blue", point=False, note_for=lambda r: "쉼")
+    p = Proposal(id="Pnew", kind="mark_pauses", slot=1, origin="button:1", request="쉬는 곳", params={"min_s": 1.5},
+                 rows=rows, specs=specs, timeline={}, fps=FPS, tl_start=TL0, tl_end=TL0 + 1800, fingerprint="f",
+                 total_s=6.0, found=4)
+    new, dropped = without_near(p, [TL0 + 100 + MARKER_SHIFT, TL0 + 703, TL0 + 1000 + MARKER_SHIFT + 1])
+    assert dropped == 2 and [r.start - TL0 for r in new.rows] == [400, 1000]
+    assert [s.custom for s in new.specs] == ["aih:Pnew:1", "aih:Pnew:2"] and new.count == 2
+    assert new.total_s == 3.0 and new.debug["dropped_near"] == 2
+    assert p.count == 4  # 원래 제안은 그대로
+    same, none = without_near(p, [])
+    assert same is p and none == 0
+    gone, n = without_near(p, [TL0 + r for r in (100, 400, 700, 1000)])
+    assert n == 4 and gone.count == 0
