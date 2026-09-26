@@ -185,21 +185,41 @@ def _resize(qapp, w, width, height):
     settle(qapp, 0.08)
 
 
-@pytest.mark.parametrize("scale", [160, 195])
+# 윈도우 검사에서 잰 '소리 1'의 너비 (카드 제목 글꼴, 글자 130%). 여기 글꼴로는 53px쯤이다.
+WINDOWS_CHECK_SORI1_PX = 80
+
+
+def _scale_like_windows_check(w) -> int:
+    """글자 크기(%): 이 PC의 글꼴로 '소리 1'이 윈도우 검사(글자 130%)만큼 넓어지는 크기. 130보다 작지 않다."""
+    import math
+
+    from PySide6.QtWidgets import QLabel
+
+    w.apply_text_scale(130, save=False)
+    probe = QLabel("소리 1", w)
+    probe.setProperty("role", "card-title")
+    probe.ensurePolished()
+    here = probe.fontMetrics().horizontalAdvance("소리 1")
+    probe.deleteLater()
+    return max(130, math.ceil(130 * WINDOWS_CHECK_SORI1_PX / max(1, here)))
+
+
 @pytest.mark.parametrize("height", [900, 640])
-def test_every_card_fits_with_wider_letters(qapp, make_window, resolve, monkeypatch, height, scale):
+def test_every_card_fits_with_letters_as_wide_as_on_windows(qapp, make_window, resolve, monkeypatch, height):
     """글꼴이 넓어도 카드 안의 글이 잘리지 않는다: 자리가 모자라면 줄을 바꾼다.
 
     윈도우 검사의 글꼴은 여기보다 1.5배쯤 넓었다 (글자 130%에서 '소리 1' 80px, 여기는 53px).
     그래서 '6dB (기본값)'(400px 창)과 목소리 카드의 '소리 1'(380px 창)이 여기서는 맞고 윈도우에서만 잘렸다.
-    여기서는 글자를 더 키워 같은 상황을 만든다 ([−] 값 [+]와 목소리 줄의 단추가 아랫줄로 내려가야 맞는다).
+    글자를 윈도우 검사만큼 넓어지게 키워 같은 상황을 만든다 ([−] 값 [+]와 목소리 줄의 단추가 아랫줄로
+    내려가야 맞는다). 윈도우에서는 글꼴이 이미 그만큼 넓어서 130%로 한다.
     """
     from app.companion import window as window_mod
 
-    monkeypatch.setattr(window_mod, "TEXT_SCALES", tuple(window_mod.TEXT_SCALES) + (scale,))
     fake, fr = resolve
     w = make_window(fake)
     wait_until(qapp, lambda: w.connected and w.pending == 0)
+    scale = _scale_like_windows_check(w)
+    monkeypatch.setattr(window_mod, "TEXT_SCALES", tuple(window_mod.TEXT_SCALES) + (scale,))
     w.apply_text_scale(scale, save=False)
     _resize(qapp, w, 460, height)
     cards = build_all_cards(qapp, w, fr)
